@@ -17,7 +17,7 @@ def build_workflow():
     }
 
     judge = senza.create_judge(lambda ctx: "abort:done")
-    engine = senza.WorkflowEngine(workflow, provider, "gpt-4o", judge)
+    engine = senza.WorkflowEngine(workflow, provider, os.environ.get("SENZA_MODEL", "gpt-4o"), judge)
     engine.with_task_store("./.task_store")
     return engine
 

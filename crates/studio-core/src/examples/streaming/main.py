@@ -7,7 +7,7 @@ def build_harness():
     base_url = os.environ.get("OPENAI_API_BASE") or None
     provider = senza.create_openai_provider(api_key=api_key, base_url=base_url)
     return (
-        senza.HarnessBuilder(model="gpt-4o")
+        senza.HarnessBuilder(model=os.environ.get("SENZA_MODEL", "gpt-4o"))
         .provider("*", provider)
         .system_prompt("You are a creative storyteller. Write vivid, engaging stories.")
         .max_tokens(4096)

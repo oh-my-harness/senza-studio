@@ -40,6 +40,8 @@ HarnessBuilder Chain (all return self):
 - `.env(senza.create_os_env(working_dir="."))` — set execution environment
 - `.build()` — returns AgentHarness
 
+IMPORTANT: Always read model from env var: `model=os.environ.get("SENZA_MODEL", "gpt-4o")`. Do NOT hardcode model names.
+
 Tool Creation:
 ```python
 import json

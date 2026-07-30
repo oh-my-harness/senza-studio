@@ -26,7 +26,7 @@ def build_workflow():
         return edges.get(step, "abort:done")
 
     judge_obj = senza.create_judge(judge)
-    return senza.WorkflowEngine(workflow, provider, "gpt-4o", judge_obj)
+    return senza.WorkflowEngine(workflow, provider, os.environ.get("SENZA_MODEL", "gpt-4o"), judge_obj)
 
 if __name__ == "__main__":
     engine = build_workflow()

@@ -74,6 +74,7 @@ impl StudioSettings {
         if let Some(base) = self.effective_user_base_url() {
             vars.push(("OPENAI_API_BASE".into(), base.into()));
         }
+        vars.push(("SENZA_MODEL".into(), self.model.clone()));
         vars
     }
 }
@@ -179,9 +180,10 @@ mod tests {
             ..Default::default()
         };
         let vars = s.user_env_vars();
-        assert_eq!(vars.len(), 2);
+        assert_eq!(vars.len(), 3);
         assert_eq!(vars[0], ("OPENAI_API_KEY".into(), "sk-123".into()));
         assert_eq!(vars[1], ("OPENAI_API_BASE".into(), "https://api.example.com".into()));
+        assert_eq!(vars[2], ("SENZA_MODEL".into(), "gpt-4o".into()));
     }
 
     #[test]
