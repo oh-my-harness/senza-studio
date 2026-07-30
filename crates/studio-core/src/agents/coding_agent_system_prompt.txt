@@ -209,9 +209,12 @@ def _emit(event):
         with open(_events_file, "a") as f:
             f.write(json.dumps(event, ensure_ascii=False, default=str) + "\n")
     if _event_fd:
-        line = json.dumps(event, ensure_ascii=False, default=str)
-        _event_fd.write(f"{len(line)}\n{line}\n")
-        _event_fd.flush()
+        try:
+            line = json.dumps(event, ensure_ascii=False, default=str)
+            _event_fd.write(f"{len(line)}\n{line}\n")
+            _event_fd.flush()
+        except (BrokenPipeError, OSError):
+            pass
 
 def _get_input(prompt="> "):
     """Studio 模式：发 input_request 事件，从 stdin 读取。独立模式：input()。"""

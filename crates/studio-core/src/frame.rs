@@ -1,14 +1,12 @@
 //! Frame protocol parser for fd 3 event stream.
 //!
 //! Protocol: `<length>\n<json>\n`
-//! - `length` is the byte count of the JSON line (not including the trailing newline)
-//! - `json` is a single-line JSON object
+//! - `length` is the character count of the JSON line (from Python `len()`)
+//! - `json` is a single-line JSON object (newlines escaped by `json.dumps`)
 //!
-//! The parser is incremental: feed bytes as they arrive, get back complete events.
-//!
-//! Note: Python's `len(str)` counts characters, not bytes. To handle this
-//! mismatch safely, we find the next newline after the expected position
-//! rather than slicing at a fixed byte offset.
+//! The parser is **newline-delimited**: it ignores the length field and finds
+//! the next `\n` to locate JSON boundaries. This avoids the char-count vs
+//! byte-offset mismatch that occurs with multibyte UTF-8 characters.
 
 /// Incremental frame parser. Feed bytes via `feed()`, get back parsed JSON events.
 pub struct FrameParser {
@@ -20,7 +18,7 @@ impl FrameParser {
         Self { buffer: String::new() }
     }
 
-    /// Feed raw bytes. Returns all complete events parsed from the buffer.
+    /// Feed raw data. Returns all complete events parsed from the buffer.
     pub fn feed(&mut self, data: &str) -> Vec<serde_json::Value> {
         self.buffer.push_str(data);
         let mut events = vec![];
@@ -28,55 +26,36 @@ impl FrameParser {
         loop {
             let buffer = &self.buffer;
 
-            // Find the length line
+            // Find the length line (first newline)
             let newline_pos = match buffer.find('\n') {
                 Some(pos) => pos,
                 None => break,
             };
 
             let length_str = &buffer[..newline_pos];
-            let length: usize = match length_str.trim().parse() {
+            let json_start = newline_pos + 1;
+
+            // Validate length line is a number; if not, skip it as garbage
+            let _length: usize = match length_str.trim().parse() {
                 Ok(n) => n,
                 Err(_) => {
-                    self.buffer = buffer[newline_pos + 1..].to_string();
+                    self.buffer = buffer[json_start..].to_string();
                     continue;
                 }
             };
 
-            let json_start = newline_pos + 1;
-
-            // The length from Python is character count, but we need byte offset.
-            // Find the next newline after json_start to locate the end of JSON.
-            // This is more robust than slicing at a fixed byte offset.
+            // Find the JSON line ending (next newline after json_start)
             let json_end = match buffer[json_start..].find('\n') {
                 Some(pos) => json_start + pos,
-                None => {
-                    // Not enough data yet — but check if we might have enough
-                    // by trying the byte-length approach as a fallback.
-                    let byte_end = json_start + length;
-                    if buffer.len() < byte_end + 1 {
-                        break;
-                    }
-                    // The byte end might not be a char boundary; find the
-                    // nearest char boundary at or after byte_end.
-                    byte_end
-                }
+                None => break, // Not enough data yet — wait for more
             };
 
-            let total_needed = json_end + 1;
-
-            if buffer.len() < total_needed {
-                break;
-            }
-
-            // Slice safely — json_end is at a newline (char boundary)
             let json_str = &buffer[json_start..json_end];
-            match serde_json::from_str::<serde_json::Value>(json_str) {
-                Ok(val) => events.push(val),
-                Err(_) => {}
+            if let Ok(val) = serde_json::from_str::<serde_json::Value>(json_str) {
+                events.push(val);
             }
 
-            self.buffer = buffer[total_needed..].to_string();
+            self.buffer = buffer[json_end + 1..].to_string();
         }
 
         events
@@ -140,11 +119,10 @@ mod tests {
 
     #[test]
     fn test_parse_frame_with_unicode_char_count_mismatch() {
-        // Python len() counts chars (12), but the byte length is 16.
-        // The parser should handle this by finding the newline.
+        // Python len() counts chars (13), but the byte length is 15.
+        // The parser ignores the length and uses newlines — works either way.
         let mut parser = FrameParser::new();
-        let json = r#"{"text":"😊"}"#;  // 13 chars, 15 bytes
-        // Simulate Python sending char count (13)
+        let json = r#"{"text":"😊"}"#; // 13 chars, 15 bytes
         let frame = format!("13\n{}\n", json);
         let events = parser.feed(&frame);
         assert_eq!(events.len(), 1);
@@ -152,11 +130,21 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_many_frames_with_unicode() {
+        let mut parser = FrameParser::new();
+        let json = r#"{"type":"text_delta","text":"Hi there! 😊"}"#;
+        let mut frame = String::new();
+        for _ in 0..60 {
+            frame.push_str(&format!("{}\n{}\n", json.len(), json));
+        }
+        let events = parser.feed(&frame);
+        assert_eq!(events.len(), 60);
+    }
+
+    #[test]
     fn test_malformed_length_line_returns_empty() {
         let mut parser = FrameParser::new();
         let events = parser.feed("not a number\n{}\n");
-        // Malformed length line is skipped, then the JSON line is treated as
-        // a new length line (which also fails), so no events.
         assert!(events.is_empty());
     }
 }

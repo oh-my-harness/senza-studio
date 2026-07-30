@@ -1,7 +1,7 @@
 use axum::extract::State;
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Json};
-use axum::routing::{get, put};
+use axum::routing::get;
 use axum::Router;
 use serde_json::Value;
 use std::sync::Arc;

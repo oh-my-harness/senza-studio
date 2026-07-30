@@ -17,9 +17,12 @@ if _studio_mode:
 
 def _emit(event):
     if _event_fd:
-        line = json.dumps(event, ensure_ascii=False, default=str)
-        _event_fd.write(f"{len(line)}\n{line}\n")
-        _event_fd.flush()
+        try:
+            line = json.dumps(event, ensure_ascii=False, default=str)
+            _event_fd.write(f"{len(line)}\n{line}\n")
+            _event_fd.flush()
+        except (BrokenPipeError, OSError):
+            pass
 
 def _get_input(prompt="> "):
     if _studio_mode:

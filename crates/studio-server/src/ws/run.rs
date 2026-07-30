@@ -19,7 +19,7 @@ async fn ws_run_handler(
     ws.on_upgrade(move |socket| handle_run_ws(socket, state, project_id))
 }
 
-async fn handle_run_ws(mut socket: WebSocket, state: Arc<AppState>, project_id: String) {
+async fn handle_run_ws(mut socket: WebSocket, state: Arc<AppState>, _project_id: String) {
     use axum::extract::ws::Message;
 
     // Wait for the client to tell us which run_id to subscribe to.
