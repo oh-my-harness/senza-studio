@@ -27,6 +27,8 @@ pub struct RunConfig {
     pub main_script: PathBuf,
     pub run_id: String,
     pub timeout_secs: u64,
+    /// Extra environment variables injected into the subprocess (e.g. API keys).
+    pub env_vars: Vec<(String, String)>,
 }
 
 /// Handle to a running (or completed) user agent subprocess.
@@ -152,7 +154,6 @@ impl Runner {
             }
             let fd3_read_fd = fds[0];
             let fd3_write_fd = fds[1];
-
             let mut cmd = Command::new("python3");
             cmd.arg(&config.main_script)
                 .current_dir(&config.project_dir)
@@ -161,6 +162,9 @@ impl Runner {
                 .stdin(Stdio::piped())
                 .stdout(Stdio::piped())
                 .stderr(Stdio::piped());
+            for (key, value) in &config.env_vars {
+                cmd.env(key, value);
+            }
             // Set fd 3 as the write end of the pipe using pre_exec
             unsafe {
                 cmd.pre_exec(move || {
@@ -421,12 +425,7 @@ print("hello from agent")
         );
 
         let runner = Runner::new();
-        let config = RunConfig {
-            project_dir: tmp.path().to_path_buf(),
-            main_script: script,
-            run_id: "test-run-1".into(),
-            timeout_secs: 10,
-        };
+        let config = RunConfig { project_dir: tmp.path().to_path_buf(), main_script: script, run_id: "test-run-1".into(), timeout_secs: 10, env_vars: vec![] };
 
         let handle = runner.start(config).await.unwrap();
         let exit_status = handle.wait().await.unwrap();
@@ -459,12 +458,7 @@ print("hello from agent")
         );
 
         let runner = Runner::new();
-        let config = RunConfig {
-            project_dir: tmp.path().to_path_buf(),
-            main_script: script,
-            run_id: "test-run-2".into(),
-            timeout_secs: 10,
-        };
+        let config = RunConfig { project_dir: tmp.path().to_path_buf(), main_script: script, run_id: "test-run-2".into(), timeout_secs: 10, env_vars: vec![] };
 
         let handle = runner.start(config).await.unwrap();
         handle.wait().await.unwrap();
@@ -485,12 +479,7 @@ print(f"echo: {line}")
         );
 
         let runner = Runner::new();
-        let config = RunConfig {
-            project_dir: tmp.path().to_path_buf(),
-            main_script: script,
-            run_id: "test-run-3".into(),
-            timeout_secs: 10,
-        };
+        let config = RunConfig { project_dir: tmp.path().to_path_buf(), main_script: script, run_id: "test-run-3".into(), timeout_secs: 10, env_vars: vec![] };
 
         let handle = runner.start(config).await.unwrap();
         runner.send_input("test-run-3", "hello stdin").await.unwrap();
@@ -514,12 +503,7 @@ while True:
         );
 
         let runner = Runner::new();
-        let config = RunConfig {
-            project_dir: tmp.path().to_path_buf(),
-            main_script: script,
-            run_id: "test-run-4".into(),
-            timeout_secs: 30,
-        };
+        let config = RunConfig { project_dir: tmp.path().to_path_buf(), main_script: script, run_id: "test-run-4".into(), timeout_secs: 30, env_vars: vec![] };
 
         let handle = runner.start(config).await.unwrap();
         tokio::time::sleep(std::time::Duration::from_millis(500)).await;
@@ -543,12 +527,7 @@ print("env OK")
         );
 
         let runner = Runner::new();
-        let config = RunConfig {
-            project_dir: tmp.path().to_path_buf(),
-            main_script: script,
-            run_id: "test-run-6".into(),
-            timeout_secs: 10,
-        };
+        let config = RunConfig { project_dir: tmp.path().to_path_buf(), main_script: script, run_id: "test-run-6".into(), timeout_secs: 10, env_vars: vec![] };
 
         let handle = runner.start(config).await.unwrap();
         let exit = handle.wait().await.unwrap();

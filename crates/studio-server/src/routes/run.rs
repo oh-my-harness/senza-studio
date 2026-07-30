@@ -52,6 +52,7 @@ async fn run_project(
         main_script,
         run_id: run_id.clone(),
         timeout_secs: 300,
+        env_vars: state.user_env_vars.clone(),
     };
 
     state
