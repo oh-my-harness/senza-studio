@@ -80,6 +80,7 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
   conversationStatus: 'idle',
   currentSpec: null,
   sendMessage: (text) => {
+    if (!get().project) return;
     get().addConversationMessage({ role: 'user', content: text });
     set({ conversationStatus: 'streaming' });
   },
