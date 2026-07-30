@@ -19,31 +19,77 @@ async fn ws_run_handler(
     ws.on_upgrade(move |socket| handle_run_ws(socket, state, project_id))
 }
 
-async fn handle_run_ws(mut socket: WebSocket, state: Arc<AppState>, _project_id: String) {
+async fn handle_run_ws(mut socket: WebSocket, state: Arc<AppState>, project_id: String) {
     use axum::extract::ws::Message;
 
-    // The run WebSocket polls for events from active runs and pushes to the client.
-    // The client sends user input as JSON: {"run_id": "...", "input": "..."}
+    // Wait for the client to tell us which run_id to subscribe to.
+    // The first message must be {"run_id": "..."}.
+    let run_id = loop {
+        match socket.recv().await {
+            Some(Ok(Message::Text(text))) => {
+                if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&text) {
+                    if let Some(id) = parsed.get("run_id").and_then(|v| v.as_str()) {
+                        break id.to_string();
+                    }
+                }
+            }
+            _ => return,
+        }
+    };
+
+    // Get the run handle and subscribe to its broadcast channel.
+    let handle = match state.runner.get_run(&run_id).await {
+        Some(h) => h,
+        None => {
+            let _ = socket.send(Message::Text(
+                serde_json::json!({"type": "error", "message": format!("run {run_id} not found")})
+                    .to_string().into(),
+            )).await;
+            return;
+        }
+    };
+
+    let mut rx = handle.subscribe();
+
+    // Send settled event so the frontend knows streaming is live.
+    let _ = socket.send(Message::Text(
+        serde_json::json!({"type": "settled"}).to_string().into()
+    )).await;
+
     loop {
         tokio::select! {
             msg = socket.recv() => {
                 match msg {
                     Some(Ok(Message::Text(text))) => {
                         if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&text) {
-                            if let (Some(run_id), Some(input)) = (
+                            if let (Some(msg_run_id), Some(input)) = (
                                 parsed.get("run_id").and_then(|v| v.as_str()),
                                 parsed.get("input").and_then(|v| v.as_str()),
                             ) {
-                                let _ = state.runner.send_input(run_id, input).await;
+                                let _ = state.runner.send_input(msg_run_id, input).await;
                             }
                         }
                     }
                     _ => break,
                 }
             }
-            _ = tokio::time::sleep(std::time::Duration::from_millis(100)) => {
-                // Poll for events — in production this would use broadcast channels.
-                // For MVP, the client can also fetch events via REST.
+            event = rx.recv() => {
+                match event {
+                    Ok(ev) => {
+                        let json = serde_json::to_string(&ev).unwrap_or_default();
+                        if socket.send(Message::Text(json.into())).await.is_err() {
+                            break;
+                        }
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                    Err(_) => {
+                        // Channel closed — process exited
+                        let _ = socket.send(Message::Text(
+                            serde_json::json!({"type": "done"}).to_string().into()
+                        )).await;
+                        break;
+                    }
+                }
             }
         }
     }

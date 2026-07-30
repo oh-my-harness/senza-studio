@@ -9,7 +9,7 @@
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use tokio::io::{AsyncReadExt, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, Command};
 use std::process::Stdio;
 use tokio::sync::Mutex;
@@ -39,9 +39,14 @@ pub struct RunHandle {
     stdout: Arc<Mutex<String>>,
     stderr: Arc<Mutex<String>>,
     trace_dir: PathBuf,
+    event_tx: tokio::sync::broadcast::Sender<serde_json::Value>,
 }
 
 impl RunHandle {
+    /// Subscribe to live events (stdout lines + fd3 events) via broadcast channel.
+    pub fn subscribe(&self) -> tokio::sync::broadcast::Receiver<serde_json::Value> {
+        self.event_tx.subscribe()
+    }
     /// Wait for the subprocess to complete (with timeout).
     pub async fn wait(&self) -> StudioResult<std::process::ExitStatus> {
         let mut child_guard = self.child.lock().await;
@@ -205,28 +210,64 @@ impl Runner {
             let events = Arc::new(Mutex::new(Vec::new()));
             let stdout_buf = Arc::new(Mutex::new(String::new()));
             let stderr_buf = Arc::new(Mutex::new(String::new()));
+            let (event_tx, _) = tokio::sync::broadcast::channel::<serde_json::Value>(256);
 
-            // Spawn stdout reader
+            // Spawn stdout reader — line-by-line, pushes text_delta events
             let stdout_clone = stdout_buf.clone();
+            let stdout_tx = event_tx.clone();
             tokio::spawn(async move {
                 let mut reader = BufReader::new(stdout);
                 let mut buf = String::new();
-                reader.read_to_string(&mut buf).await.ok();
-                *stdout_clone.lock().await = buf;
+                loop {
+                    buf.clear();
+                    match reader.read_line(&mut buf).await {
+                        Ok(0) => break,
+                        Ok(_) => {
+                            let line = buf.trim_end_matches('\n');
+                            if !line.is_empty() {
+                                let _ = stdout_tx.send(serde_json::json!({
+                                    "type": "text_delta",
+                                    "text": line
+                                }));
+                            }
+                            let mut s = stdout_clone.lock().await;
+                            s.push_str(&buf);
+                        }
+                        Err(_) => break,
+                    }
+                }
             });
 
             // Spawn stderr reader
             let stderr_clone = stderr_buf.clone();
+            let stderr_tx = event_tx.clone();
             tokio::spawn(async move {
                 let mut reader = BufReader::new(stderr);
                 let mut buf = String::new();
-                reader.read_to_string(&mut buf).await.ok();
-                *stderr_clone.lock().await = buf;
+                loop {
+                    buf.clear();
+                    match reader.read_line(&mut buf).await {
+                        Ok(0) => break,
+                        Ok(_) => {
+                            let line = buf.trim_end_matches('\n');
+                            if !line.is_empty() {
+                                let _ = stderr_tx.send(serde_json::json!({
+                                    "type": "stderr",
+                                    "text": line
+                                }));
+                            }
+                            let mut s = stderr_clone.lock().await;
+                            s.push_str(&buf);
+                        }
+                        Err(_) => break,
+                    }
+                }
             });
 
             // Spawn fd 3 reader
             let fd3_events = events.clone();
             let trace_dir_clone = trace_dir.clone();
+            let fd3_tx = event_tx.clone();
             tokio::spawn(async move {
                 let mut file = tokio::fs::File::from_std(fd3_read);
                 let mut parser = FrameParser::new();
@@ -243,6 +284,7 @@ impl Runner {
                             let mut events_lock = fd3_events.lock().await;
                             for event in &parsed {
                                 events_lock.push(event.clone());
+                                let _ = fd3_tx.send(event.clone());
                                 let line =
                                     serde_json::to_string(event).unwrap_or_default();
                                 if let Ok(mut f) = tokio::fs::OpenOptions::new()
@@ -269,6 +311,7 @@ impl Runner {
                 stdout: stdout_buf,
                 stderr: stderr_buf,
                 trace_dir,
+                event_tx,
             });
 
             self.runs.lock().await.insert(

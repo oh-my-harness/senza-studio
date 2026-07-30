@@ -10,11 +10,24 @@ export function useRunWs() {
 
   useEffect(() => {
     if (!project || !activeRunId) return;
+
     const ws = new WsClient(
       `ws://${location.host}/ws/run/${project.id}`,
       onRunEvent,
     );
     wsRef.current = ws;
+
+    // Send run_id as first message so the server knows which run to subscribe to.
+    // Wait for the socket to be open.
+    const sendRunId = () => {
+      if (ws.isOpen()) {
+        ws.sendJson({ run_id: activeRunId });
+      } else {
+        setTimeout(sendRunId, 50);
+      }
+    };
+    setTimeout(sendRunId, 50);
+
     return () => ws.close();
   }, [project, activeRunId, onRunEvent]);
 

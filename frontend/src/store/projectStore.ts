@@ -173,10 +173,23 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
       set((s) => {
         const msgs = [...s.runMessages];
         const last = msgs[msgs.length - 1];
+        // Each stdout line is a separate text_delta — append with newline
         if (last && last.role === 'assistant') {
-          msgs[msgs.length - 1] = { ...last, content: last.content + text };
+          msgs[msgs.length - 1] = { ...last, content: last.content + text + '\n' };
         } else {
-          msgs.push({ role: 'assistant', content: text });
+          msgs.push({ role: 'assistant', content: text + '\n' });
+        }
+        return { runMessages: msgs };
+      });
+    } else if (type === 'stderr') {
+      const text = (event as any).text || '';
+      set((s) => {
+        const msgs = [...s.runMessages];
+        const last = msgs[msgs.length - 1];
+        if (last && last.role === 'assistant') {
+          msgs[msgs.length - 1] = { ...last, content: last.content + text + '\n' };
+        } else {
+          msgs.push({ role: 'assistant', content: text + '\n' });
         }
         return { runMessages: msgs };
       });
@@ -212,6 +225,8 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
       set({ runStatus: 'waiting_input' });
     } else if (type === 'failed' || type === 'cancelled') {
       set({ runStatus: 'failed' });
+    } else if (type === 'done') {
+      set({ runStatus: 'completed' });
     }
   },
 

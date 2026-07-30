@@ -29,6 +29,10 @@ export class WsClient {
     }
   }
 
+  isOpen() {
+    return this.ws?.readyState === WebSocket.OPEN;
+  }
+
   close() {
     this.ws?.close();
     this.ws = null;
