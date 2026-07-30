@@ -13,7 +13,7 @@ use llm_harness_agent::AgentHarness;
 use llm_harness_loop::{LlmClient, OpenAIProvider};
 use llm_harness_runtime::builder::HarnessBuilder;
 use llm_harness_runtime_sandbox_os::OsEnv;
-use llm_harness_types::{DataBlock, Tool, ToolFailure, ToolResult};
+use llm_harness_types::{DataBlock, ThinkingLevel, Tool, ToolFailure, ToolResult};
 
 use crate::agents::studio_tool::StudioTool;
 use crate::error::StudioResult;
@@ -186,7 +186,7 @@ pub async fn build_converser(
         .provider("*", client)
         .system_prompt(Some(SYSTEM_PROMPT.into()))
         .max_tokens(8192)
-        .auto_compact(true)
+        .thinking_level(ThinkingLevel::High)
         .tool(Arc::new(emit_spec) as Arc<dyn Tool>)
         .tool(Arc::new(emit_spec_diff) as Arc<dyn Tool>)
         .tool(Arc::new(read_project) as Arc<dyn Tool>)
