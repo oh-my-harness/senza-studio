@@ -1,7 +1,7 @@
 import { useState } from 'react';
 import { useProjectStore } from '../../store/projectStore';
 import { api } from '../../lib/api';
-import { FolderOpen, Play, Code2, Library, Settings } from 'lucide-react';
+import { FolderOpen, Play, Code2, Library, Settings, MessageSquare } from 'lucide-react';
 import { ExamplePicker } from '../examples/ExamplePicker';
 import { SettingsPage } from '../settings/SettingsPage';
 
@@ -29,6 +29,9 @@ export function TopBar() {
         <Library size={16} /> Examples
       </button>
       <div className="flex-1" />
+      <button onClick={() => setActiveTab('converse')} className="text-sm flex items-center gap-1 hover:bg-accent px-2 py-1 rounded">
+        <MessageSquare size={16} /> Chat
+      </button>
       <button onClick={() => setActiveTab('code')} className="text-sm flex items-center gap-1 hover:bg-accent px-2 py-1 rounded">
         <Code2 size={16} /> Code
       </button>
