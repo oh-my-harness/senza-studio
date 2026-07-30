@@ -1,33 +1,34 @@
 import { useEffect, useState } from 'react';
 import { useProjectStore } from '../../store/projectStore';
 import { ExternalLink, Radio, Bug, Square } from 'lucide-react';
-import type { StudioEvent } from '../../types';
+import type { StudioEvent, RunStatus } from '../../types';
 
 export function RunTab() {
   const project = useProjectStore((s) => s.project);
-  const runStatus = useProjectStore((s) => s.runStatus);
-  const stopRun = useProjectStore((s) => s.stopRun);
   const [debugEvents, setDebugEvents] = useState<StudioEvent[]>([]);
+  const [agentStatus, setAgentStatus] = useState<RunStatus>('idle');
 
   // Listen for events from agent window via BroadcastChannel
   useEffect(() => {
     const ch = new BroadcastChannel('senza-studio-run');
     ch.onmessage = (e: MessageEvent<{ runId: string; event: StudioEvent }>) => {
-      setDebugEvents((prev) => [...prev, e.data.event]);
+      const ev = e.data.event;
+      setDebugEvents((prev) => [...prev, ev]);
+      // Derive status from event type
+      if (ev.type === 'input_request' || ev.type === 'paused') {
+        setAgentStatus('waiting_input');
+      } else if (ev.type === 'failed' || ev.type === 'cancelled' || ev.type === 'error') {
+        setAgentStatus('failed');
+      } else if (ev.type === 'done') {
+        setAgentStatus('completed');
+      } else if (ev.type === 'settled') {
+        setAgentStatus('running');
+      }
     };
     return () => ch.close();
   }, []);
 
   const openAgentWindow = () => {
-    if (!project) return;
-    window.open(
-      `/agent-window/${project.id}`,
-      'agent-window',
-      'width=600,height=800,scrollbars=yes',
-    );
-  };
-
-  const openStandaloneWindow = () => {
     if (!project) return;
     window.open(
       `/agent-window/${project.id}`,
@@ -44,20 +45,18 @@ export function RunTab() {
       <div className="flex gap-2 p-2 border-b shrink-0">
         <button
           onClick={openAgentWindow}
-          disabled={runStatus === 'running'}
-          className="px-3 py-1 text-sm bg-primary text-primary-foreground rounded flex items-center gap-1 disabled:opacity-50"
+          className="px-3 py-1 text-sm bg-primary text-primary-foreground rounded flex items-center gap-1"
         >
-          <Play size={16} /> Start & Open
+          <ExternalLink size={16} /> Open Agent Window
         </button>
-        <button
-          onClick={openStandaloneWindow}
-          className="px-3 py-1 text-sm border rounded flex items-center gap-1"
-        >
-          <ExternalLink size={16} /> Open Window
-        </button>
-        {(runStatus === 'running' || runStatus === 'waiting_input') && (
+        {(agentStatus === 'running' || agentStatus === 'waiting_input') && (
           <button
-            onClick={() => stopRun()}
+            onClick={() => {
+              const ch = new BroadcastChannel('senza-studio-run');
+              ch.postMessage({ command: 'stop' });
+              ch.close();
+              setAgentStatus('idle');
+            }}
             className="px-3 py-1 text-sm bg-destructive text-destructive-foreground rounded flex items-center gap-1"
           >
             <Square size={16} /> Stop
@@ -65,14 +64,14 @@ export function RunTab() {
         )}
         <div className="flex-1" />
         <span className={`text-xs px-2 py-1 rounded flex items-center gap-1 ${
-          runStatus === 'running' ? 'bg-blue-100 text-blue-700' :
-          runStatus === 'waiting_input' ? 'bg-yellow-100 text-yellow-700' :
-          runStatus === 'completed' ? 'bg-green-100 text-green-700' :
-          runStatus === 'failed' ? 'bg-red-100 text-red-700' :
+          agentStatus === 'running' ? 'bg-blue-100 text-blue-700' :
+          agentStatus === 'waiting_input' ? 'bg-yellow-100 text-yellow-700' :
+          agentStatus === 'completed' ? 'bg-green-100 text-green-700' :
+          agentStatus === 'failed' ? 'bg-red-100 text-red-700' :
           'bg-muted text-muted-foreground'
         }`}>
           <Radio size={12} />
-          {runStatus}
+          {agentStatus}
         </span>
       </div>
 

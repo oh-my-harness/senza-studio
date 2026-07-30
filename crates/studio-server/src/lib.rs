@@ -25,7 +25,12 @@ pub fn build_app(state: Arc<AppState>) -> Router {
     Router::new()
         .route("/api/health", axum::routing::get(|| async { "ok" }))
         .merge(api_routes)
-        .fallback_service(tower_http::services::ServeDir::new(static_dir))
+        .fallback_service(
+            tower_http::services::ServeDir::new(&static_dir)
+                .fallback(tower_http::services::ServeFile::new(
+                    std::path::Path::new(&static_dir).join("index.html"),
+                )),
+        )
 }
 
 pub async fn run_server(state: Arc<AppState>, addr: &str) -> anyhow::Result<()> {

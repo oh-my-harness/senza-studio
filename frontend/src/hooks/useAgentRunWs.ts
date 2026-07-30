@@ -7,7 +7,19 @@ export function useAgentRunWs() {
   const projectId = useAgentStore((s) => s.projectId);
   const activeRunId = useAgentStore((s) => s.activeRunId);
   const onRunEvent = useAgentStore((s) => s.onRunEvent);
+  const stopRun = useAgentStore((s) => s.stopRun);
   const wsRef = useRef<WsClient | null>(null);
+
+  // Listen for stop commands from Studio window
+  useEffect(() => {
+    const ch = new BroadcastChannel('senza-studio-run');
+    ch.onmessage = (e: MessageEvent<{ command?: string }>) => {
+      if (e.data?.command === 'stop') {
+        stopRun();
+      }
+    };
+    return () => ch.close();
+  }, [stopRun]);
 
   useEffect(() => {
     if (!projectId || !activeRunId) return;
