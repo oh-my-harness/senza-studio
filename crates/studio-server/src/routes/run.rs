@@ -49,7 +49,7 @@ async fn run_project(
     let run_id = uuid::Uuid::now_v7().to_string();
     let config = RunConfig {
         project_dir: project.dir.clone(),
-        main_script,
+        main_script: std::path::PathBuf::from("main.py"),
         run_id: run_id.clone(),
         timeout_secs: 300,
         env_vars: state.settings().user_env_vars(),
