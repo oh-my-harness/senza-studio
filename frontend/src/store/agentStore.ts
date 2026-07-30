@@ -110,15 +110,44 @@ export const useAgentStore = create<AgentWindowState>((set, get) => ({
         }
         return { runMessages: msgs };
       });
-    } else if (type === 'text_delta') {
+    } else if (type === 'message_update') {
+      // MessageUpdate carries accumulated partial text — replace, don't append
       const text = strField(event, 'text');
       set((s) => {
         const msgs = [...s.runMessages];
         const last = msgs[msgs.length - 1];
         if (last && last.role === 'assistant') {
-          msgs[msgs.length - 1] = { ...last, content: last.content + text };
+          msgs[msgs.length - 1] = { ...last, content: text };
         } else {
           msgs.push({ role: 'assistant', content: text });
+        }
+        return { runMessages: msgs };
+      });
+    } else if (type === 'message_end') {
+      // MessageEnd carries final text — replace
+      const text = strField(event, 'text');
+      if (text) {
+        set((s) => {
+          const msgs = [...s.runMessages];
+          const last = msgs[msgs.length - 1];
+          if (last && last.role === 'assistant') {
+            msgs[msgs.length - 1] = { ...last, content: text };
+          } else {
+            msgs.push({ role: 'assistant', content: text });
+          }
+          return { runMessages: msgs };
+        });
+      }
+    } else if (type === 'stdout') {
+      // Debug output from stdout — append to last assistant message
+      const text = strField(event, 'text');
+      set((s) => {
+        const msgs = [...s.runMessages];
+        const last = msgs[msgs.length - 1];
+        if (last && last.role === 'assistant') {
+          msgs[msgs.length - 1] = { ...last, content: last.content + text + '\n' };
+        } else {
+          msgs.push({ role: 'assistant', content: text + '\n' });
         }
         return { runMessages: msgs };
       });

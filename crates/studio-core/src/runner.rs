@@ -212,7 +212,8 @@ impl Runner {
             let stderr_buf = Arc::new(Mutex::new(String::new()));
             let (event_tx, _) = tokio::sync::broadcast::channel::<serde_json::Value>(256);
 
-            // Spawn stdout reader — line-by-line, pushes text_delta events
+            // Spawn stdout reader — line-by-line, pushes stdout events (not text_delta)
+            // In Studio mode, agent text comes via fd 3 events; stdout is debug output.
             let stdout_clone = stdout_buf.clone();
             let stdout_tx = event_tx.clone();
             tokio::spawn(async move {
@@ -226,7 +227,7 @@ impl Runner {
                             let line = buf.trim_end_matches('\n');
                             if !line.is_empty() {
                                 let _ = stdout_tx.send(serde_json::json!({
-                                    "type": "text_delta",
+                                    "type": "stdout",
                                     "text": line
                                 }));
                             }

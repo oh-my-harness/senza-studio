@@ -105,12 +105,13 @@ export function RunTab() {
                   ev.type === 'error' || ev.type === 'failed' ? 'bg-red-500' :
                   ev.type === 'settled' || ev.type === 'done' ? 'bg-green-500' :
                   ev.type === 'input_request' || ev.type === 'paused' ? 'bg-yellow-500' :
-                  ev.type === 'text_delta' ? 'bg-blue-400' :
+                  ev.type === 'text_delta' || ev.type === 'message_update' || ev.type === 'message_end' ? 'bg-blue-400' :
                   ev.type === 'thinking_delta' ? 'bg-purple-400' :
+                  ev.type === 'stdout' ? 'bg-cyan-400' :
                   'bg-gray-400'
                 }`} />
                 <span className="text-muted-foreground">{ev.type}</span>
-                {ev.type === 'text_delta' || ev.type === 'stderr' ? (
+                {ev.type === 'text_delta' || ev.type === 'stderr' || ev.type === 'stdout' || ev.type === 'message_update' || ev.type === 'message_end' ? (
                   <span className="ml-2 text-foreground truncate">
                     {String(ev.text ?? '').slice(0, 120)}
                   </span>
