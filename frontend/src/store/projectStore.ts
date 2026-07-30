@@ -125,7 +125,11 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
     const project = get().project;
     const runId = get().activeRunId;
     if (!project || !runId) return;
-    await api.stopRun(project.id, runId);
+    try {
+      await api.stopRun(project.id, runId);
+    } catch (e) {
+      console.error('stop failed:', e);
+    }
     set({ runStatus: 'idle' });
   },
   addRunEvent: (event) =>

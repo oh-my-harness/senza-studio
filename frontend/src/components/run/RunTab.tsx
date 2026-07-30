@@ -50,9 +50,9 @@ export function RunTab() {
         >
           Standalone
         </button>
-        {runStatus === 'running' && (
+        {(runStatus === 'running' || runStatus === 'waiting_input') && (
           <button
-            onClick={stopRun}
+            onClick={() => stopRun()}
             className="px-3 py-1 text-sm bg-destructive text-destructive-foreground rounded flex items-center gap-1"
           >
             <Square size={16} /> Stop
