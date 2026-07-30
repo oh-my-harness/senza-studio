@@ -32,7 +32,8 @@ pub async fn build_coding_agent(
     project_dir: &Path,
     allowed_files: Option<Vec<String>>,
 ) -> StudioResult<AgentHarness> {
-    let mut provider_builder = OpenAIProvider::builder(api_key);
+    let mut provider_builder = OpenAIProvider::builder(api_key)
+        .parse_reasoning_content(true);
     if let Some(url) = base_url {
         provider_builder = provider_builder.base_url(url);
     }

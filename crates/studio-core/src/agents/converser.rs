@@ -28,7 +28,8 @@ pub async fn build_converser(
     base_url: Option<&str>,
     project_dir: &Path,
 ) -> StudioResult<AgentHarness> {
-    let mut provider_builder = OpenAIProvider::builder(api_key);
+    let mut provider_builder = OpenAIProvider::builder(api_key)
+        .parse_reasoning_content(true);
     if let Some(url) = base_url {
         provider_builder = provider_builder.base_url(url);
     }
