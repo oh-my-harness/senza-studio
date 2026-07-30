@@ -55,7 +55,7 @@ async fn handle_converse_ws(mut socket: WebSocket, state: Arc<AppState>, project
     )
     .await
     {
-        Ok(h) => h,
+        Ok(h) => Arc::new(h),
         Err(e) => {
             let _ = socket
                 .send(Message::Text(
@@ -76,12 +76,13 @@ async fn handle_converse_ws(mut socket: WebSocket, state: Arc<AppState>, project
                 match msg {
                     Some(Ok(Message::Text(text))) => {
                         let text_str = text.to_string();
-                        if let Err(e) = harness.prompt(&text_str).await {
-                            let _ = socket.send(Message::Text(
-                                serde_json::json!({"type": "error", "message": e.to_string()})
-                                    .to_string().into()
-                            )).await;
-                        }
+                        // Spawn prompt as a separate task so events flow concurrently
+                        let h = harness.clone();
+                        tokio::spawn(async move {
+                            if let Err(e) = h.prompt(&text_str).await {
+                                tracing::error!("converser prompt error: {e}");
+                            }
+                        });
                     }
                     _ => break,
                 }
@@ -94,6 +95,7 @@ async fn handle_converse_ws(mut socket: WebSocket, state: Arc<AppState>, project
                             break;
                         }
                     }
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
                     Err(_) => break,
                 }
             }
