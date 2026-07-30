@@ -15,8 +15,8 @@ pub struct GenerateResponse {
 
 pub fn router() -> Router<Arc<AppState>> {
     Router::new()
-        .route("/api/projects/:id/generate", post(generate))
-        .route("/api/projects/:id/generate-diff", post(generate_diff))
+        .route("/api/projects/{id}/generate", post(generate))
+        .route("/api/projects/{id}/generate-diff", post(generate_diff))
 }
 
 async fn generate(

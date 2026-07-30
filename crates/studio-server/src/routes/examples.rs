@@ -19,7 +19,7 @@ pub struct ExampleResponse {
 pub fn router() -> Router<Arc<AppState>> {
     Router::new()
         .route("/api/examples", get(list_examples))
-        .route("/api/examples/:id", get(get_example))
+        .route("/api/examples/{id}", get(get_example))
         .route("/api/projects/from-example", post(create_from_example))
 }
 

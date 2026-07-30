@@ -24,9 +24,9 @@ pub struct ProjectResponse {
 pub fn router() -> Router<Arc<AppState>> {
     Router::new()
         .route("/api/projects", post(create_project).get(list_projects))
-        .route("/api/projects/:id", get(get_project))
-        .route("/api/projects/:id/files", get(list_files))
-        .route("/api/projects/:id/files/*path", get(get_file).put(put_file))
+        .route("/api/projects/{id}", get(get_project))
+        .route("/api/projects/{id}/files", get(list_files))
+        .route("/api/projects/{id}/files/{*path}", get(get_file).put(put_file))
 }
 
 async fn create_project(

@@ -20,7 +20,7 @@ pub struct ConverseResponse {
 }
 
 pub fn router() -> Router<Arc<AppState>> {
-    Router::new().route("/api/projects/:id/converse", post(converse))
+    Router::new().route("/api/projects/{id}/converse", post(converse))
 }
 
 async fn converse(

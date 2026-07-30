@@ -8,7 +8,7 @@ use std::sync::Arc;
 use crate::state::AppState;
 
 pub fn router() -> Router<Arc<AppState>> {
-    Router::new().route("/ws/run/:project_id", get(ws_run_handler))
+    Router::new().route("/ws/run/{project_id}", get(ws_run_handler))
 }
 
 async fn ws_run_handler(

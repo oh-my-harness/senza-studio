@@ -8,7 +8,7 @@ use std::sync::Arc;
 use crate::state::AppState;
 
 pub fn router() -> Router<Arc<AppState>> {
-    Router::new().route("/ws/converse/:project_id", get(ws_converse_handler))
+    Router::new().route("/ws/converse/{project_id}", get(ws_converse_handler))
 }
 
 async fn ws_converse_handler(

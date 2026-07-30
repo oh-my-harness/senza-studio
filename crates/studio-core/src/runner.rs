@@ -50,7 +50,14 @@ impl RunHandle {
         let timeout = std::time::Duration::from_secs(300);
 
         match tokio::time::timeout(timeout, child.wait()).await {
-            Ok(Ok(status)) => Ok(status),
+            Ok(Ok(status)) => {
+                // Give the stdout/stderr reader tasks time to finish flushing
+                // after the child exits — they read until EOF, which arrives
+                // when the process closes, but the task may not have run yet.
+                tokio::task::yield_now().await;
+                tokio::task::yield_now().await;
+                Ok(status)
+            }
             Ok(Err(e)) => Err(StudioError::Subprocess(format!("wait error: {e}"))),
             Err(_) => {
                 let _ = child.kill().await;

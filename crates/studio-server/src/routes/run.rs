@@ -22,10 +22,10 @@ pub struct RunResponse {
 
 pub fn router() -> Router<Arc<AppState>> {
     Router::new()
-        .route("/api/projects/:id/run", post(run_project))
-        .route("/api/projects/:id/runs", get(list_runs))
-        .route("/api/projects/:id/runs/:run_id/events", get(get_run_events))
-        .route("/api/projects/:id/runs/:run_id/stop", post(stop_run))
+        .route("/api/projects/{id}/run", post(run_project))
+        .route("/api/projects/{id}/runs", get(list_runs))
+        .route("/api/projects/{id}/runs/{run_id}/events", get(get_run_events))
+        .route("/api/projects/{id}/runs/{run_id}/stop", post(stop_run))
 }
 
 async fn run_project(
