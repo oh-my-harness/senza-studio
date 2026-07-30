@@ -1,4 +1,6 @@
 import { memo, useState } from 'react';
+import ReactMarkdown from 'react-markdown';
+import remarkGfm from 'remark-gfm';
 import { ChevronDown } from 'lucide-react';
 import type { Message } from '../../types';
 
@@ -9,7 +11,7 @@ function _MessageBubble({ role, content, thinking }: { role: Message['role']; co
   return (
     <div className={`flex ${isUser ? 'justify-end' : 'justify-start'}`}>
       <div
-        className={`max-w-[80%] rounded-lg border px-3 py-2 ${
+        className={`max-w-[85%] rounded-lg border px-3 py-2 ${
           isUser
             ? 'bg-primary text-primary-foreground border-primary'
             : 'bg-card text-card-foreground border-border'
@@ -32,7 +34,7 @@ function _MessageBubble({ role, content, thinking }: { role: Message['role']; co
               Thinking
             </div>
             {thinkingExpanded && (
-              <div className="mt-1 border-l-2 border-border pl-3 text-xs whitespace-pre-wrap">
+              <div className="mt-1 border-l-2 border-border pl-3 text-xs whitespace-pre-wrap overflow-hidden">
                 {thinking}
               </div>
             )}
@@ -46,9 +48,13 @@ function _MessageBubble({ role, content, thinking }: { role: Message['role']; co
 
         {/* Answer */}
         {content && (
-          <pre className="whitespace-pre-wrap text-sm font-sans leading-relaxed">
-            {content}
-          </pre>
+          <div className="text-sm leading-relaxed markdown-body">
+            {isUser ? (
+              <p className="whitespace-pre-wrap">{content}</p>
+            ) : (
+              <ReactMarkdown remarkPlugins={[remarkGfm]}>{content}</ReactMarkdown>
+            )}
+          </div>
         )}
       </div>
     </div>
