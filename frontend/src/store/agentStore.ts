@@ -110,15 +110,33 @@ export const useAgentStore = create<AgentWindowState>((set, get) => ({
         }
         return { runMessages: msgs };
       });
+    } else if (type === 'text_delta') {
+      // True incremental text — append
+      const text = strField(event, 'text');
+      if (text) {
+        set((s) => {
+          const msgs = [...s.runMessages];
+          const last = msgs[msgs.length - 1];
+          if (last && last.role === 'assistant') {
+            msgs[msgs.length - 1] = { ...last, content: last.content + text };
+          } else {
+            msgs.push({ role: 'assistant', content: text });
+          }
+          return { runMessages: msgs };
+        });
+      }
     } else if (type === 'message_update') {
-      // MessageUpdate carries accumulated partial text — replace, don't append
+      // MessageUpdate carries accumulated partial text — only replace if longer
       const text = strField(event, 'text');
       set((s) => {
         const msgs = [...s.runMessages];
         const last = msgs[msgs.length - 1];
         if (last && last.role === 'assistant') {
-          msgs[msgs.length - 1] = { ...last, content: text };
-        } else {
+          // Only replace if the accumulated text is longer than what we have
+          if (text.length > last.content.length) {
+            msgs[msgs.length - 1] = { ...last, content: text };
+          }
+        } else if (text) {
           msgs.push({ role: 'assistant', content: text });
         }
         return { runMessages: msgs };
