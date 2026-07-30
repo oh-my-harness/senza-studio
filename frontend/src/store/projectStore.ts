@@ -153,7 +153,7 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
   onConverseEvent: (event) => {
     const type = event.type;
     if (type === 'thinking_delta') {
-      const text = strField(event, 'text');
+      const text = strField(event, 'thinking');
       set((s) => {
         const conv = [...s.conversation];
         const last = conv[conv.length - 1];
@@ -186,7 +186,7 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
     const type = event.type;
 
     if (type === 'thinking_delta') {
-      const text = strField(event, 'text');
+      const text = strField(event, 'thinking');
       set((s) => {
         const msgs = [...s.runMessages];
         const last = msgs[msgs.length - 1];

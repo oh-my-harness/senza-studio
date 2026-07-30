@@ -117,7 +117,7 @@ export function RunTab() {
                   </span>
                 ) : ev.type === 'thinking_delta' ? (
                   <span className="ml-2 text-purple-500 truncate">
-                    {String(ev.text ?? '').slice(0, 120)}
+                    {String(ev.thinking ?? '').slice(0, 120)}
                   </span>
                 ) : (
                   <span className="ml-2 text-muted-foreground truncate">
