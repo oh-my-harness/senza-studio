@@ -17,6 +17,7 @@ use tokio::sync::Mutex;
 use crate::error::{StudioError, StudioResult};
 use crate::frame::FrameParser;
 #[cfg(unix)]
+#[allow(unused_imports)]
 use std::os::unix::process::CommandExt;
 
 /// Configuration for a run.

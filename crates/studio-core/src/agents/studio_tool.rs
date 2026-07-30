@@ -7,7 +7,6 @@
 //! The handler uses HRTB (higher-ranked trait bounds) to work with any
 //! lifetime of ToolContext.
 
-use std::sync::Arc;
 use futures::future::BoxFuture;
 use llm_harness_types::{Tool, ToolContext, ToolFailure, ToolResult};
 use serde_json::Value;

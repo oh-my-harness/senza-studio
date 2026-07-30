@@ -1,6 +1,7 @@
 [workspace]
 members = [
     "crates/studio-core",
+    "crates/studio-server",
 ]
 resolver = "2"
 
@@ -30,4 +31,7 @@ uuid        = { version = "1", features = ["v4", "v7"] }
 tempfile    = "3"
 tracing     = "0.1"
 libc        = "0.2"
+axum        = { version = "0.8", features = ["ws"] }
+tower-http  = { version = "0.6", features = ["fs", "cors"] }
+tracing-subscriber = { version = "0.3", features = ["fmt"] }
 nix          = { version = "0.29", features = ["signal", "process"] }
