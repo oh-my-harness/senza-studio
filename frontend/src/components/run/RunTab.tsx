@@ -1,12 +1,11 @@
 import { useEffect, useState } from 'react';
 import { useProjectStore } from '../../store/projectStore';
-import { Play, Square, ExternalLink, Radio, Bug } from 'lucide-react';
+import { ExternalLink, Radio, Bug, Square } from 'lucide-react';
 import type { StudioEvent } from '../../types';
 
 export function RunTab() {
   const project = useProjectStore((s) => s.project);
   const runStatus = useProjectStore((s) => s.runStatus);
-  const startRun = useProjectStore((s) => s.startRun);
   const stopRun = useProjectStore((s) => s.stopRun);
   const [debugEvents, setDebugEvents] = useState<StudioEvent[]>([]);
 
@@ -19,10 +18,8 @@ export function RunTab() {
     return () => ch.close();
   }, []);
 
-  const openAgentWindow = async () => {
+  const openAgentWindow = () => {
     if (!project) return;
-    // Start the run first, then open the window
-    await startRun('studio');
     window.open(
       `/agent-window/${project.id}`,
       'agent-window',

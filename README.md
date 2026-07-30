@@ -2,7 +2,9 @@
 
 A web application that helps developers customize AI agents via natural-language conversation, an example library, or direct code editing.
 
-Built on [`llm-harness-runtime`](https://github.com/oh-my-harness/llm-harness-runtime) (Rust) and [Senza](https://github.com/oh-my-harness/senza) (Python SDK). The output artifact is a runnable Senza Python project — not a config file.
+Built on [`llm-harness-runtime`](https://github.com/oh-my-harness/llm-harness-runtime) (Rust, private) and [Senza](https://github.com/oh-my-harness/senza) (Python SDK). The output artifact is a runnable Senza Python project — not a config file.
+
+> **Note:** `llm-harness-runtime` is currently a private dependency. You need access to it to build Senza Studio from source.
 
 ## Prerequisites
 
