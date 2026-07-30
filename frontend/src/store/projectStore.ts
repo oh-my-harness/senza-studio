@@ -154,29 +154,48 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
     const type = event.type;
     if (type === 'thinking_delta') {
       const text = strField(event, 'thinking');
-      set((s) => {
-        const conv = [...s.conversation];
-        const last = conv[conv.length - 1];
-        if (last && last.role === 'assistant') {
-          conv[conv.length - 1] = { ...last, thinking: (last.thinking || '') + text };
-        } else {
-          conv.push({ role: 'assistant', content: '', thinking: text });
-        }
-        return { conversation: conv };
-      });
+      if (text) {
+        set((s) => {
+          const conv = [...s.conversation];
+          const last = conv[conv.length - 1];
+          if (last && last.role === 'assistant') {
+            conv[conv.length - 1] = { ...last, thinking: (last.thinking || '') + text };
+          } else {
+            conv.push({ role: 'assistant', content: '', thinking: text });
+          }
+          return { conversation: conv };
+        });
+      }
+    } else if (type === 'tool_call_start' || type === 'tool_execution_start') {
+      const name = strField(event, 'name') || strField(event, 'tool_name');
+      if (name) {
+        set((s) => ({
+          conversation: [...s.conversation, { role: 'assistant', content: `🔧 ${name}(...)` }],
+        }));
+      }
     } else if (type === 'text_delta') {
       const text = strField(event, 'text');
-      set((s) => {
-        const conv = [...s.conversation];
-        const last = conv[conv.length - 1];
-        if (last && last.role === 'assistant') {
-          conv[conv.length - 1] = { ...last, content: last.content + text };
-        } else {
-          conv.push({ role: 'assistant', content: text });
-        }
-        return { conversation: conv };
-      });
+      if (text) {
+        set((s) => {
+          const conv = [...s.conversation];
+          const last = conv[conv.length - 1];
+          if (last && last.role === 'assistant') {
+            conv[conv.length - 1] = { ...last, content: last.content + text };
+          } else {
+            conv.push({ role: 'assistant', content: text });
+          }
+          return { conversation: conv };
+        });
+      }
+    } else if (type === 'error') {
+      const msg = strField(event, 'message');
+      set((s) => ({
+        conversationStatus: 'idle',
+        conversation: [...s.conversation, { role: 'assistant', content: `Error: ${msg}` }],
+      }));
     } else if (type === 'settled') {
+      set({ conversationStatus: 'idle' });
+    } else if (type === 'aborted') {
       set({ conversationStatus: 'idle' });
     }
   },
