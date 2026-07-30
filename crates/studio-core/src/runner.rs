@@ -16,6 +16,8 @@ use tokio::sync::Mutex;
 
 use crate::error::{StudioError, StudioResult};
 use crate::frame::FrameParser;
+#[cfg(unix)]
+use std::os::unix::process::CommandExt;
 
 /// Configuration for a run.
 #[derive(Debug, Clone)]
@@ -152,16 +154,13 @@ impl Runner {
                 .stdout(Stdio::piped())
                 .stderr(Stdio::piped());
             // Set fd 3 as the write end of the pipe using pre_exec
-            use std::os::unix::process::CommandExt;
             unsafe {
                 cmd.pre_exec(move || {
-                    unsafe {
-                        if libc::dup2(fd3_write_fd, 3) == -1 {
-                            return Err(std::io::Error::last_os_error());
-                        }
-                        libc::close(fd3_write_fd);
-                        libc::close(fd3_read_fd);
+                    if libc::dup2(fd3_write_fd, 3) == -1 {
+                        return Err(std::io::Error::last_os_error());
                     }
+                    libc::close(fd3_write_fd);
+                    libc::close(fd3_read_fd);
                     Ok(())
                 });
             }

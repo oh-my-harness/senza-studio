@@ -7,6 +7,7 @@
 //! - Python subprocess runner with fd 3 frame protocol
 //! - Built-in example library
 
+pub mod agents;
 pub mod error;
 pub mod events;
 pub mod examples;
