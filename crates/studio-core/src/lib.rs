@@ -8,6 +8,9 @@
 //! - Built-in example library
 
 pub mod error;
-pub mod project;
-pub mod spec;
+pub mod events;
 pub mod examples;
+pub mod frame;
+pub mod project;
+pub mod runner;
+pub mod spec;
