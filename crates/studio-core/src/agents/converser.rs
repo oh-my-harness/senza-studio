@@ -187,6 +187,7 @@ pub async fn build_converser(
         .system_prompt(Some(SYSTEM_PROMPT.into()))
         .max_tokens(8192)
         .thinking_level(ThinkingLevel::High)
+        .auto_compact(true)
         .tool(Arc::new(emit_spec) as Arc<dyn Tool>)
         .tool(Arc::new(emit_spec_diff) as Arc<dyn Tool>)
         .tool(Arc::new(read_project) as Arc<dyn Tool>)

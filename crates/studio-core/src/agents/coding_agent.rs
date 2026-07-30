@@ -233,6 +233,7 @@ pub async fn build_coding_agent(
         .system_prompt(Some(SYSTEM_PROMPT.into()))
         .max_tokens(8192)
         .thinking_level(ThinkingLevel::High)
+        .auto_compact(true)
         .tool(Arc::new(write_file) as Arc<dyn Tool>)
         .tool(Arc::new(read_file) as Arc<dyn Tool>)
         .tool(Arc::new(read_spec) as Arc<dyn Tool>)
