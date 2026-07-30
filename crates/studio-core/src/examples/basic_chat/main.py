@@ -1,19 +1,18 @@
 """Basic chat agent — minimal Senza usage."""
 import os
 import senza
-from senza import HarnessBuilder, create_openai_provider
 
 def build_harness():
     api_key = os.environ.get("OPENAI_API_KEY", "")
     base_url = os.environ.get("OPENAI_API_BASE") or None
-    provider = create_openai_provider(api_key=api_key, base_url=base_url)
+    provider = senza.create_openai_provider(api_key=api_key, base_url=base_url)
     return (
-        HarnessBuilder(model="gpt-4o")
-        .provider("gpt-*", provider)
+        senza.HarnessBuilder(model="gpt-4o")
+        .provider("*", provider)
         .system_prompt("You are a helpful assistant.")
         .max_tokens(4096)
         .auto_compact(True)
-        .build(env=senza.OsEnv(working_dir="."))
+        .build()
     )
 
 if __name__ == "__main__":

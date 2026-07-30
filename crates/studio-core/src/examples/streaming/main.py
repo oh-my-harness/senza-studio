@@ -1,20 +1,18 @@
-"""Streaming agent — dual-thread events() + prompt() pattern."""
+"""Streaming agent — demonstrates event iteration with prompt_and_collect."""
 import os
-import threading
 import senza
-from senza import HarnessBuilder, create_openai_provider
 
 def build_harness():
     api_key = os.environ.get("OPENAI_API_KEY", "")
     base_url = os.environ.get("OPENAI_API_BASE") or None
-    provider = create_openai_provider(api_key=api_key, base_url=base_url)
+    provider = senza.create_openai_provider(api_key=api_key, base_url=base_url)
     return (
-        HarnessBuilder(model="gpt-4o")
-        .provider("gpt-*", provider)
-        .system_prompt("You are a helpful assistant.")
+        senza.HarnessBuilder(model="gpt-4o")
+        .provider("*", provider)
+        .system_prompt("You are a creative storyteller. Write vivid, engaging stories.")
         .max_tokens(4096)
         .auto_compact(True)
-        .build(env=senza.OsEnv(working_dir="."))
+        .build()
     )
 
 if __name__ == "__main__":
@@ -27,17 +25,13 @@ if __name__ == "__main__":
             break
         if not user_input:
             break
-        done = threading.Event()
-        def stream_events():
-            for event in harness.events(timeout_ms=30000):
-                t = event["type"]
-                if t == "text_delta":
-                    print(event.get("text", ""), end="", flush=True)
-                elif t in ("settled", "aborted", "error"):
-                    done.set()
-                    break
-        t = threading.Thread(target=stream_events)
-        t.start()
-        harness.prompt(user_input)
-        t.join(timeout=30)
+        events = harness.prompt_and_collect(user_input, timeout_ms=30000)
+        for event in events:
+            t = event["type"]
+            if t == "text_delta":
+                print(event.get("text", ""), end="", flush=True)
+            elif t == "tool_call_start":
+                print(f"\n[tool] {event.get('name', '?')}")
+            elif t == "error":
+                print(f"\n[error] {event.get('message', '')}")
         print()

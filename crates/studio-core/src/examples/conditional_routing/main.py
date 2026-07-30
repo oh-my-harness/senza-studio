@@ -1,27 +1,37 @@
-"""Conditional routing workflow — branches based on structured output."""
+"""Conditional routing workflow — branches based on classification."""
 import os
 import senza
-from senza import HarnessBuilder, create_openai_provider, WorkflowEngine, Workflow
 
 def build_workflow():
     api_key = os.environ.get("OPENAI_API_KEY", "")
     base_url = os.environ.get("OPENAI_API_BASE") or None
-    provider = create_openai_provider(api_key=api_key, base_url=base_url)
+    provider = senza.create_openai_provider(api_key=api_key, base_url=base_url)
 
-    workflow = Workflow(
-        entry_step="classify",
-        steps=[
-            {"kind": "llm", "id": "classify", "name": "Classify", "prompt": "Classify the input as 'ok' or 'fail'. Respond with JSON: {\"status\": \"ok\"|\"fail\"}", "allowed_tools": [], "structured": True},
-            {"kind": "llm", "id": "fix", "name": "Fix", "prompt": "The input was classified as 'fail'. Fix the issue.", "allowed_tools": []},
-            {"kind": "llm", "id": "report", "name": "Report", "prompt": "Report the final result.", "allowed_tools": []},
+    workflow = {
+        "entry_step": "classify",
+        "steps": [
+            {"id": "classify", "name": "Classify", "prompt": "Classify the input as 'ok' or 'fail'. Respond with JSON: {\"status\": \"ok\"|\"fail\"}", "allowed_tools": [], "structured": True},
+            {"id": "handle_ok", "name": "Handle OK", "prompt": "Process the OK case: {user_input}", "allowed_tools": []},
+            {"id": "handle_fail", "name": "Handle Fail", "prompt": "Process the failure case: {user_input}", "allowed_tools": []},
         ],
-        edges=[
-            {"from": "classify", "to": "fix", "condition": {"op": "eq", "pointer": "/status", "value": "fail"}},
-            {"from": "classify", "to": "report", "condition": {"op": "eq", "pointer": "/status", "value": "ok"}},
-            {"from": "fix", "to": "report"},
+        "edges": [
+            {"from": "classify", "to": "handle_ok", "condition": {"op": "eq", "pointer": "$.status", "value": "ok"}},
+            {"from": "classify", "to": "handle_fail", "condition": {"op": "eq", "pointer": "$.status", "value": "fail"}},
         ],
-    )
-    return WorkflowEngine(workflow, config={"provider": provider, "model": "gpt-4o"})
+    }
+
+    def judge(ctx):
+        step = ctx.get("step_id", "")
+        if step == "classify":
+            result = ctx.get("result", {})
+            status = result.get("structured", {}).get("status", "")
+            if status == "ok":
+                return "to:handle_ok"
+            return "to:handle_fail"
+        return "abort:done"
+
+    judge_obj = senza.create_judge(judge)
+    return senza.WorkflowEngine(workflow, provider, "gpt-4o", judge_obj)
 
 if __name__ == "__main__":
     engine = build_workflow()
@@ -33,7 +43,9 @@ if __name__ == "__main__":
             print(f"\n[step] {event.get('step_name', '?')}")
         elif t == "step_finished":
             result = event.get("result", {})
-            print(f"  structured: {result.get('structured', {})}")
+            output = result.get("output", "")
+            if output:
+                print(f"  -> {output.strip()[:200]}")
         elif t in ("failed", "cancelled"):
             break
     engine.run()

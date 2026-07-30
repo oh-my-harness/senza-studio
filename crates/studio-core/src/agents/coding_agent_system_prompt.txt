@@ -37,7 +37,8 @@ HarnessBuilder Chain (all return self):
 - `.auto_compact(bool)` — enable auto compaction
 - `.pricing(pricing_provider)` — for cost tracking
 - `.budget(max_cost, exceeded_hook)` — budget limit
-- `.build(env=senza.OsEnv(working_dir="."))` — returns AgentHarness
+- `.env(senza.create_os_env(working_dir="."))` — set execution environment
+- `.build()` — returns AgentHarness
 
 Tool Creation:
 ```python
@@ -80,25 +81,32 @@ Event Types:
 
 ```python
 import senza
-from senza import Workflow, WorkflowEngine
 
-workflow = Workflow(
-    entry_step="step1",
-    steps=[
-        {"kind": "llm", "id": "step1", "name": "Step 1", "prompt": "Do something", "allowed_tools": []},
-        {"kind": "llm", "id": "step2", "name": "Step 2", "prompt": "Do next", "allowed_tools": []},
+workflow = {
+    "entry_step": "step1",
+    "steps": [
+        {"id": "step1", "name": "Step 1", "prompt": "Do something", "allowed_tools": []},
+        {"id": "step2", "name": "Step 2", "prompt": "Do next", "allowed_tools": []},
     ],
-    edges=[
+    "edges": [
         {"from": "step1", "to": "step2"},
     ],
-)
-engine = WorkflowEngine(workflow, config={"provider": provider, "model": "gpt-4o"})
+}
+
+def judge(ctx):
+    step = ctx.get("step_id", "")
+    if step == "step1":
+        return "to:step2"
+    return "abort:done"
+
+judge_obj = senza.create_judge(judge)
+engine = senza.WorkflowEngine(workflow, provider, "gpt-4o", judge_obj)
 ```
 
 Step types:
-- LLM step: {"kind": "llm", "id", "name", "prompt", "allowed_tools", "structured": bool}
-- Executor step: {"kind": "executor", "id", "name", "executor_name", "config"}
-- Terminal step: {"kind": "terminal", "id", "name", "exit_code", "message"}
+- LLM step: {"id", "name", "prompt", "allowed_tools", "structured": bool}
+- Executor step: {"id", "name", "executor_name", "config"}
+- Terminal step: {"id", "name", "exit_code", "message"}
 
 Edge types:
 - Sequential: {"from", "to"}
@@ -107,8 +115,8 @@ Edge types:
   - pointer: JSON pointer into step_finished.result.structured
 
 Judge:
-- "linear" strategy: auto-routes by edge order
-- "declarative" strategy: edge conditions drive routing (no judge callback needed)
+- Create with `senza.create_judge(callback)` where callback receives ctx dict, returns "to:step_id" or "abort:done"
+- For conditional routing, inspect ctx["result"]["structured"] in the judge callback
 
 WorkflowEngine Methods:
 - `.run()` -> execute workflow (blocking)

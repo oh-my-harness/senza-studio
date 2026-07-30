@@ -1,49 +1,54 @@
-"""Human-in-the-loop workflow — pause/resume pattern."""
+"""Human-in-the-loop workflow — pause for external review events."""
 import os
+import threading
+import time
 import senza
-from senza import HarnessBuilder, create_openai_provider, WorkflowEngine, Workflow, create_event_channel
 
 def build_workflow():
     api_key = os.environ.get("OPENAI_API_KEY", "")
     base_url = os.environ.get("OPENAI_API_BASE") or None
-    provider = create_openai_provider(api_key=api_key, base_url=base_url)
+    provider = senza.create_openai_provider(api_key=api_key, base_url=base_url)
 
-    review_tool, wait_for_review = create_event_channel("human_review")
+    handle, wait_tool = senza.create_event_channel("review-task")
 
-    workflow = Workflow(
-        entry_step="draft",
-        steps=[
-            {"kind": "llm", "id": "draft", "name": "Draft", "prompt": "Draft a response to: {user_input}", "allowed_tools": []},
-            {"kind": "llm", "id": "review", "name": "Review", "prompt": "The draft needs review. Call request_review to get human feedback.", "allowed_tools": ["request_review"]},
-            {"kind": "llm", "id": "finalize", "name": "Finalize", "prompt": "Finalize the response based on review feedback.", "allowed_tools": []},
+    workflow = {
+        "entry_step": "draft",
+        "steps": [
+            {
+                "id": "draft",
+                "name": "Draft",
+                "prompt": "Draft a short email about a project delay. Then call wait_for_external_event to get approval.",
+                "allowed_tools": ["wait_for_external_event"],
+            },
         ],
-        edges=[
-            {"from": "draft", "to": "review"},
-            {"from": "review", "to": "finalize"},
-        ],
-    )
-    engine = WorkflowEngine(workflow, config={"provider": provider, "model": "gpt-4o"})
-    engine.with_tool(review_tool)
-    return engine, wait_for_review
+        "edges": [],
+    }
+
+    judge = senza.create_judge(lambda ctx: "abort:done")
+    engine = senza.WorkflowEngine(workflow, provider, "gpt-4o", judge)
+    engine.with_external_tool(wait_tool)
+    return engine, handle
 
 if __name__ == "__main__":
-    engine, wait_for_review = build_workflow()
+    engine, handle = build_workflow()
     task_input = input("Submit task: ")
     engine.set_context_variable("user_input", task_input)
-    import threading
-    done = threading.Event()
-    def stream():
-        for event in engine.subscribe(timeout_ms=120000):
-            t = event.get("type", "")
-            if t == "paused":
-                print(f"\n[paused] {event.get('reason', '')}")
-                feedback = input("Review feedback: ")
-                engine.set_context_variable("review_feedback", feedback)
-                engine.resume()
-            elif t in ("failed", "cancelled"):
-                done.set()
-                break
-    t = threading.Thread(target=stream)
-    t.start()
+
+    def human_review():
+        time.sleep(3)
+        print("\n[Human reviewer: approving...]")
+        handle.submit("approved", {"feedback": "Looks good!"})
+
+    review_thread = threading.Thread(target=human_review)
+    review_thread.start()
+
+    for event in engine.subscribe(timeout_ms=120000):
+        t = event.get("type", "")
+        if t == "paused":
+            print(f"\n[paused] {event.get('reason', '')}")
+        elif t in ("failed", "cancelled"):
+            break
+
     engine.run()
-    t.join(timeout=120)
+    review_thread.join()
+    print(f"\nFinal state: {engine.state()}")
