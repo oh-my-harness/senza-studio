@@ -3,3 +3,8 @@
 /frontend/dist
 *.env
 .DS_Store
+
+# Local runtime data — never commit
+settings.json
+projects/
+CLAUDE.md

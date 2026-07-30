@@ -40,9 +40,24 @@ export const useAgentStore = create<AgentWindowState>((set, get) => ({
     const projectId = get().projectId;
     if (!projectId) return;
     const res = await api.runProject(projectId, mode);
+    // Determine run view from spec
+    let runView: RunView = 'chat';
+    try {
+      const files = await api.listFiles(projectId);
+      if (files.includes('spec.json')) {
+        const specText = await api.readFile(projectId, 'spec.json');
+        const spec = JSON.parse(specText) as { agent_type?: string };
+        if (spec.agent_type?.includes('workflow')) {
+          runView = 'execution';
+        }
+      }
+    } catch {
+      // Default to chat view
+    }
     set({
       activeRunId: res.run_id,
       runStatus: 'running',
+      runView,
       runMessages: [],
       liveEvents: [],
       stepStates: {},
