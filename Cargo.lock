@@ -1487,6 +1487,7 @@ dependencies = [
  "llm-harness-runtime",
  "llm-harness-runtime-sandbox-os",
  "llm-harness-types",
+ "parking_lot",
  "serde",
  "serde_json",
  "studio-core",

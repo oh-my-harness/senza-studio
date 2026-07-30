@@ -21,27 +21,7 @@ oh-my-harness/
 
 ## Quick Start
 
-### 1. Configure environment
-
-```bash
-cp .env.example .env
-# Edit .env and fill in your API keys
-```
-
-Key variables:
-
-| Variable | Required | Default | Purpose |
-|---|---|---|---|
-| `STUDIO_API_KEY` | Yes | — | LLM API key for meta-agents (Converser + Coding Agent) |
-| `STUDIO_MODEL` | No | `gpt-4o` | Model for meta-agents |
-| `STUDIO_BASE_URL` | No | — | Override LLM base URL (leave empty for default) |
-| `OPENAI_API_KEY` | No | — | API key passed to generated user agent projects |
-| `OPENAI_API_BASE` | No | — | Base URL for generated user agent projects |
-| `SENZA_STUDIO_ADDR` | No | `0.0.0.0:3000` | Server listen address |
-| `SENZA_STUDIO_PROJECTS_DIR` | No | `./projects` | Where project files are stored |
-| `SENZA_STUDIO_FRONTEND_DIR` | No | `./frontend/dist` | Path to built frontend assets |
-
-### 2. Build the frontend
+### 1. Build the frontend
 
 ```bash
 cd frontend
@@ -50,20 +30,33 @@ npm run build
 cd ..
 ```
 
-For development with hot reload (runs Vite dev server on port 5173, proxies API to :3000):
-
-```bash
-cd frontend
-npm run dev
-```
-
-### 3. Build and run the server
+### 2. Build and run the server
 
 ```bash
 cargo run --bin studio-server
 ```
 
 Open `http://localhost:3000` in your browser.
+
+### 3. Configure API keys
+
+On first launch, click **Settings** in the top bar to configure:
+
+- **Meta-Agent API Key** — LLM API key for the Converser and Coding Agent
+- **Model** — e.g. `gpt-4o`
+- **Base URL** — optional, for OpenAI-compatible providers
+- **User Agent API Key / Base URL** — optional, for generated projects (falls back to meta-agent key)
+
+Settings are persisted to `settings.json` (configurable via `SENZA_STUDIO_SETTINGS_PATH`).
+
+Server-level environment variables (all optional):
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `SENZA_STUDIO_ADDR` | `0.0.0.0:3000` | Server listen address |
+| `SENZA_STUDIO_PROJECTS_DIR` | `./projects` | Where project files are stored |
+| `SENZA_STUDIO_SETTINGS_PATH` | `./settings.json` | Path to settings JSON file |
+| `SENZA_STUDIO_FRONTEND_DIR` | `./frontend/dist` | Path to built frontend assets |
 
 ### Development mode (two terminals)
 
@@ -83,11 +76,12 @@ Open `http://localhost:5173` (Vite proxies `/api` and `/ws` to the Rust server o
 
 ## Usage
 
-1. **Create a project** — Click "New" or pick an example from the library.
-2. **Converse** — Describe the agent you want. The Converser meta-agent refines your description into a spec.
-3. **Generate** — The Coding meta-agent writes Senza Python code from the spec.
-4. **Run** — Run the generated agent in Studio mode (with live event streaming) or standalone mode (`python main.py`).
-5. **Inspect** — View the DAG (for workflow agents), trace events, and edit code directly in the Code tab.
+1. **Configure** — Open Settings, enter your API key and model.
+2. **Create a project** — Click "New" or pick an example from the library.
+3. **Converse** — Describe the agent you want. The Converser meta-agent refines your description into a spec.
+4. **Generate** — The Coding meta-agent writes Senza Python code from the spec.
+5. **Run** — Run the generated agent in Studio mode (with live event streaming) or standalone mode (`python main.py`).
+6. **Inspect** — View the DAG (for workflow agents), trace events, and edit code directly in the Code tab.
 
 ## Development
 
@@ -124,15 +118,16 @@ senza-studio/
 │   │   │   └── coding_agent.rs   # Spec → Python code
 │   │   └── examples/         # 8 built-in example projects
 │   └── studio-server/        # HTTP server
-│       ├── routes/           # REST API (projects, examples, converse, generate, run)
+│       ├── routes/           # REST API (projects, examples, converse, generate, run, settings)
 │       ├── ws/               # WebSocket handlers (converse, run)
+│       ├── settings_store.rs # Persistent JSON settings (API keys, model, base URL)
 │       └── state.rs          # AppState
 ├── frontend/                 # React + Vite + Tailwind
 │   └── src/
 │       ├── store/            # Zustand state
 │       ├── hooks/            # WebSocket hooks
 │       ├── lib/              # API client + WS client
-│       └── components/       # 5 tabs: Converse, Run, Code, DAG, Trace
+│       └── components/       # 5 tabs + Settings page
 └── docs/
     └── design.md             # Full design document (v5.3)
 ```

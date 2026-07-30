@@ -36,10 +36,21 @@ async fn handle_converse_ws(mut socket: WebSocket, state: Arc<AppState>, project
         }
     };
 
+    let settings = state.settings();
+    if settings.api_key.is_empty() {
+        let _ = socket
+            .send(Message::Text(
+                serde_json::json!({"type": "error", "message": "API key not configured. Open Settings to set it."})
+                    .to_string()
+                    .into(),
+            ))
+            .await;
+        return;
+    }
     let harness = match studio_core::agents::build_converser(
-        &state.studio_api_key,
-        &state.studio_model,
-        state.studio_base_url.as_deref(),
+        &settings.api_key,
+        &settings.model,
+        settings.meta_base_url(),
         &project.dir,
     )
     .await

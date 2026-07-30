@@ -1,4 +1,5 @@
 pub mod routes;
+pub mod settings_store;
 pub mod state;
 pub mod ws;
 
@@ -16,6 +17,7 @@ pub fn build_app(state: Arc<AppState>) -> Router {
         .merge(routes::generate::router())
         .merge(routes::run::router())
         .merge(routes::examples::router())
+        .merge(routes::settings::router())
         .merge(ws::converse::router())
         .merge(ws::run::router())
         .with_state(state);

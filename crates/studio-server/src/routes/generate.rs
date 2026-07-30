@@ -19,18 +19,27 @@ pub fn router() -> Router<Arc<AppState>> {
         .route("/api/projects/{id}/generate-diff", post(generate_diff))
 }
 
+fn require_api_key(state: &AppState) -> Result<crate::settings_store::StudioSettings, (StatusCode, String)> {
+    let settings = state.settings();
+    if settings.api_key.is_empty() {
+        return Err((StatusCode::BAD_REQUEST, "API key not configured. Open Settings to set it.".into()));
+    }
+    Ok(settings)
+}
+
 async fn generate(
     State(state): State<Arc<AppState>>,
     Path(project_id): Path<String>,
 ) -> Result<Json<GenerateResponse>, (StatusCode, String)> {
+    let settings = require_api_key(&state)?;
     let project = state
         .project_manager
         .open_project(&project_id)
         .map_err(|e| (StatusCode::NOT_FOUND, e.to_string()))?;
     let harness = studio_core::agents::build_coding_agent(
-        &state.studio_api_key,
-        &state.studio_model,
-        state.studio_base_url.as_deref(),
+        &settings.api_key,
+        &settings.model,
+        settings.meta_base_url(),
         &project.dir,
         None,
     )
@@ -60,6 +69,7 @@ async fn generate_diff(
     Path(project_id): Path<String>,
     Json(req): Json<GenerateDiffRequest>,
 ) -> Result<Json<GenerateResponse>, (StatusCode, String)> {
+    let settings = require_api_key(&state)?;
     let project = state
         .project_manager
         .open_project(&project_id)
@@ -73,9 +83,9 @@ async fn generate_diff(
     let affected_files = studio_core::agents::compute_affected_files(&req.diff, &spec);
 
     let harness = studio_core::agents::build_coding_agent(
-        &state.studio_api_key,
-        &state.studio_model,
-        state.studio_base_url.as_deref(),
+        &settings.api_key,
+        &settings.model,
+        settings.meta_base_url(),
         &project.dir,
         Some(affected_files.clone()),
     )

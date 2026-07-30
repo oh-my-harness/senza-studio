@@ -12,13 +12,9 @@ use tower::ServiceExt;
 
 fn test_state() -> Arc<AppState> {
     let tmp = tempfile::tempdir().unwrap();
-    let path = tmp.keep();
-    Arc::new(AppState::new(
-        path,
-        "test-key".into(),
-        "gpt-4o".into(),
-        None,
-    ))
+    let settings_path = tmp.path().join("settings.json");
+    let projects_root = tmp.keep();
+    Arc::new(AppState::new(projects_root, settings_path))
 }
 
 #[tokio::test]
@@ -223,4 +219,49 @@ async fn test_write_and_read_file() {
     let body = axum::body::to_bytes(res.into_body(), 1024 * 1024).await.unwrap();
     let content = String::from_utf8(body.to_vec()).unwrap();
     assert!(content.contains("print('hello world')"));
+}
+
+#[tokio::test]
+async fn test_settings_get_and_save() {
+    let state = test_state();
+    let app = build_app(state);
+
+    // Get default settings
+    let res = app
+        .clone()
+        .oneshot(Request::builder().uri("/api/settings").body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(res.into_body(), 1024 * 1024).await.unwrap();
+    let settings: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(settings["api_key"], "");
+    assert_eq!(settings["model"], "gpt-4o");
+
+    // Save settings
+    let save_req = r#"{"api_key":"sk-test-123","base_url":"https://api.example.com"}"#;
+    let res = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("PUT")
+                .uri("/api/settings")
+                .header("Content-Type", "application/json")
+                .body(Body::from(save_req))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+
+    // Verify saved
+    let res = app
+        .oneshot(Request::builder().uri("/api/settings").body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    let body = axum::body::to_bytes(res.into_body(), 1024 * 1024).await.unwrap();
+    let settings: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(settings["api_key"], "sk-test-123");
+    assert_eq!(settings["base_url"], "https://api.example.com");
+    assert_eq!(settings["model"], "gpt-4o"); // default preserved
 }
