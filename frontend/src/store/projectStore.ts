@@ -151,7 +151,19 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
 
   onConverseEvent: (event) => {
     const type = event.type;
-    if (type === 'text_delta') {
+    if (type === 'thinking_delta') {
+      const text = (event as any).text || '';
+      set((s) => {
+        const conv = [...s.conversation];
+        const last = conv[conv.length - 1];
+        if (last && last.role === 'assistant') {
+          conv[conv.length - 1] = { ...last, thinking: (last.thinking || '') + text };
+        } else {
+          conv.push({ role: 'assistant', content: '', thinking: text });
+        }
+        return { conversation: conv };
+      });
+    } else if (type === 'text_delta') {
       const text = (event as any).text || '';
       set((s) => {
         const conv = [...s.conversation];
@@ -172,6 +184,19 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
     get().addRunEvent(event);
     const type = event.type;
 
+    if (type === 'thinking_delta') {
+      const text = (event as any).text || '';
+      set((s) => {
+        const msgs = [...s.runMessages];
+        const last = msgs[msgs.length - 1];
+        if (last && last.role === 'assistant') {
+          msgs[msgs.length - 1] = { ...last, thinking: (last.thinking || '') + text };
+        } else {
+          msgs.push({ role: 'assistant', content: '', thinking: text });
+        }
+        return { runMessages: msgs };
+      });
+    } else
     if (type === 'text_delta') {
       const text = (event as any).text || '';
       set((s) => {

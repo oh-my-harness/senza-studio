@@ -31,7 +31,7 @@ export function ChatView() {
           </div>
         )}
         {messages.map((msg, i) => (
-          <MessageBubble key={i} role={msg.role} content={msg.content} />
+          <MessageBubble key={i} role={msg.role} content={msg.content} thinking={msg.thinking} />
         ))}
         <div ref={endRef} />
       </div>

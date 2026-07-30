@@ -80,6 +80,7 @@ export interface ExampleProject {
 export interface Message {
   role: 'user' | 'assistant';
   content: string;
+  thinking?: string;
   timestamp?: string;
 }
 

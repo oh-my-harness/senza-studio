@@ -110,6 +110,9 @@ fn format_harness_event(ev: &llm_harness_agent::AgentHarnessEvent) -> serde_json
                 AgentEvent::TextDelta { message_id, text } => serde_json::json!({
                     "type": "text_delta", "message_id": message_id, "text": text
                 }),
+                AgentEvent::ThinkingDelta { message_id, thinking, .. } => serde_json::json!({
+                    "type": "thinking_delta", "message_id": message_id, "text": thinking
+                }),
                 AgentEvent::ToolCallStart { message_id, tool_use_id, name } => serde_json::json!({
                     "type": "tool_call_start", "message_id": message_id, "tool_use_id": tool_use_id, "name": name
                 }),

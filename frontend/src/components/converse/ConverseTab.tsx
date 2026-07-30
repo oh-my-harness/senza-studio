@@ -32,7 +32,7 @@ export function ConverseTab() {
           </div>
         )}
         {conversation.map((msg, i) => (
-          <MessageBubble key={i} role={msg.role} content={msg.content} />
+          <MessageBubble key={i} role={msg.role} content={msg.content} thinking={msg.thinking} />
         ))}
         {status === 'streaming' && (
           <div className="text-muted-foreground text-xs px-3 animate-pulse">streaming…</div>
