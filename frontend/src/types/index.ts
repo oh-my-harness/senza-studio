@@ -89,6 +89,29 @@ export interface StudioEvent {
   [key: string]: unknown;
 }
 
+/** Type-safe field accessors for StudioEvent. */
+function strField(ev: StudioEvent, key: string): string {
+  const v = ev[key];
+  return typeof v === "string" ? v : "";
+}
+
+/** Get step_id from event, or undefined. */
+function stepIdField(ev: StudioEvent): string | undefined {
+  const v = ev.step_id;
+  return typeof v === "string" ? v : undefined;
+}
+
+/** Get result object from event, or empty object. */
+function resultField(ev: StudioEvent): { output?: string; structured?: unknown } {
+  const v = ev.result;
+  if (v && typeof v === "object" && !Array.isArray(v)) {
+    return v as { output?: string; structured?: unknown };
+  }
+  return {};
+}
+
+export { strField, stepIdField, resultField };
+
 export interface StepState {
   status: 'pending' | 'running' | 'done' | 'failed' | 'skipped';
   output?: string;

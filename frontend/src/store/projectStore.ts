@@ -3,6 +3,7 @@ import type {
   ProjectMeta, Spec, SpecDiff, Message, StudioEvent, StepState,
   RunStatus, RunView, ConversationStatus,
 } from '../types';
+import { strField, stepIdField, resultField } from '../types';
 import { api } from '../lib/api';
 
 interface ProjectStore {
@@ -152,7 +153,7 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
   onConverseEvent: (event) => {
     const type = event.type;
     if (type === 'thinking_delta') {
-      const text = (event as any).text || '';
+      const text = strField(event, 'text');
       set((s) => {
         const conv = [...s.conversation];
         const last = conv[conv.length - 1];
@@ -164,7 +165,7 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
         return { conversation: conv };
       });
     } else if (type === 'text_delta') {
-      const text = (event as any).text || '';
+      const text = strField(event, 'text');
       set((s) => {
         const conv = [...s.conversation];
         const last = conv[conv.length - 1];
@@ -185,7 +186,7 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
     const type = event.type;
 
     if (type === 'thinking_delta') {
-      const text = (event as any).text || '';
+      const text = strField(event, 'text');
       set((s) => {
         const msgs = [...s.runMessages];
         const last = msgs[msgs.length - 1];
@@ -196,9 +197,8 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
         }
         return { runMessages: msgs };
       });
-    } else
-    if (type === 'text_delta') {
-      const text = (event as any).text || '';
+    } else if (type === 'text_delta') {
+      const text = strField(event, 'text');
       set((s) => {
         const msgs = [...s.runMessages];
         const last = msgs[msgs.length - 1];
@@ -211,7 +211,7 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
         return { runMessages: msgs };
       });
     } else if (type === 'stderr') {
-      const text = (event as any).text || '';
+      const text = strField(event, 'text');
       set((s) => {
         const msgs = [...s.runMessages];
         const last = msgs[msgs.length - 1];
@@ -229,27 +229,31 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
     } else if (type === 'error') {
       set({ runStatus: 'failed' });
     } else if (type === 'step_started') {
-      const stepId = (event as any).step_id;
-      set((s) => ({
-        activeStepId: stepId,
-        stepStates: {
-          ...s.stepStates,
-          [stepId]: { ...s.stepStates[stepId], status: 'running' },
-        },
-      }));
-    } else if (type === 'step_finished') {
-      const stepId = (event as any).step_id;
-      const result = (event as any).result || {};
-      set((s) => ({
-        stepStates: {
-          ...s.stepStates,
-          [stepId]: {
-            status: 'done',
-            output: result.output,
-            structured: result.structured,
+      const stepId = stepIdField(event);
+      if (stepId) {
+        set((s) => ({
+          activeStepId: stepId,
+          stepStates: {
+            ...s.stepStates,
+            [stepId]: { ...s.stepStates[stepId], status: 'running' },
           },
-        },
-      }));
+        }));
+      }
+    } else if (type === 'step_finished') {
+      const stepId = stepIdField(event);
+      const result = resultField(event);
+      if (stepId) {
+        set((s) => ({
+          stepStates: {
+            ...s.stepStates,
+            [stepId]: {
+              status: 'done',
+              output: result.output,
+              structured: result.structured,
+            },
+          },
+        }));
+      }
     } else if (type === 'paused') {
       set({ runStatus: 'waiting_input' });
     } else if (type === 'failed' || type === 'cancelled') {
