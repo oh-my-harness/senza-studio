@@ -40,6 +40,10 @@ pub struct RunHandle {
     stderr: Arc<Mutex<String>>,
     trace_dir: PathBuf,
     event_tx: tokio::sync::broadcast::Sender<serde_json::Value>,
+    /// Join handles for the stdout/stderr/fd3 reader tasks. Awaited in `wait()`
+    /// so callers observing the process as exited also see fully-drained output —
+    /// the child closing its fds only wakes these tasks, it doesn't run them.
+    reader_tasks: Mutex<Vec<tokio::task::JoinHandle<()>>>,
 }
 
 impl RunHandle {
@@ -58,11 +62,14 @@ impl RunHandle {
 
         match tokio::time::timeout(timeout, child.wait()).await {
             Ok(Ok(status)) => {
-                // Give the stdout/stderr reader tasks time to finish flushing
-                // after the child exits — they read until EOF, which arrives
-                // when the process closes, but the task may not have run yet.
-                tokio::task::yield_now().await;
-                tokio::task::yield_now().await;
+                // Wait for the stdout/stderr/fd3 reader tasks to actually drain
+                // and finish processing, rather than guessing with yield_now():
+                // the child exiting only makes their pipes readable to EOF, it
+                // doesn't guarantee those tasks have been scheduled yet.
+                let mut tasks = self.reader_tasks.lock().await;
+                for task in tasks.drain(..) {
+                    let _ = task.await;
+                }
                 Ok(status)
             }
             Ok(Err(e)) => Err(StudioError::Subprocess(format!("wait error: {e}"))),
@@ -170,14 +177,23 @@ impl Runner {
             for (key, value) in &config.env_vars {
                 cmd.env(key, value);
             }
-            // Set fd 3 as the write end of the pipe using pre_exec
+            // Set fd 3 as the write end of the pipe using pre_exec.
+            //
+            // Close the read end *before* dup2-ing the write end onto fd 3:
+            // pipe() can hand back fd 3 itself as the read end (it returns the
+            // lowest free fds, and fd 3 is free whenever nothing else has
+            // claimed it yet). Closing "fd3_read_fd" by number *after* dup2
+            // would then close the write end we just installed at fd 3 instead
+            // of the read end, since dup2 had already overwritten that slot.
             unsafe {
                 cmd.pre_exec(move || {
+                    libc::close(fd3_read_fd);
                     if libc::dup2(fd3_write_fd, 3) == -1 {
                         return Err(std::io::Error::last_os_error());
                     }
-                    libc::close(fd3_write_fd);
-                    libc::close(fd3_read_fd);
+                    if fd3_write_fd != 3 {
+                        libc::close(fd3_write_fd);
+                    }
                     Ok(())
                 });
             }
@@ -216,7 +232,7 @@ impl Runner {
             // In Studio mode, agent text comes via fd 3 events; stdout is debug output.
             let stdout_clone = stdout_buf.clone();
             let stdout_tx = event_tx.clone();
-            tokio::spawn(async move {
+            let stdout_task = tokio::spawn(async move {
                 let mut reader = BufReader::new(stdout);
                 let mut buf = String::new();
                 loop {
@@ -242,7 +258,7 @@ impl Runner {
             // Spawn stderr reader
             let stderr_clone = stderr_buf.clone();
             let stderr_tx = event_tx.clone();
-            tokio::spawn(async move {
+            let stderr_task = tokio::spawn(async move {
                 let mut reader = BufReader::new(stderr);
                 let mut buf = String::new();
                 loop {
@@ -269,7 +285,7 @@ impl Runner {
             let fd3_events = events.clone();
             let trace_dir_clone = trace_dir.clone();
             let fd3_tx = event_tx.clone();
-            tokio::spawn(async move {
+            let fd3_task = tokio::spawn(async move {
                 let mut file = tokio::fs::File::from_std(fd3_read);
                 let mut parser = FrameParser::new();
                 let mut buf = [0u8; 4096];
@@ -313,6 +329,7 @@ impl Runner {
                 stderr: stderr_buf,
                 trace_dir,
                 event_tx,
+                reader_tasks: Mutex::new(vec![stdout_task, stderr_task, fd3_task]),
             });
 
             self.runs.lock().await.insert(
