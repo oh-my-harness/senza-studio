@@ -153,6 +153,21 @@ impl ProjectManager {
         Ok(dir)
     }
 
+    /// Delete a project directory and everything in it. Irreversible.
+    pub fn delete_project(&self, project_id: &str) -> StudioResult<()> {
+        let dir = self.root.join(project_id);
+        if !dir.exists() {
+            return Err(StudioError::ProjectNotFound(project_id.into()));
+        }
+        let canonical_root = self.root.canonicalize()?;
+        let canonical_dir = dir.canonicalize()?;
+        if !canonical_dir.starts_with(&canonical_root) || canonical_dir == canonical_root {
+            return Err(StudioError::PathTraversalBlocked(project_id.into()));
+        }
+        fs::remove_dir_all(&dir)?;
+        Ok(())
+    }
+
     fn save_meta(&self, project_id: &str, meta: &ProjectMeta) -> StudioResult<()> {
         let meta_path = self.root.join(project_id).join(".studio/meta.json");
         let json = serde_json::to_string_pretty(meta)?;
@@ -272,6 +287,27 @@ mod tests {
         mgr.create_project("proj-b").unwrap();
         let projects = mgr.list_projects().unwrap();
         assert_eq!(projects.len(), 2);
+    }
+
+    #[test]
+    fn test_delete_project() {
+        let (mgr, _dir) = make_manager();
+        let project = mgr.create_project("test-proj").unwrap();
+        mgr.write_file(&project.id, "main.py", "print('hi')").unwrap();
+        assert!(project.dir.exists());
+
+        mgr.delete_project(&project.id).unwrap();
+
+        assert!(!project.dir.exists());
+        let projects = mgr.list_projects().unwrap();
+        assert!(!projects.iter().any(|p| p.id == project.id));
+    }
+
+    #[test]
+    fn test_delete_nonexistent_project_errors() {
+        let (mgr, _dir) = make_manager();
+        let result = mgr.delete_project("nonexistent-id");
+        assert!(result.is_err());
     }
 
     #[test]

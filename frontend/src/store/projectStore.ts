@@ -9,6 +9,10 @@ import { api } from '../lib/api';
 interface ProjectStore {
   project: ProjectMeta | null;
   setProject: (p: ProjectMeta) => void;
+  /** Switch to a (possibly different, existing) project, resetting all
+   * per-project state so nothing from the previously open project bleeds
+   * through (conversation, spec, run state, etc.). */
+  openProject: (p: ProjectMeta) => void;
 
   files: Record<string, string>;
   dirtyFiles: Set<string>;
@@ -22,6 +26,7 @@ interface ProjectStore {
   addConversationMessage: (msg: Message) => void;
   setConversationStatus: (s: ConversationStatus) => void;
   setCurrentSpec: (s: Spec | null) => void;
+  loadConversation: () => Promise<void>;
 
   activeRunId: string | null;
   runStatus: RunStatus;
@@ -51,6 +56,23 @@ interface ProjectStore {
 export const useProjectStore = create<ProjectStore>((set, get) => ({
   project: null,
   setProject: (p) => set({ project: p }),
+  openProject: (p) =>
+    set({
+      project: p,
+      files: {},
+      dirtyFiles: new Set(),
+      conversation: [],
+      conversationStatus: 'idle',
+      currentSpec: null,
+      activeRunId: null,
+      runStatus: 'idle',
+      runView: 'chat',
+      runMessages: [],
+      liveEvents: [],
+      stepStates: {},
+      activeStepId: null,
+      activeTab: 'converse',
+    }),
 
   files: {},
   dirtyFiles: new Set(),
@@ -88,6 +110,12 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
     set((s) => ({ conversation: [...s.conversation, msg] })),
   setConversationStatus: (s) => set({ conversationStatus: s }),
   setCurrentSpec: (s) => set({ currentSpec: s }),
+  loadConversation: async () => {
+    const project = get().project;
+    if (!project) return;
+    const conversation = await api.getConversation(project.id);
+    set({ conversation });
+  },
 
   activeRunId: null,
   runStatus: 'idle',

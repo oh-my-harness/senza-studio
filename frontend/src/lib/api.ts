@@ -1,4 +1,4 @@
-import type { ProjectMeta, ExampleProject, SpecDiff, StudioEvent } from '../types';
+import type { ProjectMeta, ExampleProject, SpecDiff, StudioEvent, Message } from '../types';
 
 const BASE = '/api';
 
@@ -20,6 +20,11 @@ export const api = {
 
   getProject: (id: string) => fetchJson<ProjectMeta>(`${BASE}/projects/${id}`),
 
+  deleteProject: (id: string) =>
+    fetch(`${BASE}/projects/${id}`, { method: 'DELETE' }).then((r) => {
+      if (!r.ok) throw new Error(`${r.status}: ${r.statusText}`);
+    }),
+
   listFiles: (id: string) => fetchJson<string[]>(`${BASE}/projects/${id}/files`),
 
   readFile: (id: string, path: string) =>
@@ -31,6 +36,8 @@ export const api = {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ content }),
     }),
+
+  getConversation: (id: string) => fetchJson<Message[]>(`${BASE}/projects/${id}/conversation`),
 
   converse: (id: string, message: string) =>
     fetchJson<{ run_id: string; ws_url: string }>(`${BASE}/projects/${id}/converse`, {

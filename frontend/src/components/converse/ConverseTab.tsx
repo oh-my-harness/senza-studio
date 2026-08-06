@@ -9,9 +9,14 @@ export function ConverseTab() {
   const conversation = useProjectStore((s) => s.conversation);
   const status = useProjectStore((s) => s.conversationStatus);
   const sendMessage = useProjectStore((s) => s.sendMessage);
+  const loadConversation = useProjectStore((s) => s.loadConversation);
   const { send } = useConverseWs();
   const endRef = useRef<HTMLDivElement>(null);
   const noProject = !project;
+
+  useEffect(() => {
+    if (project) loadConversation();
+  }, [project, loadConversation]);
 
   useEffect(() => {
     endRef.current?.scrollIntoView({ behavior: 'smooth', block: 'nearest' });

@@ -66,6 +66,7 @@ async fn test_create_and_list_projects() {
 
     // Get project details
     let res = app
+        .clone()
         .oneshot(
             Request::builder()
                 .uri(&format!("/api/projects/{project_id}"))
@@ -75,6 +76,32 @@ async fn test_create_and_list_projects() {
         .await
         .unwrap();
     assert_eq!(res.status(), StatusCode::OK);
+
+    // Delete the project
+    let res = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("DELETE")
+                .uri(&format!("/api/projects/{project_id}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::NO_CONTENT);
+
+    // It's gone now
+    let res = app
+        .oneshot(
+            Request::builder()
+                .uri(&format!("/api/projects/{project_id}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::NOT_FOUND);
 }
 
 #[tokio::test]

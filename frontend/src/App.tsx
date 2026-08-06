@@ -1,6 +1,7 @@
 import { useProjectStore } from './store/projectStore';
 import { useLiveRunBridge } from './hooks/useLiveRunBridge';
 import { TopBar } from './components/layout/TopBar';
+import { ProjectList } from './components/layout/ProjectList';
 import { FileTree } from './components/layout/FileTree';
 import { StatusBar } from './components/layout/StatusBar';
 import { RightPanel } from './components/layout/RightPanel';
@@ -20,7 +21,12 @@ export default function App() {
       <TopBar />
       <PanelGroup direction="horizontal" className="flex-1 min-h-0">
         <Panel defaultSize={15} minSize={10} maxSize={25} className="min-h-0">
-          <FileTree />
+          <div className="flex h-full flex-col">
+            <ProjectList />
+            <div className="min-h-0 flex-1 overflow-y-auto">
+              <FileTree />
+            </div>
+          </div>
         </Panel>
         <PanelResizeHandle className="w-px bg-border" />
         <Panel defaultSize={65} minSize={30} className="min-h-0">

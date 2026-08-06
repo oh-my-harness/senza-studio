@@ -1,5 +1,6 @@
 import { useState } from 'react';
 import { useProjectStore } from '../../store/projectStore';
+import { useProjectListStore } from '../../store/projectListStore';
 import { api } from '../../lib/api';
 import { FolderOpen, Play, Code2, Library, Settings, MessageSquare, Waypoints, GitGraph } from 'lucide-react';
 import { ExamplePicker } from '../examples/ExamplePicker';
@@ -7,10 +8,11 @@ import { SettingsPage } from '../settings/SettingsPage';
 
 export function TopBar() {
   const project = useProjectStore((s) => s.project);
-  const setProject = useProjectStore((s) => s.setProject);
+  const openProject = useProjectStore((s) => s.openProject);
   const setActiveTab = useProjectStore((s) => s.setActiveTab);
   const currentSpec = useProjectStore((s) => s.currentSpec);
   const isWorkflow = currentSpec?.agent_type?.includes('workflow') ?? false;
+  const loadProjects = useProjectListStore((s) => s.loadProjects);
   const [showExamples, setShowExamples] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
 
@@ -18,7 +20,8 @@ export function TopBar() {
     const name = prompt('Project name?');
     if (!name) return;
     const p = await api.createProject(name);
-    setProject(p);
+    openProject(p);
+    loadProjects();
   };
 
   return (
