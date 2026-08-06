@@ -1,6 +1,6 @@
 import { create } from 'zustand';
 import type { Message, StudioEvent, StepState, RunStatus, RunView } from '../types';
-import { strField, stepIdField, resultField } from '../types';
+import { strField, stepIdField } from '../types';
 import { api } from '../lib/api';
 
 interface AgentWindowState {
@@ -200,15 +200,14 @@ export const useAgentStore = create<AgentWindowState>((set, get) => ({
       }
     } else if (type === 'step_finished') {
       const stepId = stepIdField(event);
-      const result = resultField(event);
       if (stepId) {
         set((s) => ({
           stepStates: {
             ...s.stepStates,
             [stepId]: {
               status: 'done',
-              output: result.output,
-              structured: result.structured,
+              output: strField(event, 'output'),
+              structured: event.structured,
             },
           },
         }));

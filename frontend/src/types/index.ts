@@ -110,7 +110,28 @@ function resultField(ev: StudioEvent): { output?: string; structured?: unknown }
   return {};
 }
 
-export { strField, stepIdField, resultField };
+/** Get tool_use_id from event, or undefined. */
+function toolUseIdField(ev: StudioEvent): string | undefined {
+  const v = ev.tool_use_id;
+  return typeof v === "string" ? v : undefined;
+}
+
+/** Get the `ok` boolean from a tool_execution_end event, or undefined. */
+function okField(ev: StudioEvent): boolean | undefined {
+  const v = ev.ok;
+  return typeof v === "boolean" ? v : undefined;
+}
+
+/** Unwrap a workflow step_progress event's nested `progress` payload. */
+function progressField(ev: StudioEvent): StudioEvent | undefined {
+  const v = ev.progress;
+  if (v && typeof v === "object" && !Array.isArray(v)) {
+    return v as StudioEvent;
+  }
+  return undefined;
+}
+
+export { strField, stepIdField, resultField, toolUseIdField, okField, progressField };
 
 export interface StepState {
   status: 'pending' | 'running' | 'done' | 'failed' | 'skipped';

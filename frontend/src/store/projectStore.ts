@@ -3,7 +3,7 @@ import type {
   ProjectMeta, Spec, SpecDiff, Message, StudioEvent, StepState,
   RunStatus, RunView, ConversationStatus,
 } from '../types';
-import { strField, stepIdField, resultField } from '../types';
+import { strField, stepIdField } from '../types';
 import { api } from '../lib/api';
 
 interface ProjectStore {
@@ -306,15 +306,14 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
       }
     } else if (type === 'step_finished') {
       const stepId = stepIdField(event);
-      const result = resultField(event);
       if (stepId) {
         set((s) => ({
           stepStates: {
             ...s.stepStates,
             [stepId]: {
               status: 'done',
-              output: result.output,
-              structured: result.structured,
+              output: strField(event, 'output'),
+              structured: event.structured,
             },
           },
         }));

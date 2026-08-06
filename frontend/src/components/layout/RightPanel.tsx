@@ -20,7 +20,7 @@ export function RightPanel() {
           )}
         </div>
       )}
-      {(activeTab === 'run' || activeTab === 'trace') && (
+      {activeTab === 'run' && (
         <div className="p-2">
           <div className="text-xs text-muted-foreground mb-2">EVENTS ({liveEvents.length})</div>
           <div className="space-y-1">

@@ -1,4 +1,5 @@
 import { useProjectStore } from './store/projectStore';
+import { useLiveRunBridge } from './hooks/useLiveRunBridge';
 import { TopBar } from './components/layout/TopBar';
 import { FileTree } from './components/layout/FileTree';
 import { StatusBar } from './components/layout/StatusBar';
@@ -12,6 +13,7 @@ import { Panel, PanelGroup, PanelResizeHandle } from 'react-resizable-panels';
 
 export default function App() {
   const activeTab = useProjectStore((s) => s.activeTab);
+  useLiveRunBridge();
 
   return (
     <div className="flex flex-col h-screen bg-background text-foreground">
