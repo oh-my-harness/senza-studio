@@ -25,6 +25,7 @@ pub fn router() -> Router<Arc<AppState>> {
     Router::new()
         .route("/api/projects", post(create_project).get(list_projects))
         .route("/api/projects/{id}", get(get_project).delete(delete_project))
+        .route("/api/projects/{id}/spec", get(get_spec))
         .route("/api/projects/{id}/files", get(list_files))
         .route("/api/projects/{id}/files/{*path}", get(get_file).put(put_file))
 }
@@ -79,6 +80,24 @@ async fn get_project(
         dir: project.dir.to_string_lossy().into_owned(),
         created_at: project.created_at.to_rfc3339(),
     }))
+}
+
+async fn get_spec(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> Result<Json<Option<studio_core::spec::Spec>>, (StatusCode, String)> {
+    // Validate the project itself exists (404 if not) before treating a
+    // missing spec.json as the normal "no spec yet" case (project created
+    // from an example, or built purely code-first) rather than an error.
+    state
+        .project_manager
+        .open_project(&id)
+        .map_err(|e| (StatusCode::NOT_FOUND, e.to_string()))?;
+    match state.project_manager.load_current_spec(&id) {
+        Ok(spec) => Ok(Json(Some(spec))),
+        Err(studio_core::error::StudioError::FileNotFound(_)) => Ok(Json(None)),
+        Err(e) => Err((StatusCode::INTERNAL_SERVER_ERROR, e.to_string())),
+    }
 }
 
 async fn delete_project(

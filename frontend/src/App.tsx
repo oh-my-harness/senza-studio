@@ -1,3 +1,4 @@
+import { useEffect } from 'react';
 import { useProjectStore } from './store/projectStore';
 import { useLiveRunBridge } from './hooks/useLiveRunBridge';
 import { TopBar } from './components/layout/TopBar';
@@ -14,7 +15,13 @@ import { Panel, PanelGroup, PanelResizeHandle } from 'react-resizable-panels';
 
 export default function App() {
   const activeTab = useProjectStore((s) => s.activeTab);
+  const project = useProjectStore((s) => s.project);
+  const loadSpec = useProjectStore((s) => s.loadSpec);
   useLiveRunBridge();
+
+  useEffect(() => {
+    if (project) loadSpec();
+  }, [project, loadSpec]);
 
   return (
     <div className="flex flex-col h-screen bg-background text-foreground">

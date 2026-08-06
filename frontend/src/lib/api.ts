@@ -1,4 +1,4 @@
-import type { ProjectMeta, ExampleProject, SpecDiff, StudioEvent, Message } from '../types';
+import type { ProjectMeta, ExampleProject, SpecDiff, StudioEvent, Message, Spec } from '../types';
 
 const BASE = '/api';
 
@@ -24,6 +24,8 @@ export const api = {
     fetch(`${BASE}/projects/${id}`, { method: 'DELETE' }).then((r) => {
       if (!r.ok) throw new Error(`${r.status}: ${r.statusText}`);
     }),
+
+  getSpec: (id: string) => fetchJson<Spec | null>(`${BASE}/projects/${id}/spec`),
 
   listFiles: (id: string) => fetchJson<string[]>(`${BASE}/projects/${id}/files`),
 

@@ -249,6 +249,57 @@ async fn test_write_and_read_file() {
 }
 
 #[tokio::test]
+async fn test_get_spec_null_when_missing_and_404_for_bad_project() {
+    let state = test_state();
+    let app = build_app(state);
+
+    let create_req = r#"{"name":"Spec Test"}"#;
+    let res = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/projects")
+                .header("Content-Type", "application/json")
+                .body(Body::from(create_req))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let body = axum::body::to_bytes(res.into_body(), 1024 * 1024).await.unwrap();
+    let project: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    let project_id = project["id"].as_str().unwrap();
+
+    // No spec has been generated yet — expect 200 with a null body, not an error.
+    let res = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri(&format!("/api/projects/{project_id}/spec"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(res.into_body(), 1024 * 1024).await.unwrap();
+    let spec: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert!(spec.is_null());
+
+    // A nonexistent project should 404, not silently return null.
+    let res = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/projects/does-not-exist/spec")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
 async fn test_settings_get_and_save() {
     let state = test_state();
     let app = build_app(state);

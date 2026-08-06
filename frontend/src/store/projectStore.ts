@@ -27,6 +27,7 @@ interface ProjectStore {
   setConversationStatus: (s: ConversationStatus) => void;
   setCurrentSpec: (s: Spec | null) => void;
   loadConversation: () => Promise<void>;
+  loadSpec: () => Promise<void>;
 
   activeRunId: string | null;
   runStatus: RunStatus;
@@ -115,6 +116,12 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
     if (!project) return;
     const conversation = await api.getConversation(project.id);
     set({ conversation });
+  },
+  loadSpec: async () => {
+    const project = get().project;
+    if (!project) return;
+    const spec = await api.getSpec(project.id);
+    set({ currentSpec: spec });
   },
 
   activeRunId: null,
@@ -224,6 +231,10 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
       }));
     } else if (type === 'settled') {
       set({ conversationStatus: 'idle' });
+      // Refresh spec in case this turn called emit_spec/emit_spec_diff —
+      // the converser only signals that via a tool-call event, so re-fetch
+      // rather than trying to parse spec JSON out of the tool call args.
+      get().loadSpec();
     } else if (type === 'aborted') {
       set({ conversationStatus: 'idle' });
     }
