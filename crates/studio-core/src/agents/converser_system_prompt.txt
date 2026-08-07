@@ -83,6 +83,7 @@ Senza 是 oh-my-harness Rust runtime 的 Python SDK，支持两种 agent 模式�
 - 用户说的功能超出 MVP 能力（如 hook、MCP、executor step、崩溃恢复）时，坦诚说明并记录为未来需求。条件路由和预算管控 **在 MVP 能力范围内**，应该主动询问
 - 不要生成代码，代码生成是 Senza coding agent 的工作
 - 如果用户描述的是迭代已有项目，先用 read_project 读取当前代码再对话
+- 如果用户报告 agent 运行出错、崩溃或行为异常，先用 read_run_trace 查看最近一次运行的实际失败信息，再回复或修改 spec
 
 ## "信息充分"判断标准
 
@@ -98,3 +99,4 @@ Senza 是 oh-my-harness Rust runtime 的 Python SDK，支持两种 agent 模式�
 - 如果到第 5 轮对话仍未收集齐最低条件，总结已收集的信息，列出缺失维度，明确告知用户"还差 X 就能生成了"
 - provider.type 默认 `"openai"`，只有用户明确说要 Claude 时才用 `"anthropic"`
 - 如果用户描述的是迭代已有项目，先用 read_project 读取当前代码再对话
+- 如果用户报告 agent 运行出错、崩溃或行为异常，先用 read_run_trace 查看最近一次运行的实际失败信息，再回复或修改 spec

@@ -1,10 +1,13 @@
 //! Converser agent: multi-turn dialogue → structured spec JSON.
 //!
-//! The Converser has 4 tools:
+//! The Converser has 5 tools:
 //! - emit_spec(spec_json): output full spec, terminate conversation
 //! - emit_spec_diff(diff_json): output incremental spec diff
 //! - read_project(path): read current project files
 //! - read_current_spec(): read current spec.json
+//! - read_run_trace(run_id?): read a run's outcome (errors, final output),
+//!   so the Converser can see what actually happened instead of relying on
+//!   the user's paraphrase of a failure.
 
 use std::path::Path;
 use std::sync::Arc;
@@ -181,6 +184,54 @@ pub async fn build_converser(
         }),
     );
 
+    // Tool: read_run_trace
+    let trace_dir = project_dir.clone();
+    let read_run_trace = StudioTool::new(
+        "read_run_trace",
+        "Read the outcome of a run of the user's agent — errors, tool failures, and final output. Call this when the user reports their agent crashed, failed, or behaved unexpectedly, or when you want to verify a fix actually worked. Omit run_id to inspect the most recent run.",
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "run_id": {
+                    "type": "string",
+                    "description": "Specific run ID to inspect; omit to use the most recent run."
+                }
+            },
+            "required": []
+        }),
+        Box::new(move |invocation| {
+            let dir = trace_dir.clone();
+            Box::pin(async move {
+                let requested_run_id = invocation.args.get("run_id").and_then(|v| v.as_str()).map(|s| s.to_string());
+                let run_id = match requested_run_id {
+                    Some(id) => Some(id),
+                    None => crate::runner::Runner::list_runs(&dir)
+                        .map_err(|e| ToolFailure::new("execution_failed", format!("failed to list runs: {e}")))?
+                        .last()
+                        .cloned(),
+                };
+                let run_id = match run_id {
+                    Some(id) => id,
+                    None => {
+                        return Ok(ToolResult::full(
+                            vec![DataBlock::text("No runs found for this project yet.")],
+                            serde_json::json!({"run_found": false}),
+                            false,
+                        ));
+                    }
+                };
+
+                let events = crate::runner::Runner::read_events_sync(&dir, &run_id)
+                    .map_err(|e| ToolFailure::new("execution_failed", format!("failed to read run events: {e}")))?;
+                let summary = crate::events::summarize_run_events(&run_id, &events);
+                let text = crate::events::format_trace_summary(&summary);
+                let details = serde_json::to_value(&summary).unwrap_or(serde_json::Value::Null);
+
+                Ok(ToolResult::full(vec![DataBlock::text(text)], details, false))
+            })
+        }),
+    );
+
     let env = Arc::new(OsEnv::new(project_dir.as_ref().clone()));
 
     let harness = HarnessBuilder::new(model)
@@ -193,6 +244,7 @@ pub async fn build_converser(
         .tool(Arc::new(emit_spec_diff) as Arc<dyn Tool>)
         .tool(Arc::new(read_project) as Arc<dyn Tool>)
         .tool(Arc::new(read_current_spec) as Arc<dyn Tool>)
+        .tool(Arc::new(read_run_trace) as Arc<dyn Tool>)
         .build(env)
         .await
         .map_err(|e| crate::error::StudioError::Agent(format!("converser build failed: {e}")))?;
