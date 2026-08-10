@@ -27,6 +27,8 @@ export const api = {
 
   getSpec: (id: string) => fetchJson<Spec | null>(`${BASE}/projects/${id}/spec`),
 
+  getPendingDiff: (id: string) => fetchJson<SpecDiff | null>(`${BASE}/projects/${id}/pending-diff`),
+
   listFiles: (id: string) => fetchJson<string[]>(`${BASE}/projects/${id}/files`),
 
   readFile: (id: string, path: string) =>

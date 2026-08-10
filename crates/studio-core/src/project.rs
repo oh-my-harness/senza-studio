@@ -4,7 +4,7 @@ use std::fs;
 use serde::{Deserialize, Serialize};
 
 use crate::error::{StudioError, StudioResult};
-use crate::spec::Spec;
+use crate::spec::{Spec, SpecDiff};
 
 /// Project metadata stored in `.studio/meta.json`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -142,6 +142,18 @@ impl ProjectManager {
         let json = fs::read_to_string(&path)?;
         let spec: Spec = serde_json::from_str(&json)?;
         Ok(spec)
+    }
+
+    /// Load a pending spec diff from `.studio/specs/pending_diff.json`, if
+    /// one exists (written by the Converser's `emit_spec_diff` tool).
+    /// Missing file is a normal state, not an error.
+    pub fn load_pending_diff(&self, project_id: &str) -> StudioResult<Option<SpecDiff>> {
+        let path = self.root.join(project_id).join(".studio/specs/pending_diff.json");
+        if !path.exists() {
+            return Ok(None);
+        }
+        let json = fs::read_to_string(&path)?;
+        Ok(Some(serde_json::from_str(&json)?))
     }
 
     /// Get the project directory path.
@@ -331,5 +343,35 @@ mod tests {
         let loaded = mgr.load_current_spec(&project.id).unwrap();
         assert_eq!(loaded.name, "test");
         assert_eq!(loaded.agent_type, crate::spec::AgentType::Single);
+    }
+
+    #[test]
+    fn test_load_pending_diff_missing_returns_none() {
+        let (mgr, _dir) = make_manager();
+        let project = mgr.create_project("test-proj").unwrap();
+        let result = mgr.load_pending_diff(&project.id).unwrap();
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_load_pending_diff_roundtrip() {
+        let (mgr, _dir) = make_manager();
+        let project = mgr.create_project("test-proj").unwrap();
+        let diff = SpecDiff {
+            ops: vec![crate::spec::SpecDiffOp {
+                op: "replace".into(),
+                path: "/system_prompt".into(),
+                value: Some(serde_json::json!("new prompt")),
+            }],
+        };
+        let spec_dir = project.dir.join(".studio/specs");
+        fs::create_dir_all(&spec_dir).unwrap();
+        fs::write(spec_dir.join("pending_diff.json"), serde_json::to_string(&diff).unwrap()).unwrap();
+
+        let loaded = mgr.load_pending_diff(&project.id).unwrap();
+        assert!(loaded.is_some());
+        let loaded = loaded.unwrap();
+        assert_eq!(loaded.ops.len(), 1);
+        assert_eq!(loaded.ops[0].path, "/system_prompt");
     }
 }

@@ -102,6 +102,12 @@ async fn generate_diff(
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
+    // Clear the pending diff now that it's been applied — without this the
+    // "Apply Changes" UI action would keep reappearing indefinitely, since
+    // nothing else removes this file once emit_spec_diff writes it.
+    let pending_diff_path = project.dir.join(".studio/specs/pending_diff.json");
+    let _ = std::fs::remove_file(&pending_diff_path);
+
     Ok(Json(GenerateResponse {
         files: affected_files,
     }))

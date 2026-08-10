@@ -2,6 +2,7 @@ import { useState, useRef, useEffect } from 'react';
 import { useProjectStore } from '../../store/projectStore';
 import { useConverseWs } from '../../hooks/useConverseWs';
 import { MessageBubble } from './MessageBubble';
+import { GenerateBanner } from './GenerateBanner';
 
 export function ConverseTab() {
   const [input, setInput] = useState('');
@@ -40,7 +41,8 @@ export function ConverseTab() {
         ) : conversation.length === 0 ? (
           <div className="text-muted-foreground text-sm text-center py-8">
             Describe the agent you want to build. The converser will refine your
-            idea into a spec, then the coding agent generates the Senza project.
+            idea into a spec, then click Generate to have the coding agent build
+            the Senza project.
           </div>
         ) : null}
         {conversation.map((msg, i) => (
@@ -51,6 +53,7 @@ export function ConverseTab() {
         )}
         <div ref={endRef} />
       </div>
+      <GenerateBanner />
       <div className="shrink-0 border-t p-2 flex gap-2">
         <textarea
           value={input}

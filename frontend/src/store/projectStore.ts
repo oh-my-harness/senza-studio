@@ -28,6 +28,10 @@ interface ProjectStore {
   setCurrentSpec: (s: Spec | null) => void;
   loadConversation: () => Promise<void>;
   loadSpec: () => Promise<void>;
+  pendingDiff: SpecDiff | null;
+  loadPendingDiff: () => Promise<void>;
+  generating: boolean;
+  generateError: string | null;
 
   activeRunId: string | null;
   runStatus: RunStatus;
@@ -65,6 +69,9 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
       conversation: [],
       conversationStatus: 'idle',
       currentSpec: null,
+      pendingDiff: null,
+      generating: false,
+      generateError: null,
       activeRunId: null,
       runStatus: 'idle',
       runView: 'chat',
@@ -123,6 +130,15 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
     const spec = await api.getSpec(project.id);
     set({ currentSpec: spec });
   },
+  pendingDiff: null,
+  loadPendingDiff: async () => {
+    const project = get().project;
+    if (!project) return;
+    const diff = await api.getPendingDiff(project.id);
+    set({ pendingDiff: diff });
+  },
+  generating: false,
+  generateError: null,
 
   activeRunId: null,
   runStatus: 'idle',
@@ -176,14 +192,30 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
   generate: async () => {
     const project = get().project;
     if (!project) return;
-    await api.generate(project.id);
-    await get().loadFiles();
+    set({ generating: true, generateError: null });
+    try {
+      await api.generate(project.id);
+      await get().loadFiles();
+      set({ activeTab: 'code' });
+    } catch (e) {
+      set({ generateError: e instanceof Error ? e.message : String(e) });
+    } finally {
+      set({ generating: false });
+    }
   },
   applySpecDiff: async (diff) => {
     const project = get().project;
     if (!project) return;
-    await api.generateDiff(project.id, diff);
-    await get().loadFiles();
+    set({ generating: true, generateError: null });
+    try {
+      await api.generateDiff(project.id, diff);
+      await get().loadFiles();
+      set({ activeTab: 'code', pendingDiff: null });
+    } catch (e) {
+      set({ generateError: e instanceof Error ? e.message : String(e) });
+    } finally {
+      set({ generating: false });
+    }
   },
 
   onConverseEvent: (event) => {
@@ -231,10 +263,12 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
       }));
     } else if (type === 'settled') {
       set({ conversationStatus: 'idle' });
-      // Refresh spec in case this turn called emit_spec/emit_spec_diff —
-      // the converser only signals that via a tool-call event, so re-fetch
-      // rather than trying to parse spec JSON out of the tool call args.
+      // Refresh spec/pending-diff in case this turn called
+      // emit_spec/emit_spec_diff — the converser only signals that via a
+      // tool-call event, so re-fetch rather than trying to parse spec JSON
+      // out of the tool call args.
       get().loadSpec();
+      get().loadPendingDiff();
     } else if (type === 'aborted') {
       set({ conversationStatus: 'idle' });
     }

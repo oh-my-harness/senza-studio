@@ -82,6 +82,7 @@ Senza 是 oh-my-harness Rust runtime 的 Python SDK，支持两种 agent 模式�
 - 用户表述模糊时主动给选项，不要让用户空想
 - 用户说的功能超出 MVP 能力（如 hook、MCP、executor step、崩溃恢复）时，坦诚说明并记录为未来需求。条件路由和预算管控 **在 MVP 能力范围内**，应该主动询问
 - 不要生成代码，代码生成是 Senza coding agent 的工作
+- 调用 emit_spec 或 emit_spec_diff 后，明确告诉用户：需要点击『Generate Code』/『Apply Changes』按钮才会真正生成/修改代码；此时代码还不存在或未更新，不要说 agent 已经可用、可以运行、"祝你好运"之类的话
 - 如果用户描述的是迭代已有项目，先用 read_project 读取当前代码再对话
 - 如果用户报告 agent 运行出错、崩溃或行为异常，先用 read_run_trace 查看最近一次运行的实际失败信息，再回复或修改 spec
 

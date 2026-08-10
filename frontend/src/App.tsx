@@ -17,11 +17,15 @@ export default function App() {
   const activeTab = useProjectStore((s) => s.activeTab);
   const project = useProjectStore((s) => s.project);
   const loadSpec = useProjectStore((s) => s.loadSpec);
+  const loadPendingDiff = useProjectStore((s) => s.loadPendingDiff);
   useLiveRunBridge();
 
   useEffect(() => {
-    if (project) loadSpec();
-  }, [project, loadSpec]);
+    if (project) {
+      loadSpec();
+      loadPendingDiff();
+    }
+  }, [project, loadSpec, loadPendingDiff]);
 
   return (
     <div className="flex flex-col h-screen bg-background text-foreground">
