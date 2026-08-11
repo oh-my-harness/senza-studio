@@ -67,12 +67,12 @@ async fn create_from_example(
     let example = studio_core::examples::get_example(&req.example_id)
         .ok_or((StatusCode::NOT_FOUND, "example not found".into()))?;
     let project = state
-        .project_manager
+        .project_manager()
         .create_project(&req.project_name)
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
     for (path, content) in &example.files {
         state
-            .project_manager
+            .project_manager()
             .write_file(&project.id, path, content)
             .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
     }

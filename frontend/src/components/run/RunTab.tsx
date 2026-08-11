@@ -31,7 +31,7 @@ export function RunTab() {
   const openAgentWindow = () => {
     if (!project) return;
     window.open(
-      `/agent-window/${project.id}`,
+      `/agent-window/${encodeURIComponent(project.id)}`,
       'agent-window',
       'width=600,height=800,scrollbars=yes',
     );

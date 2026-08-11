@@ -33,10 +33,10 @@ async fn generate(
 ) -> Result<Json<GenerateResponse>, (StatusCode, String)> {
     let settings = require_api_key(&state)?;
     let project = state
-        .project_manager
+        .project_manager()
         .open_project(&project_id)
         .map_err(|e| (StatusCode::NOT_FOUND, e.to_string()))?;
-    let harness = studio_core::agents::build_coding_agent(
+    let (harness, wrote_any_file) = studio_core::agents::build_coding_agent(
         &settings.api_key,
         &settings.model,
         settings.meta_base_url(),
@@ -51,8 +51,19 @@ async fn generate(
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
+    // A successful prompt() only means the LLM produced a normal completion —
+    // some models/providers respond with a plan (or just stop) without ever
+    // calling write_file, which looks identical to success otherwise. Treat
+    // that as a real failure instead of silently returning an empty file list.
+    if !wrote_any_file.load(std::sync::atomic::Ordering::Relaxed) {
+        return Err((
+            StatusCode::BAD_GATEWAY,
+            "The coding agent did not write any files. The model may not have followed through on the required tool calls — try again, or check the model/provider in Settings.".into(),
+        ));
+    }
+
     let files = state
-        .project_manager
+        .project_manager()
         .list_files(&project_id)
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
@@ -71,18 +82,18 @@ async fn generate_diff(
 ) -> Result<Json<GenerateResponse>, (StatusCode, String)> {
     let settings = require_api_key(&state)?;
     let project = state
-        .project_manager
+        .project_manager()
         .open_project(&project_id)
         .map_err(|e| (StatusCode::NOT_FOUND, e.to_string()))?;
 
     let spec = state
-        .project_manager
+        .project_manager()
         .load_current_spec(&project_id)
         .map_err(|e| (StatusCode::NOT_FOUND, e.to_string()))?;
 
     let affected_files = studio_core::agents::compute_affected_files(&req.diff, &spec);
 
-    let harness = studio_core::agents::build_coding_agent(
+    let (harness, wrote_any_file) = studio_core::agents::build_coding_agent(
         &settings.api_key,
         &settings.model,
         settings.meta_base_url(),
@@ -101,6 +112,15 @@ async fn generate_diff(
         .prompt(&prompt)
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    // Same "the model said it would, but never actually called write_file"
+    // failure mode as the full-generate path above.
+    if !wrote_any_file.load(std::sync::atomic::Ordering::Relaxed) {
+        return Err((
+            StatusCode::BAD_GATEWAY,
+            "The coding agent did not modify any files. The model may not have followed through on the required tool calls — try again, or check the model/provider in Settings.".into(),
+        ));
+    }
 
     // Clear the pending diff now that it's been applied — without this the
     // "Apply Changes" UI action would keep reappearing indefinitely, since

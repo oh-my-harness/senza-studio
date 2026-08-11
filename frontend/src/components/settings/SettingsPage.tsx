@@ -1,7 +1,8 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { useProjectStore } from '../../store/projectStore';
+import { useProjectListStore } from '../../store/projectListStore';
 import { api } from '../../lib/api';
-import { X, Check, Brain, Globe } from 'lucide-react';
+import { X, Check, Brain, Globe, FolderOpen } from 'lucide-react';
 
 interface StudioSettings {
   api_key: string;
@@ -9,6 +10,7 @@ interface StudioSettings {
   base_url: string;
   user_api_key: string;
   user_base_url: string;
+  working_directory: string;
 }
 
 export function SettingsPage({ onClose }: { onClose: () => void }) {
@@ -17,11 +19,16 @@ export function SettingsPage({ onClose }: { onClose: () => void }) {
   const [saved, setSaved] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const setActiveTab = useProjectStore((s) => s.setActiveTab);
+  const loadProjects = useProjectListStore((s) => s.loadProjects);
+  const loadedWorkingDir = useRef<string | null>(null);
 
   useEffect(() => {
     fetch('/api/settings')
       .then((r) => r.json())
-      .then((s) => setSettings(s))
+      .then((s) => {
+        setSettings(s);
+        loadedWorkingDir.current = s.working_directory ?? '';
+      })
       .catch((e) => setError(e.message));
   }, []);
 
@@ -36,9 +43,42 @@ export function SettingsPage({ onClose }: { onClose: () => void }) {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(settings),
       });
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      if (!res.ok) {
+        const body = await res.json().catch(() => null);
+        throw new Error(body?.error ?? `HTTP ${res.status}`);
+      }
       const updated = await res.json();
       setSettings(updated);
+
+      // Working directory changed — the project list (and whatever project
+      // is currently open) now points at a different filesystem location.
+      // Refresh the list and drop the open project rather than silently
+      // leaving stale state visible: it almost certainly doesn't resolve
+      // under the new root.
+      if (updated.working_directory !== loadedWorkingDir.current) {
+        loadedWorkingDir.current = updated.working_directory;
+        loadProjects();
+        useProjectStore.setState({
+          project: null,
+          files: {},
+          dirtyFiles: new Set(),
+          conversation: [],
+          conversationStatus: 'idle',
+          currentSpec: null,
+          pendingDiff: null,
+          generating: false,
+          generateError: null,
+          activeRunId: null,
+          runStatus: 'idle',
+          runView: 'chat',
+          runMessages: [],
+          liveEvents: [],
+          stepStates: {},
+          activeStepId: null,
+          activeTab: 'converse',
+        });
+      }
+
       setSaved(true);
       setTimeout(() => setSaved(false), 2000);
     } catch (e) {
@@ -119,6 +159,25 @@ export function SettingsPage({ onClose }: { onClose: () => void }) {
             value={settings.user_base_url}
             onChange={(v) => setSettings({ ...settings, user_base_url: v })}
             placeholder="Leave empty to use meta-agent base URL"
+          />
+        </div>
+
+        {/* Project storage */}
+        <div className="mb-6">
+          <div className="flex items-center gap-2 mb-3 text-sm font-medium">
+            <FolderOpen size={16} /> Project Storage
+          </div>
+          <p className="text-xs text-muted-foreground mb-3">
+            Where new projects are created. Each project gets its own folder
+            named after the project. Leave empty to use the server's default.
+            Existing projects stay where they are — this only affects new ones
+            and where the project list looks from now on.
+          </p>
+          <Field
+            label="Working Directory (optional)"
+            value={settings.working_directory}
+            onChange={(v) => setSettings({ ...settings, working_directory: v })}
+            placeholder="Default: ./projects (relative to server)"
           />
         </div>
 

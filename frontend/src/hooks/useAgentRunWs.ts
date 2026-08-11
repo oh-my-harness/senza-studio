@@ -37,7 +37,7 @@ export function useAgentRunWs() {
     };
 
     const ws = new WsClient(
-      `ws://${location.host}/ws/run/${projectId}`,
+      `ws://${location.host}/ws/run/${encodeURIComponent(projectId)}`,
       handler,
     );
     wsRef.current = ws;

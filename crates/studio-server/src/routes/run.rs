@@ -34,7 +34,7 @@ async fn run_project(
     Json(_req): Json<RunRequest>,
 ) -> Result<Json<RunResponse>, (StatusCode, String)> {
     let project = state
-        .project_manager
+        .project_manager()
         .open_project(&project_id)
         .map_err(|e| (StatusCode::NOT_FOUND, e.to_string()))?;
 
@@ -72,7 +72,7 @@ async fn list_runs(
     Path(project_id): Path<String>,
 ) -> Result<Json<Vec<String>>, (StatusCode, String)> {
     let project = state
-        .project_manager
+        .project_manager()
         .open_project(&project_id)
         .map_err(|e| (StatusCode::NOT_FOUND, e.to_string()))?;
     let runs = studio_core::runner::Runner::list_runs(&project.dir)
@@ -85,7 +85,7 @@ async fn get_run_events(
     Path((project_id, run_id)): Path<(String, String)>,
 ) -> Result<Json<Vec<serde_json::Value>>, (StatusCode, String)> {
     let project = state
-        .project_manager
+        .project_manager()
         .open_project(&project_id)
         .map_err(|e| (StatusCode::NOT_FOUND, e.to_string()))?;
     let events = state

@@ -8,6 +8,7 @@
 //! - ast_check(path): validate Python syntax
 
 use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use llm_harness_agent::AgentHarness;
@@ -25,13 +26,20 @@ const SYSTEM_PROMPT: &str = include_str!("coding_agent_system_prompt.txt");
 ///
 /// `allowed_files`: When `Some`, the write_file tool is restricted to only
 /// these paths (used in incremental/diff mode). When `None`, all paths allowed.
+///
+/// Also returns a flag set to `true` the moment `write_file` first succeeds.
+/// `harness.prompt(...)` returning `Ok(())` only means the LLM produced a
+/// normal completion — some models/providers respond with a "plan" (or just
+/// stop) without ever actually calling a tool, which looks identical to
+/// success from the harness's point of view. Callers should treat
+/// `!flag.load(...)` after a successful prompt as a real failure.
 pub async fn build_coding_agent(
     api_key: &str,
     model: &str,
     base_url: Option<&str>,
     project_dir: &Path,
     allowed_files: Option<Vec<String>>,
-) -> StudioResult<AgentHarness> {
+) -> StudioResult<(AgentHarness, Arc<AtomicBool>)> {
     let mut provider_builder = OpenAIProvider::builder(api_key)
         .parse_reasoning_content(true);
     if let Some(url) = base_url {
@@ -41,10 +49,12 @@ pub async fn build_coding_agent(
 
     let project_dir = Arc::new(project_dir.to_path_buf());
     let allowed_files = Arc::new(allowed_files);
+    let wrote_any_file = Arc::new(AtomicBool::new(false));
 
     // Tool: write_file
     let write_dir = project_dir.clone();
     let write_allowed = allowed_files.clone();
+    let write_flag = wrote_any_file.clone();
     let write_file = StudioTool::new(
         "write_file",
         "Write content to a file in the project. Path is relative to the project root.",
@@ -59,6 +69,7 @@ pub async fn build_coding_agent(
         Box::new(move |invocation| {
             let dir = write_dir.clone();
             let allowed = write_allowed.clone();
+            let flag = write_flag.clone();
             Box::pin(async move {
                 let path = invocation.args.get("path")
                     .and_then(|v| v.as_str())
@@ -89,6 +100,7 @@ pub async fn build_coding_agent(
 
                 std::fs::write(&full_path, content)
                     .map_err(|e| ToolFailure::new("execution_failed", format!("write error: {e}")))?;
+                flag.store(true, Ordering::Relaxed);
 
                 Ok(ToolResult::full(
                     vec![DataBlock::text(format!("Written {path} ({} bytes). Run ast_check to verify syntax.", content.len()))],
@@ -244,7 +256,7 @@ pub async fn build_coding_agent(
         .await
         .map_err(|e| crate::error::StudioError::Agent(format!("coding agent build failed: {e}")))?;
 
-    Ok(harness)
+    Ok((harness, wrote_any_file))
 }
 
 fn collect_files(base: &Path, current: &Path, files: &mut Vec<String>) {
@@ -267,4 +279,80 @@ fn collect_files(base: &Path, current: &Path, files: &mut Vec<String>) {
 #[cfg(test)]
 mod tests {
     // LLM tests are #[ignore] — run with: cargo test -- --ignored coding_agent
+
+    use super::*;
+
+    /// Diagnostic: subscribe to the harness event stream during a real
+    /// `generate` call and print every event, to see what's actually
+    /// happening when `write_file` never gets called (routes/generate.rs
+    /// only checks `.prompt()`'s top-level `Result`, which doesn't surface
+    /// this — the call returns `Ok(())` even when zero tool calls happen).
+    #[tokio::test]
+    #[ignore]
+    async fn debug_generate_event_stream() {
+        let settings_json = std::fs::read_to_string(
+            std::env::var("SENZA_STUDIO_SETTINGS_PATH").unwrap_or_else(|_| "../../settings.json".into()),
+        )
+        .expect("read settings.json (run from repo root or set SENZA_STUDIO_SETTINGS_PATH)");
+        let settings: serde_json::Value = serde_json::from_str(&settings_json).unwrap();
+        let api_key = settings["api_key"].as_str().unwrap().to_string();
+        let model = settings["model"].as_str().unwrap().to_string();
+        let base_url = settings["base_url"].as_str().filter(|s| !s.is_empty()).map(|s| s.to_string());
+
+        let tmp = tempfile::TempDir::new().unwrap();
+        std::fs::create_dir_all(tmp.path().join(".studio/specs")).unwrap();
+        let spec = serde_json::json!({
+            "agent_type": "single",
+            "name": "debug-agent",
+            "description": "diagnostic",
+            "model": model,
+            "system_prompt": "You are a friendly greeter.",
+            "max_tokens": 512,
+            "tools": [],
+            "deploy": "cli",
+            "provider": {"type": "openai"}
+        });
+        std::fs::write(
+            tmp.path().join(".studio/specs/current.json"),
+            serde_json::to_string_pretty(&spec).unwrap(),
+        )
+        .unwrap();
+
+        let (harness, wrote_any_file) = build_coding_agent(&api_key, &model, base_url.as_deref(), tmp.path(), None)
+            .await
+            .expect("build_coding_agent");
+        let harness = std::sync::Arc::new(harness);
+
+        let mut rx = harness.subscribe();
+        let prompt = "Read the spec using read_spec(), then generate all project files. Write main.py (and tools.py, workflow.py, server.py as needed based on the spec). Run ast_check on each file after writing.";
+
+        let prompt_task = {
+            let h = harness.clone();
+            tokio::spawn(async move { h.prompt(prompt).await })
+        };
+
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(45);
+        loop {
+            tokio::select! {
+                ev = rx.recv() => {
+                    match ev {
+                        Ok(event) => eprintln!("EVENT: {event:?}"),
+                        Err(e) => { eprintln!("EVENT STREAM ENDED: {e:?}"); break; }
+                    }
+                }
+                _ = tokio::time::sleep_until(deadline) => {
+                    eprintln!("TIMEOUT waiting for events");
+                    break;
+                }
+            }
+        }
+
+        let prompt_result = prompt_task.await;
+        eprintln!("prompt() task result: {prompt_result:?}");
+
+        let mut files = vec![];
+        collect_files(tmp.path(), tmp.path(), &mut files);
+        eprintln!("Files written: {files:?}");
+        eprintln!("wrote_any_file flag: {}", wrote_any_file.load(Ordering::Relaxed));
+    }
 }

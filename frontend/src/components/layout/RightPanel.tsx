@@ -7,12 +7,12 @@ export function RightPanel() {
   const activeTab = useProjectStore((s) => s.activeTab);
 
   return (
-    <div className="w-72 border-l overflow-y-auto">
+    <div className="w-72 h-full border-l overflow-y-auto">
       {activeTab === 'converse' && (
         <div className="p-2">
           <div className="text-xs text-muted-foreground mb-2">SPEC PREVIEW</div>
           {currentSpec ? (
-            <pre className="text-xs bg-muted p-2 rounded">
+            <pre className="text-xs bg-muted p-2 rounded whitespace-pre-wrap break-words">
               {JSON.stringify(currentSpec, null, 2)}
             </pre>
           ) : (

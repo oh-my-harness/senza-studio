@@ -37,9 +37,12 @@ impl ProjectManager {
         Self { root }
     }
 
-    /// Create a new project directory with `.studio/` substructure.
+    /// Create a new project directory with `.studio/` substructure. The
+    /// directory is named after the project (not a UUID), with a
+    /// Finder/Explorer-style `" (2)"` suffix on collision.
     pub fn create_project(&self, name: &str) -> StudioResult<ProjectMeta> {
-        let id = uuid::Uuid::now_v7().to_string();
+        let slug = Self::slugify_project_name(name)?;
+        let id = self.resolve_unique_dir_name(&slug);
         let dir = self.root.join(&id);
 
         fs::create_dir_all(dir.join(".studio/specs"))?;
@@ -59,6 +62,7 @@ impl ProjectManager {
 
     /// Open an existing project by ID.
     pub fn open_project(&self, id: &str) -> StudioResult<ProjectMeta> {
+        Self::validate_project_id(id)?;
         let dir = self.root.join(id);
         if !dir.exists() {
             return Err(StudioError::ProjectNotFound(id.into()));
@@ -110,6 +114,7 @@ impl ProjectManager {
 
     /// List all files in a project (excluding `.studio/`).
     pub fn list_files(&self, project_id: &str) -> StudioResult<Vec<String>> {
+        Self::validate_project_id(project_id)?;
         let dir = self.root.join(project_id);
         if !dir.exists() {
             return Err(StudioError::ProjectNotFound(project_id.into()));
@@ -122,6 +127,7 @@ impl ProjectManager {
 
     /// Save spec to `.studio/specs/current.json`.
     pub fn save_spec(&self, project_id: &str, spec: &Spec) -> StudioResult<()> {
+        Self::validate_project_id(project_id)?;
         let spec_dir = self.root.join(project_id).join(".studio/specs");
         fs::create_dir_all(&spec_dir)?;
         let json = serde_json::to_string_pretty(spec)?;
@@ -133,6 +139,7 @@ impl ProjectManager {
 
     /// Load the current spec from `.studio/specs/current.json`.
     pub fn load_current_spec(&self, project_id: &str) -> StudioResult<Spec> {
+        Self::validate_project_id(project_id)?;
         let path = self.root.join(project_id).join(".studio/specs/current.json");
         if !path.exists() {
             return Err(StudioError::FileNotFound(
@@ -148,6 +155,7 @@ impl ProjectManager {
     /// one exists (written by the Converser's `emit_spec_diff` tool).
     /// Missing file is a normal state, not an error.
     pub fn load_pending_diff(&self, project_id: &str) -> StudioResult<Option<SpecDiff>> {
+        Self::validate_project_id(project_id)?;
         let path = self.root.join(project_id).join(".studio/specs/pending_diff.json");
         if !path.exists() {
             return Ok(None);
@@ -158,6 +166,7 @@ impl ProjectManager {
 
     /// Get the project directory path.
     pub fn project_dir(&self, project_id: &str) -> StudioResult<PathBuf> {
+        Self::validate_project_id(project_id)?;
         let dir = self.root.join(project_id);
         if !dir.exists() {
             return Err(StudioError::ProjectNotFound(project_id.into()));
@@ -167,6 +176,7 @@ impl ProjectManager {
 
     /// Delete a project directory and everything in it. Irreversible.
     pub fn delete_project(&self, project_id: &str) -> StudioResult<()> {
+        Self::validate_project_id(project_id)?;
         let dir = self.root.join(project_id);
         if !dir.exists() {
             return Err(StudioError::ProjectNotFound(project_id.into()));
@@ -187,7 +197,69 @@ impl ProjectManager {
         Ok(())
     }
 
+    /// Turn a free-form project name into a safe, single-segment directory
+    /// name. Preserves case and spaces — the goal is "a folder with the
+    /// project name," not a lowercase-hyphenated slug — but replaces the
+    /// two characters that could otherwise create or escape a path segment,
+    /// and rejects names that would collide with reserved/hidden semantics.
+    fn slugify_project_name(name: &str) -> StudioResult<String> {
+        let trimmed = name.trim();
+        if trimmed.is_empty() {
+            return Err(StudioError::InvalidProjectName(
+                "project name cannot be empty".into(),
+            ));
+        }
+        let cleaned: String = trimmed
+            .chars()
+            .map(|c| if c == '/' || c == '\\' { '-' } else { c })
+            .collect();
+        let cleaned = cleaned.trim().to_string();
+        if cleaned.is_empty() || cleaned == "." || cleaned == ".." || cleaned.starts_with('.') {
+            return Err(StudioError::InvalidProjectName(format!(
+                "'{name}' is not a valid project name"
+            )));
+        }
+        Ok(cleaned)
+    }
+
+    /// Resolve `candidate` to a directory name that doesn't already exist
+    /// under `root`, appending a Finder/Explorer-style `" (2)"`, `" (3)"`,
+    /// ... suffix on collision.
+    fn resolve_unique_dir_name(&self, candidate: &str) -> String {
+        if !self.root.join(candidate).exists() {
+            return candidate.to_string();
+        }
+        let mut n = 2;
+        loop {
+            let attempt = format!("{candidate} ({n})");
+            if !self.root.join(&attempt).exists() {
+                return attempt;
+            }
+            n += 1;
+        }
+    }
+
+    /// Reject a `project_id` that could escape the projects root when
+    /// joined onto it (`..`, embedded separators, empty). Every public
+    /// method taking `project_id: &str` from an HTTP path param calls this
+    /// first — previously harmless only because `project_id` always
+    /// happened to be a server-generated UUID; now that directory names
+    /// come from free-form project names, this needs to be explicit.
+    fn validate_project_id(id: &str) -> StudioResult<()> {
+        if id.is_empty()
+            || id == "."
+            || id == ".."
+            || id.contains('/')
+            || id.contains('\\')
+            || id.contains('\0')
+        {
+            return Err(StudioError::PathTraversalBlocked(id.into()));
+        }
+        Ok(())
+    }
+
     fn resolve_path(&self, project_id: &str, path: &str) -> StudioResult<PathBuf> {
+        Self::validate_project_id(project_id)?;
         let base = self.root.join(project_id);
         if !base.exists() {
             return Err(StudioError::ProjectNotFound(project_id.into()));
@@ -319,6 +391,56 @@ mod tests {
     fn test_delete_nonexistent_project_errors() {
         let (mgr, _dir) = make_manager();
         let result = mgr.delete_project("nonexistent-id");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_create_project_uses_name_as_dir_name() {
+        let (mgr, _dir) = make_manager();
+        let project = mgr.create_project("My Test Agent").unwrap();
+        assert_eq!(project.id, "My Test Agent");
+        assert_eq!(project.dir.file_name().unwrap().to_str().unwrap(), "My Test Agent");
+    }
+
+    #[test]
+    fn test_create_project_sanitizes_slashes() {
+        let (mgr, _dir) = make_manager();
+        let project = mgr.create_project("weird/name\\here").unwrap();
+        assert_eq!(project.id, "weird-name-here");
+    }
+
+    #[test]
+    fn test_create_project_rejects_empty_name() {
+        let (mgr, _dir) = make_manager();
+        let result = mgr.create_project("   ");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_create_project_collision_gets_suffixed() {
+        let (mgr, _dir) = make_manager();
+        let first = mgr.create_project("Duplicate").unwrap();
+        let second = mgr.create_project("Duplicate").unwrap();
+        let third = mgr.create_project("Duplicate").unwrap();
+        assert_eq!(first.id, "Duplicate");
+        assert_eq!(second.id, "Duplicate (2)");
+        assert_eq!(third.id, "Duplicate (3)");
+    }
+
+    #[test]
+    fn test_validate_project_id_rejects_traversal() {
+        assert!(ProjectManager::validate_project_id("..").is_err());
+        assert!(ProjectManager::validate_project_id(".").is_err());
+        assert!(ProjectManager::validate_project_id("a/b").is_err());
+        assert!(ProjectManager::validate_project_id("a\\b").is_err());
+        assert!(ProjectManager::validate_project_id("").is_err());
+        assert!(ProjectManager::validate_project_id("normal-name").is_ok());
+    }
+
+    #[test]
+    fn test_open_project_rejects_traversal_id() {
+        let (mgr, _dir) = make_manager();
+        let result = mgr.open_project("..");
         assert!(result.is_err());
     }
 

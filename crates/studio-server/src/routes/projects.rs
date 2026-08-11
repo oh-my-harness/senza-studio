@@ -35,10 +35,13 @@ async fn create_project(
     State(state): State<Arc<AppState>>,
     Json(req): Json<CreateProjectRequest>,
 ) -> Result<Json<ProjectResponse>, (StatusCode, String)> {
-    let project = state
-        .project_manager
-        .create_project(&req.name)
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    let project = state.project_manager().create_project(&req.name).map_err(|e| {
+        let status = match e {
+            studio_core::error::StudioError::InvalidProjectName(_) => StatusCode::BAD_REQUEST,
+            _ => StatusCode::INTERNAL_SERVER_ERROR,
+        };
+        (status, e.to_string())
+    })?;
     Ok(Json(ProjectResponse {
         id: project.id,
         name: project.name,
@@ -51,7 +54,7 @@ async fn list_projects(
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<Vec<ProjectResponse>>, (StatusCode, String)> {
     let projects = state
-        .project_manager
+        .project_manager()
         .list_projects()
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
     Ok(Json(
@@ -72,7 +75,7 @@ async fn get_project(
     Path(id): Path<String>,
 ) -> Result<Json<ProjectResponse>, (StatusCode, String)> {
     let project = state
-        .project_manager
+        .project_manager()
         .open_project(&id)
         .map_err(|e| (StatusCode::NOT_FOUND, e.to_string()))?;
     Ok(Json(ProjectResponse {
@@ -91,10 +94,10 @@ async fn get_spec(
     // missing spec.json as the normal "no spec yet" case (project created
     // from an example, or built purely code-first) rather than an error.
     state
-        .project_manager
+        .project_manager()
         .open_project(&id)
         .map_err(|e| (StatusCode::NOT_FOUND, e.to_string()))?;
-    match state.project_manager.load_current_spec(&id) {
+    match state.project_manager().load_current_spec(&id) {
         Ok(spec) => Ok(Json(Some(spec))),
         Err(studio_core::error::StudioError::FileNotFound(_)) => Ok(Json(None)),
         Err(e) => Err((StatusCode::INTERNAL_SERVER_ERROR, e.to_string())),
@@ -106,11 +109,11 @@ async fn get_pending_diff(
     Path(id): Path<String>,
 ) -> Result<Json<Option<studio_core::spec::SpecDiff>>, (StatusCode, String)> {
     state
-        .project_manager
+        .project_manager()
         .open_project(&id)
         .map_err(|e| (StatusCode::NOT_FOUND, e.to_string()))?;
     let diff = state
-        .project_manager
+        .project_manager()
         .load_pending_diff(&id)
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
     Ok(Json(diff))
@@ -121,7 +124,7 @@ async fn delete_project(
     Path(id): Path<String>,
 ) -> Result<StatusCode, (StatusCode, String)> {
     state
-        .project_manager
+        .project_manager()
         .delete_project(&id)
         .map_err(|e| (StatusCode::NOT_FOUND, e.to_string()))?;
     Ok(StatusCode::NO_CONTENT)
@@ -132,7 +135,7 @@ async fn list_files(
     Path(id): Path<String>,
 ) -> Result<Json<Vec<String>>, (StatusCode, String)> {
     let files = state
-        .project_manager
+        .project_manager()
         .list_files(&id)
         .map_err(|e| (StatusCode::NOT_FOUND, e.to_string()))?;
     Ok(Json(files))
@@ -143,7 +146,7 @@ async fn get_file(
     Path((id, path)): Path<(String, String)>,
 ) -> Result<String, (StatusCode, String)> {
     state
-        .project_manager
+        .project_manager()
         .read_file(&id, &path)
         .map_err(|e| (StatusCode::NOT_FOUND, e.to_string()))
 }
@@ -159,7 +162,7 @@ async fn put_file(
     Json(req): Json<WriteFileRequest>,
 ) -> Result<StatusCode, (StatusCode, String)> {
     state
-        .project_manager
+        .project_manager()
         .write_file(&id, &path, &req.content)
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
     Ok(StatusCode::OK)

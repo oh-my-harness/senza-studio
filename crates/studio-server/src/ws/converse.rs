@@ -26,7 +26,7 @@ async fn ws_converse_handler(
 async fn handle_converse_ws(mut socket: WebSocket, state: Arc<AppState>, project_id: String) {
     use axum::extract::ws::Message;
 
-    let project = match state.project_manager.open_project(&project_id) {
+    let project = match state.project_manager().open_project(&project_id) {
         Ok(p) => p,
         Err(e) => {
             let _ = socket

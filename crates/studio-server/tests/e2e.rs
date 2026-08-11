@@ -17,6 +17,24 @@ fn test_state() -> Arc<AppState> {
     Arc::new(AppState::new(projects_root, settings_path))
 }
 
+/// Percent-encode a project id for use in a request URI. Project ids are
+/// now derived from free-form project names (e.g. "My Agent") rather than
+/// always being a UUID, so test fixtures with spaces need real encoding —
+/// matching what a correctly-encoding real HTTP client (e.g. the frontend's
+/// `encodeURIComponent`) would send.
+fn encode_id(id: &str) -> String {
+    let mut out = String::new();
+    for byte in id.bytes() {
+        match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(byte as char);
+            }
+            _ => out.push_str(&format!("%{byte:02X}")),
+        }
+    }
+    out
+}
+
 #[tokio::test]
 async fn test_health() {
     let app = build_app(test_state());
@@ -69,7 +87,7 @@ async fn test_create_and_list_projects() {
         .clone()
         .oneshot(
             Request::builder()
-                .uri(&format!("/api/projects/{project_id}"))
+                .uri(&format!("/api/projects/{}", encode_id(&project_id)))
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -83,7 +101,7 @@ async fn test_create_and_list_projects() {
         .oneshot(
             Request::builder()
                 .method("DELETE")
-                .uri(&format!("/api/projects/{project_id}"))
+                .uri(&format!("/api/projects/{}", encode_id(&project_id)))
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -95,7 +113,7 @@ async fn test_create_and_list_projects() {
     let res = app
         .oneshot(
             Request::builder()
-                .uri(&format!("/api/projects/{project_id}"))
+                .uri(&format!("/api/projects/{}", encode_id(&project_id)))
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -181,7 +199,7 @@ async fn test_create_from_example() {
     let res = app
         .oneshot(
             Request::builder()
-                .uri(&format!("/api/projects/{project_id}/files"))
+                .uri(&format!("/api/projects/{}/files", encode_id(project_id)))
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -223,7 +241,7 @@ async fn test_write_and_read_file() {
         .oneshot(
             Request::builder()
                 .method("PUT")
-                .uri(&format!("/api/projects/{project_id}/files/test.py"))
+                .uri(&format!("/api/projects/{}/files/test.py", encode_id(project_id)))
                 .header("Content-Type", "application/json")
                 .body(Body::from(write_req))
                 .unwrap(),
@@ -236,7 +254,7 @@ async fn test_write_and_read_file() {
     let res = app
         .oneshot(
             Request::builder()
-                .uri(&format!("/api/projects/{project_id}/files/test.py"))
+                .uri(&format!("/api/projects/{}/files/test.py", encode_id(project_id)))
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -275,7 +293,7 @@ async fn test_get_spec_null_when_missing_and_404_for_bad_project() {
         .clone()
         .oneshot(
             Request::builder()
-                .uri(&format!("/api/projects/{project_id}/spec"))
+                .uri(&format!("/api/projects/{}/spec", encode_id(project_id)))
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -326,7 +344,7 @@ async fn test_get_pending_diff_null_when_missing_and_404_for_bad_project() {
         .clone()
         .oneshot(
             Request::builder()
-                .uri(&format!("/api/projects/{project_id}/pending-diff"))
+                .uri(&format!("/api/projects/{}/pending-diff", encode_id(project_id)))
                 .body(Body::empty())
                 .unwrap(),
         )

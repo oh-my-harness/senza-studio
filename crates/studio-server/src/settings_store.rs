@@ -21,6 +21,10 @@ pub struct StudioSettings {
     pub user_api_key: String,
     #[serde(default)]
     pub user_base_url: String,
+    /// Base directory new projects are created under. Empty = use the
+    /// server's startup default (`SENZA_STUDIO_PROJECTS_DIR`/`./projects`).
+    #[serde(default)]
+    pub working_directory: String,
 }
 
 fn default_model() -> String {
@@ -35,6 +39,7 @@ impl Default for StudioSettings {
             base_url: String::new(),
             user_api_key: String::new(),
             user_base_url: String::new(),
+            working_directory: String::new(),
         }
     }
 }

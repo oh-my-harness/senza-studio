@@ -25,6 +25,24 @@ async fn save_settings(
     State(state): State<Arc<AppState>>,
     Json(settings): Json<Value>,
 ) -> impl IntoResponse {
+    // Validate (and create, mirroring what main.rs already does for the
+    // startup default) the working directory before persisting — a
+    // persist-then-fail here would leave a broken setting saved, silently
+    // breaking every subsequent project operation.
+    if let Some(dir) = settings.get("working_directory").and_then(|v| v.as_str()) {
+        let trimmed = dir.trim();
+        if !trimmed.is_empty() {
+            if let Err(e) = std::fs::create_dir_all(trimmed) {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(serde_json::json!({
+                        "error": format!("cannot use '{trimmed}' as working directory: {e}")
+                    })),
+                ).into_response();
+            }
+        }
+    }
+
     match state.settings_store.update(settings) {
         Ok(updated) => (
             StatusCode::OK,

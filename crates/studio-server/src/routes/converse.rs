@@ -32,7 +32,7 @@ async fn get_conversation(
     Path(project_id): Path<String>,
 ) -> Result<Json<Vec<ConversationMessage>>, (StatusCode, String)> {
     let project = state
-        .project_manager
+        .project_manager()
         .open_project(&project_id)
         .map_err(|e| (StatusCode::NOT_FOUND, e.to_string()))?;
     let messages = load_conversation(&project.dir)
@@ -46,7 +46,7 @@ async fn converse(
     Json(_req): Json<ConverseRequest>,
 ) -> Result<Json<ConverseResponse>, (StatusCode, String)> {
     let _project = state
-        .project_manager
+        .project_manager()
         .open_project(&project_id)
         .map_err(|e| (StatusCode::NOT_FOUND, e.to_string()))?;
     let run_id = uuid::Uuid::now_v7().to_string();

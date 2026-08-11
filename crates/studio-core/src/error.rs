@@ -15,6 +15,9 @@ pub enum StudioError {
     #[error("path traversal blocked: {0}")]
     PathTraversalBlocked(String),
 
+    #[error("invalid project name: {0}")]
+    InvalidProjectName(String),
+
     #[error("run not found: {0}")]
     RunNotFound(String),
 
@@ -59,5 +62,11 @@ mod tests {
     fn test_path_traversal_blocked() {
         let err = StudioError::PathTraversalBlocked("../etc/passwd".into());
         assert!(err.to_string().contains("../etc/passwd"));
+    }
+
+    #[test]
+    fn test_invalid_project_name_display() {
+        let err = StudioError::InvalidProjectName("empty name".into());
+        assert!(err.to_string().contains("empty name"));
     }
 }

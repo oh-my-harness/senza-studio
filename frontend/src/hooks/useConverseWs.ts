@@ -10,7 +10,7 @@ export function useConverseWs() {
   useEffect(() => {
     if (!project) return;
     const ws = new WsClient(
-      `ws://${location.host}/ws/converse/${project.id}`,
+      `ws://${location.host}/ws/converse/${encodeURIComponent(project.id)}`,
       onConverseEvent,
     );
     wsRef.current = ws;
