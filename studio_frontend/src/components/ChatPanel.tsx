@@ -43,8 +43,11 @@ export default function ChatPanel({ projectId }: { projectId: string }) {
           toolName: event.tool_name,
           timestamp: Date.now(),
         });
-      } else if (event.type === "settled" || event.type === "aborted") {
+      } else if (event.type === "settled" || event.type === "aborted" || event.type === "error" || event.type === "agent_end") {
         setStreaming(false);
+        if (event.type === "error") {
+          addMessage({ role: "assistant", content: `⚠️ ${event.message || "发生错误"}`, timestamp: Date.now() });
+        }
         setStatus("spec_ready");
       } else if (event.type === "spec_updated") {
         if (event.spec) setSpec(event.spec);
