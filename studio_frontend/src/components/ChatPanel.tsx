@@ -17,6 +17,7 @@ export default function ChatPanel({ projectId }: { projectId: string }) {
   // 连接 WebSocket
   useEffect(() => {
     const socket = createWebSocket(projectId);
+    setWs(socket);
 
     socket.onmessage = (e) => {
       const event = JSON.parse(e.data);
