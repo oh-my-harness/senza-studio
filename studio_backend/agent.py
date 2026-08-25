@@ -129,11 +129,18 @@ class StudioAgent:
             raise RuntimeError("Harness not started. Call start_session() first.")
         return self._harness.prompt_and_collect(text, timeout_ms=timeout_ms)
 
-    def subscribe(self):
-        """Return event receiver for streaming. Call before prompt()."""
+    def events(self, timeout_ms: int = 5000, max_consecutive_timeouts: int = 999):
+        """Return event iterator for streaming. Call before prompt().
+
+        Uses harness.events() which returns a sync iterator.
+        timeout_ms is per-next() wait; max_consecutive_timeouts is high
+        to avoid premature termination during LLM first-token latency.
+        """
         if self._harness is None:
             raise RuntimeError("Harness not started. Call start_session() first.")
-        return self._harness.subscribe()
+        return self._harness.events(
+            timeout_ms=timeout_ms, max_consecutive_timeouts=max_consecutive_timeouts
+        )
 
     def abort(self) -> None:
         """Cancel current prompt if running."""

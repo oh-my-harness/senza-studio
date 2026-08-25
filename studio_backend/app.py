@@ -1,6 +1,8 @@
 """FastAPI application factory + REST endpoints + WebSocket."""
 from __future__ import annotations
 
+import asyncio
+
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
@@ -125,12 +127,13 @@ def create_app(config: StudioConfig | None = None) -> FastAPI:
         state = _get_or_load_project(cfg, project_id)
         agent = state["agent"]
         project = state["project"]
-        spec = state["spec"]
 
         # 如果 agent 还没启动 session，启动一个
         if agent._harness is None:
             active = project.meta.get("active_session")
             agent.start_session(active)
+
+        streaming_task: asyncio.Task | None = None
 
         try:
             while True:
@@ -138,9 +141,21 @@ def create_app(config: StudioConfig | None = None) -> FastAPI:
                 msg_type = msg.get("type")
 
                 if msg_type == "prompt":
+                    # 如果上一个 prompt 还在跑，先中止
+                    if streaming_task is not None and not streaming_task.done():
+                        agent.abort()
+                        streaming_task.cancel()
+                        try:
+                            await streaming_task
+                        except asyncio.CancelledError:
+                            pass
+
                     text = msg.get("text", "")
-                    await run_prompt_streaming(
-                        websocket, agent, project, spec, text
+                    # 将 streaming 作为后台 task 运行，不阻塞 WS 主循环
+                    streaming_task = asyncio.create_task(
+                        run_prompt_streaming(
+                            websocket, agent, project, text, state
+                        )
                     )
 
                 elif msg_type == "abort":
@@ -159,5 +174,13 @@ def create_app(config: StudioConfig | None = None) -> FastAPI:
 
         except WebSocketDisconnect:
             pass
+        finally:
+            if streaming_task is not None and not streaming_task.done():
+                streaming_task.cancel()
+                try:
+                    await streaming_task
+                except asyncio.CancelledError:
+                    pass
+
 
     return app
