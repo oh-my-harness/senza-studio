@@ -8,6 +8,7 @@ export default function ChatPanel({ projectId }: { projectId: string }) {
   const [streaming, setStreaming] = useState(false);
   const messages = useStudioStore((s) => s.messages);
   const addMessage = useStudioStore((s) => s.addMessage);
+  const appendToLastAssistant = useStudioStore((s) => s.appendToLastAssistant);
   const setSpec = useStudioStore((s) => s.setSpec);
   const setStatus = useStudioStore((s) => s.setStatus);
   const ws = useStudioStore((s) => s.ws);
@@ -24,11 +25,10 @@ export default function ChatPanel({ projectId }: { projectId: string }) {
 
       if (event.type === "text_delta") {
         // 流式文本追加到最近的 assistant 消息
-        addMessage({
-          role: "assistant",
-          content: event.text || "",
-          timestamp: Date.now(),
-        });
+        appendToLastAssistant(event.text || "");
+      } else if (event.type === "message_start") {
+        // 新消息开始 — 插入空 assistant 气泡，后续 text_delta 追加到它
+        addMessage({ role: "assistant", content: "", timestamp: Date.now() });
       } else if (event.type === "tool_call_start") {
         addMessage({
           role: "tool",
