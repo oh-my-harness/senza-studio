@@ -72,6 +72,17 @@ def test_remove_step_not_found_fails():
     spec = Spec()
     with pytest.raises(SpecError, match="not found"):
         spec.remove_step("ghost")
+def test_remove_step_cleans_inbound_edges():
+    spec = Spec()
+    spec.add_step("a", "a", "agent")
+    spec.add_step("b", "b", "agent")
+    spec.add_step("c", "c", "terminal")
+    spec.add_edge("b", "a", "success")  # b→a edge
+    spec.add_edge("a", "c", "success")
+    spec.remove_step("a")
+    data = spec.get_current_spec()
+    # b's edge to a should be cleaned
+    assert "next_on_success" not in data["stages"][0]
 
 
 def test_set_step_property():
