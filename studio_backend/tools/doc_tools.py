@@ -24,7 +24,10 @@ def make_doc_callbacks(project: Project) -> dict[str, Callable[[dict, Any], str]
     def _write_document(args, ctx):
         name = args["name"]
         content = args["content"]
-        doc_path = project.path / ".studio" / "docs" / name
+        doc_path = (project.path / ".studio" / "docs" / name).resolve()
+        docs_dir = (project.path / ".studio" / "docs").resolve()
+        if not doc_path.is_relative_to(docs_dir):
+            return f"Error: invalid document name '{name}'"
         doc_path.parent.mkdir(parents=True, exist_ok=True)
         doc_path.write_text(content, encoding="utf-8")
         return f"Document '{name}' saved."

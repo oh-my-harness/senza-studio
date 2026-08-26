@@ -67,7 +67,9 @@ class Project:
 
     @classmethod
     def open(cls, config: StudioConfig, project_id: str) -> Project:
-        path = config.projects_dir / project_id
+        path = (config.projects_dir / project_id).resolve()
+        if not path.is_relative_to(config.projects_dir.resolve()):
+            raise FileNotFoundError(f"project {project_id} not found")
         meta_path = path / ".studio" / "meta.json"
         if not meta_path.exists():
             raise FileNotFoundError(f"project {project_id} not found")

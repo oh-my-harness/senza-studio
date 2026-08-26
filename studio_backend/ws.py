@@ -106,9 +106,14 @@ async def run_prompt_streaming(
         except Exception:
             pass
     finally:
-        # 等待 prompt 线程结束
-        done.wait(timeout=30)
-        prompt_thread.join(timeout=5)
+        # 等待 prompt 线程结束（与 prompt timeout_ms=120000 对齐）
+        if not done.wait(timeout=125):
+            # 线程仍未结束 — 强制中止
+            try:
+                agent.abort()
+            except Exception:
+                pass
+            prompt_thread.join(timeout=10)
 
         # 从 state 读取最新 spec（可能被 REST PUT 更新过）
         spec = state["spec"]

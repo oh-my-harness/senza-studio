@@ -29,6 +29,13 @@ class Spec:
     """
 
     def __init__(self, data: dict | None = None) -> None:
+        if data is not None:
+            if not isinstance(data, dict):
+                raise SpecError(
+                    f"spec data must be a dict, got {type(data).__name__}"
+                )
+            if "stages" not in data:
+                data = {"stages": []}
         self._data: dict = copy.deepcopy(data) if data else {"stages": []}
 
     # ── 查询 ──────────────────────────────────────────────

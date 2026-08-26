@@ -55,6 +55,17 @@ export default function ChatPanel({ projectId }: { projectId: string }) {
       }
     };
 
+    socket.onclose = () => {
+      setStreaming(false);
+      setStatus("idle");
+    };
+
+    socket.onerror = () => {
+      setStreaming(false);
+      setStatus("idle");
+      addMessage({ role: "assistant", content: "⚠️ 连接断开，请刷新页面重试", timestamp: Date.now() });
+    };
+
     return () => socket.close();
   }, [projectId]);
 

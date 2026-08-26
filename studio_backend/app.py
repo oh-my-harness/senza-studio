@@ -97,6 +97,10 @@ def create_app(config: StudioConfig | None = None) -> FastAPI:
         state = _get_or_load_project(cfg, project_id)
         # 替换 spec 内容
         new_spec = Spec(req.spec)
+        try:
+            new_spec.validate()
+        except SpecError as e:
+            return JSONResponse(status_code=400, content={"detail": str(e)})
         state["spec"] = new_spec
         state["agent"]._spec = new_spec
         state["project"].save_spec(new_spec)

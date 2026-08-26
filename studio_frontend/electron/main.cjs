@@ -8,10 +8,10 @@ let mainWindow = null;
 
 function startBackend() {
   // 开发期：从项目根目录启动 Python 后端
-  const backendPath = path.resolve(__dirname, "../../studio_backend");
+  const projectRoot = path.resolve(__dirname, "../../");
   pythonProcess = spawn("python", ["-m", "studio_backend.server"], {
-    cwd: path.resolve(__dirname, "../../"),
-    env: { ...process.env, PYTHONPATH: backendPath },
+    cwd: projectRoot,
+    env: { ...process.env, PYTHONPATH: projectRoot },
   });
 
   pythonProcess.stdout.on("data", (data) => {
