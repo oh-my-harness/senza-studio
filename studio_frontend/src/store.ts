@@ -14,6 +14,7 @@ interface StudioStore {
   setSpec: (s: Spec) => void;
   setStatus: (s: StudioStatus) => void;
   addMessage: (m: ChatMessage) => void;
+  setMessages: (msgs: ChatMessage[]) => void;
   appendToLastAssistant: (text: string) => void;
   selectStep: (s: Step | null) => void;
   setWs: (ws: WebSocket | null) => void;
@@ -31,6 +32,7 @@ export const useStudioStore = create<StudioStore>((set) => ({
   setSpec: (spec) => set({ spec }),
   setStatus: (status) => set({ status }),
   addMessage: (m) => set((s) => ({ messages: [...s.messages, m] })),
+  setMessages: (messages) => set({ messages }),
   selectStep: (selectedStep) => set({ selectedStep }),
   setWs: (ws) => set({ ws }),
   appendToLastAssistant: (text) =>

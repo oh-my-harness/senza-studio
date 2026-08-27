@@ -1,5 +1,5 @@
 // studio_frontend/src/api.ts
-import type { ProjectMeta, Spec } from "./types";
+import type { ChatMessage, ProjectMeta, Spec } from "./types";
 
 const BASE = "/api";
 
@@ -19,6 +19,8 @@ export const api = {
     }),
   getProject: (id: string) => fetchJson<ProjectMeta>(`${BASE}/projects/${id}`),
   getSpec: (id: string) => fetchJson<Spec>(`${BASE}/projects/${id}/spec`),
+  getMessages: (id: string) =>
+    fetchJson<ChatMessage[]>(`${BASE}/projects/${id}/messages`),
   updateSpec: (id: string, spec: Spec) =>
     fetchJson<{ status: string }>(`${BASE}/projects/${id}/spec`, {
       method: "PUT",

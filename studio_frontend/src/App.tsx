@@ -12,6 +12,7 @@ export default function App() {
   const [projectId, setProjectId] = useState<string | null>(null);
   const setProject = useStudioStore((s) => s.setProject);
   const setSpec = useStudioStore((s) => s.setSpec);
+  const setMessages = useStudioStore((s) => s.setMessages);
   const [projects, setProjects] = useState<ProjectMeta[]>([]);
   const [newName, setNewName] = useState("");
 
@@ -24,8 +25,10 @@ export default function App() {
   const openProject = async (id: string) => {
     const meta = await api.getProject(id);
     const spec = await api.getSpec(id);
+    const messages = await api.getMessages(id);
     setProject(meta);
     setSpec(spec);
+    setMessages(messages);
     setProjectId(id);
   };
 
@@ -38,6 +41,7 @@ export default function App() {
     const spec = await api.getSpec(id);
     setProject(meta);
     setSpec(spec);
+    setMessages([]);
     setProjectId(id);
   };
 

@@ -1,3 +1,9 @@
 @tailwind base;
 @tailwind components;
 @tailwind utilities;
+
+/* body 有 h-screen，但 #root 本身没有高度，导致 App.tsx 的 h-full 链
+   一路解析成 auto，聊天面板的 overflow-y-auto 永远拿不到边界高度。 */
+#root {
+  height: 100%;
+}

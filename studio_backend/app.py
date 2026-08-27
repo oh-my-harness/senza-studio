@@ -11,6 +11,7 @@ from pydantic import BaseModel
 from .config import StudioConfig
 from .project import Project
 from .sdk_pin import check_sdk_pin
+from .session import read_session_history
 from .spec import Spec, SpecError
 from .agent import StudioAgent
 from .ws import run_prompt_streaming
@@ -125,6 +126,15 @@ def create_app(config: StudioConfig | None = None) -> FastAPI:
         state = _get_or_load_project(cfg, project_id)
         sid = state["project"].create_session()
         return {"session_id": sid}
+
+    @app.get("/api/projects/{project_id}/messages")
+    async def get_messages(project_id: str):
+        state = _get_or_load_project(cfg, project_id)
+        project = state["project"]
+        active = project.meta.get("active_session")
+        if not active:
+            return []
+        return read_session_history(project.sessions_dir, active)
 
     # ── WebSocket ────────────────────────────────────────
     @app.websocket("/ws/projects/{project_id}")
