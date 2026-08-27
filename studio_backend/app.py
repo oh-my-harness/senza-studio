@@ -10,6 +10,7 @@ from pydantic import BaseModel
 
 from .config import StudioConfig
 from .project import Project
+from .sdk_pin import check_sdk_pin
 from .spec import Spec, SpecError
 from .agent import StudioAgent
 from .ws import run_prompt_streaming
@@ -48,6 +49,7 @@ def _get_or_load_project(config: StudioConfig, project_id: str) -> dict:
 
 
 def create_app(config: StudioConfig | None = None) -> FastAPI:
+    check_sdk_pin()
     app = FastAPI(title="Senza Studio")
     app.add_middleware(
         CORSMiddleware,
