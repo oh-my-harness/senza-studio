@@ -61,8 +61,37 @@ if [ ! -d ".venv" ]; then
   echo "❌ .venv 不存在，正在创建..."
   uv venv --python 3.12
   source .venv/bin/activate
-  pip install -e ../Senza
-  pip install fastapi uvicorn pydantic pyyaml websockets
+
+  # Senza 的 Cargo.toml 里 runtime 依赖故意留 PLACEHOLDER（真实 commit
+  # 记在 senza-pkg/runtime.lock），只有 scripts/build_wheel.sh 会做替换
+  # 再构建。所以这里不能 `pip install -e ../Senza`（等价于绕过替换直接
+  # 对着 PLACEHOLDER 编译，一定失败）——必须先构建 wheel 再安装。
+  echo "📦 构建 Senza SDK wheel..."
+  (cd ../Senza && ./scripts/build_wheel.sh)
+  SENZA_WHEEL=$(ls -t ../Senza/dist/senza_sdk*.whl ../Senza/dist/senza*.whl 2>/dev/null | head -1)
+  if [ -z "$SENZA_WHEEL" ]; then
+    echo "❌ 未在 ../Senza/dist/ 找到构建好的 wheel"
+    exit 1
+  fi
+  echo "📦 安装 Senza wheel: $SENZA_WHEEL"
+  uv pip install "$SENZA_WHEEL" --force-reinstall
+  # 用 uv pip 而非裸 `pip`——某些 shell 环境里 `pip` 被 alias 到系统/
+  # 全局 pip3，会绕过当前 venv 并可能撞上不同的网络/证书配置。
+  uv pip install fastapi uvicorn pydantic pyyaml websockets
+
+  # 记录本次验证过的 senza-sdk 版本/commit——Studio 的 SDK 知识（system
+  # prompt、tool 调用）只在这个 pin 之下被验证过；drift 检测和启动时的
+  # 校验都以这个文件为准，而不是"whatever happens to be installed"。
+  SENZA_COMMIT=$(git -C ../Senza rev-parse HEAD)
+  SENZA_VERSION=$(python -c "import importlib.metadata as m; print(m.version('senza-sdk'))")
+  cat > senza-sdk.lock <<EOF
+{
+  "senza_version": "$SENZA_VERSION",
+  "senza_commit": "$SENZA_COMMIT",
+  "verified_at": "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+}
+EOF
+  echo "🔒 已记录 senza-sdk.lock (version=$SENZA_VERSION, commit=${SENZA_COMMIT:0:12})"
 else
   source .venv/bin/activate
 fi

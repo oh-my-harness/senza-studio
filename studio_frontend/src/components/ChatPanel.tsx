@@ -18,10 +18,18 @@ export default function ChatPanel({ projectId }: { projectId: string }) {
 
   // 连接 WebSocket
   useEffect(() => {
+    // React 18 StrictMode（开发模式）会在真正 mount 前先 mount → cleanup →
+    // 再 mount 一遍，用来暴露 effect 清理的 bug。上一轮的 socket 常常在
+    // handshake 完成前就被 cleanup 关闭，浏览器会当作异常断开触发
+    // onerror，把"连接断开"消息永久插进聊天记录——即使随后真正的 socket
+    // 完全正常。用这个标志位让"已经被替换掉的旧 socket"的事件直接忽略，
+    // 而不是误当成当前连接的真实断开。
+    let isCurrent = true;
     const socket = createWebSocket(projectId);
     setWs(socket);
 
     socket.onmessage = (e) => {
+      if (!isCurrent) return;
       const event = JSON.parse(e.data);
 
       if (event.type === "text_delta") {
@@ -56,17 +64,22 @@ export default function ChatPanel({ projectId }: { projectId: string }) {
     };
 
     socket.onclose = () => {
+      if (!isCurrent) return;
       setStreaming(false);
       setStatus("idle");
     };
 
     socket.onerror = () => {
+      if (!isCurrent) return;
       setStreaming(false);
       setStatus("idle");
       addMessage({ role: "assistant", content: "⚠️ 连接断开，请刷新页面重试", timestamp: Date.now() });
     };
 
-    return () => socket.close();
+    return () => {
+      isCurrent = false;
+      socket.close();
+    };
   }, [projectId]);
 
   useEffect(() => {
