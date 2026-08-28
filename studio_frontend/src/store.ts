@@ -1,6 +1,14 @@
 // studio_frontend/src/store.ts
 import { create } from "zustand";
-import type { ProjectMeta, Spec, ChatMessage, StudioStatus, Step } from "./types";
+import type {
+  ProjectMeta,
+  Spec,
+  ChatMessage,
+  StudioStatus,
+  Step,
+  GameCard,
+  StepRunStatus,
+} from "./types";
 
 interface StudioStore {
   project: ProjectMeta | null;
@@ -9,6 +17,8 @@ interface StudioStore {
   messages: ChatMessage[];
   selectedStep: Step | null;
   ws: WebSocket | null;
+  stepStatus: Record<string, StepRunStatus>;
+  gameCards: GameCard[];
 
   setProject: (p: ProjectMeta | null) => void;
   setSpec: (s: Spec) => void;
@@ -18,6 +28,11 @@ interface StudioStore {
   appendToLastAssistant: (text: string) => void;
   selectStep: (s: Step | null) => void;
   setWs: (ws: WebSocket | null) => void;
+  resetPlay: () => void;
+  startStep: (stepId: string, stepName: string) => void;
+  appendStepText: (stepId: string, text: string) => void;
+  finishStep: (stepId: string) => void;
+  failRunningSteps: () => void;
 }
 
 export const useStudioStore = create<StudioStore>((set) => ({
@@ -27,6 +42,8 @@ export const useStudioStore = create<StudioStore>((set) => ({
   messages: [],
   selectedStep: null,
   ws: null,
+  stepStatus: {},
+  gameCards: [],
 
   setProject: (project) => set({ project }),
   setSpec: (spec) => set({ spec }),
@@ -51,6 +68,47 @@ export const useStudioStore = create<StudioStore>((set) => ({
           ...msgs,
           { role: "assistant", content: text, timestamp: Date.now() },
         ],
+      };
+    }),
+
+  resetPlay: () => set({ stepStatus: {}, gameCards: [] }),
+
+  startStep: (stepId, stepName) =>
+    set((s) => ({
+      stepStatus: { ...s.stepStatus, [stepId]: "running" },
+      gameCards: [...s.gameCards, { stepId, stepName, text: "", status: "running" }],
+    })),
+
+  appendStepText: (stepId, text) =>
+    set((s) => {
+      const cards = s.gameCards;
+      const idx = [...cards].reverse().findIndex((c) => c.stepId === stepId);
+      if (idx === -1) return {};
+      const realIdx = cards.length - 1 - idx;
+      const updated = [...cards];
+      updated[realIdx] = { ...updated[realIdx], text: updated[realIdx].text + text };
+      return { gameCards: updated };
+    }),
+
+  finishStep: (stepId) =>
+    set((s) => ({
+      stepStatus: { ...s.stepStatus, [stepId]: "done" },
+      gameCards: s.gameCards.map((c) =>
+        c.stepId === stepId && c.status === "running" ? { ...c, status: "done" } : c
+      ),
+    })),
+
+  failRunningSteps: () =>
+    set((s) => {
+      const nextStatus = { ...s.stepStatus };
+      for (const [id, st] of Object.entries(nextStatus)) {
+        if (st === "running") nextStatus[id] = "error";
+      }
+      return {
+        stepStatus: nextStatus,
+        gameCards: s.gameCards.map((c) =>
+          c.status === "running" ? { ...c, status: "error" } : c
+        ),
       };
     }),
 }));

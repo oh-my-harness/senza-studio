@@ -37,7 +37,7 @@ export interface ChatMessage {
   timestamp: number;
 }
 
-export type StudioStatus = "idle" | "conversing" | "spec_ready";
+export type StudioStatus = "idle" | "conversing" | "spec_ready" | "playing";
 
 export interface WsEvent {
   type: string;
@@ -45,4 +45,13 @@ export interface WsEvent {
   step_id?: string;
   spec?: Spec;
   [key: string]: unknown;
+}
+
+export type StepRunStatus = "running" | "done" | "error";
+
+export interface GameCard {
+  stepId: string;
+  stepName: string;
+  text: string;
+  status: StepRunStatus;
 }

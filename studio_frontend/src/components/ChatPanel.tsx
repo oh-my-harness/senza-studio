@@ -3,7 +3,13 @@ import { useState, useRef, useEffect } from "react";
 import { useStudioStore } from "../store";
 import { createWebSocket, api } from "../api";
 
-export default function ChatPanel({ projectId }: { projectId: string }) {
+export default function ChatPanel({
+  projectId,
+  collapsed = false,
+}: {
+  projectId: string;
+  collapsed?: boolean;
+}) {
   const [input, setInput] = useState("");
   const [streaming, setStreaming] = useState(false);
   const [sessions, setSessions] = useState<string[]>([]);
@@ -16,6 +22,10 @@ export default function ChatPanel({ projectId }: { projectId: string }) {
   const setStatus = useStudioStore((s) => s.setStatus);
   const ws = useStudioStore((s) => s.ws);
   const setWs = useStudioStore((s) => s.setWs);
+  const startStep = useStudioStore((s) => s.startStep);
+  const appendStepText = useStudioStore((s) => s.appendStepText);
+  const finishStep = useStudioStore((s) => s.finishStep);
+  const failRunningSteps = useStudioStore((s) => s.failRunningSteps);
   const scrollRef = useRef<HTMLDivElement>(null);
   const bottomRef = useRef<HTMLDivElement>(null);
 
@@ -46,7 +56,18 @@ export default function ChatPanel({ projectId }: { projectId: string }) {
       if (!isCurrent) return;
       const event = JSON.parse(e.data);
 
-      if (event.type === "text_delta") {
+      if (event.type === "text_delta" && event.step_id) {
+        // Play 事件（带 step_id）——追加到对应 step 的 Game view 卡片
+        appendStepText(event.step_id, event.text || "");
+      } else if (event.type === "step_started") {
+        startStep(event.step_id, event.step_name);
+      } else if (event.type === "step_finished") {
+        finishStep(event.step_id);
+      } else if (event.type === "failed") {
+        failRunningSteps();
+      } else if (event.type === "workflow_done") {
+        setStatus("spec_ready");
+      } else if (event.type === "text_delta") {
         // 流式文本追加到最近的 assistant 消息
         appendToLastAssistant(event.text || "");
       } else if (event.type === "message_start") {
@@ -127,7 +148,11 @@ export default function ChatPanel({ projectId }: { projectId: string }) {
   };
 
   return (
-    <div className="flex flex-col h-full w-96 border-r border-gray-200 bg-white">
+    <div
+      className={`flex flex-col h-full border-r border-gray-200 bg-white ${
+        collapsed ? "w-64" : "w-96"
+      }`}
+    >
       <div className="px-4 py-3 border-b border-gray-200 font-medium text-gray-700 flex items-center justify-between gap-2">
         <span>对话</span>
         <div className="flex items-center gap-1">

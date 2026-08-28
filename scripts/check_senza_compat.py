@@ -4,16 +4,17 @@
 Usage:
     python scripts/check_senza_compat.py
 
-Studio's meta-agent depends on a specific set of senza symbols (functions,
-plugins, HarnessBuilder methods). That surface is described in
-studio_backend/agent.py and studio_backend/tools/*.py, hand-written against
-whatever senza-sdk version happened to be installed at the time. Nothing
-previously checked that those calls still match the ACTUAL installed SDK —
-which is exactly how a stale/mismatched SDK build can silently "look broken"
-(or silently look fine when it isn't) until someone stumbles on it manually.
+Studio's meta-agent and Play executor depend on a specific set of senza
+symbols (functions, plugins, HarnessBuilder methods, WorkflowEngine). That
+surface is described in studio_backend/agent.py, studio_backend/play.py, and
+studio_backend/tools/*.py, hand-written against whatever senza-sdk version
+happened to be installed at the time. Nothing previously checked that those
+calls still match the ACTUAL installed SDK — which is exactly how a
+stale/mismatched SDK build can silently "look broken" (or silently look fine
+when it isn't) until someone stumbles on it manually.
 
 This script:
-1. AST-scans agent.py + tools/*.py for every `senza.*` symbol used (including
+1. AST-scans agent.py + play.py + tools/*.py for every `senza.*` symbol used (including
    chained HarnessBuilder methods like `.plugin(...)`, `.auto_compact(...)`)
    and the keyword arguments passed at each call site.
 2. Introspects the installed `senza` module for each discovered symbol
@@ -36,6 +37,7 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parent.parent
 SCANNED_FILES = [
     REPO_ROOT / "studio_backend" / "agent.py",
+    REPO_ROOT / "studio_backend" / "play.py",
     *sorted((REPO_ROOT / "studio_backend" / "tools").glob("*.py")),
 ]
 

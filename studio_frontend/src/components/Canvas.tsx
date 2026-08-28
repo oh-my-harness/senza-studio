@@ -3,6 +3,7 @@ import { useMemo } from "react";
 import ReactFlow, {
   Background,
   Controls,
+  MarkerType,
   type Node,
   type Edge,
   Position,
@@ -15,6 +16,12 @@ const TYPE_COLORS: Record<string, string> = {
   checker: "#f59e0b",
   tool: "#10b981",
   terminal: "#6b7280",
+};
+
+const RUN_STATUS_BG: Record<string, string> = {
+  running: "#fef3c7",
+  done: "#dcfce7",
+  error: "#fee2e2",
 };
 
 const H_SPACING = 220;
@@ -96,6 +103,7 @@ export default function Canvas() {
   const spec = useStudioStore((s) => s.spec);
   const selectStep = useStudioStore((s) => s.selectStep);
   const selectedStep = useStudioStore((s) => s.selectedStep);
+  const stepStatus = useStudioStore((s) => s.stepStatus);
 
   const { nodes, edges } = useMemo(() => {
     const stages = spec.stages || [];
@@ -116,7 +124,9 @@ export default function Canvas() {
         border: `2px solid ${TYPE_COLORS[step.type] || "#ccc"}`,
         borderRadius: "8px",
         padding: "8px 16px",
-        background: selectedStep?.name === step.name ? "#eff6ff" : "#fff",
+        background:
+          RUN_STATUS_BG[stepStatus[step.name]] ??
+          (selectedStep?.name === step.name ? "#eff6ff" : "#fff"),
       },
       sourcePosition: Position.Bottom,
       targetPosition: Position.Top,
@@ -134,14 +144,14 @@ export default function Canvas() {
             target: val,
             label: condition,
             type: "smoothstep",
-            animated: true,
+            markerEnd: { type: MarkerType.ArrowClosed },
           });
         }
       }
     }
 
     return { nodes, edges };
-  }, [spec, selectedStep]);
+  }, [spec, selectedStep, stepStatus]);
 
   return (
     <div className="flex-1 h-full">

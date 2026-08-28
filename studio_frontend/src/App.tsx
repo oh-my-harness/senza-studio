@@ -4,6 +4,8 @@ import { useStudioStore } from "./store";
 import { api } from "./api";
 import ChatPanel from "./components/ChatPanel";
 import Canvas from "./components/Canvas";
+import ControlBar from "./components/ControlBar";
+import GameView from "./components/GameView";
 import Inspector from "./components/Inspector";
 import StatusBar from "./components/StatusBar";
 import type { ProjectMeta } from "./types";
@@ -13,6 +15,7 @@ export default function App() {
   const setProject = useStudioStore((s) => s.setProject);
   const setSpec = useStudioStore((s) => s.setSpec);
   const setMessages = useStudioStore((s) => s.setMessages);
+  const status = useStudioStore((s) => s.status);
   const [projects, setProjects] = useState<ProjectMeta[]>([]);
   const [newName, setNewName] = useState("");
 
@@ -84,10 +87,14 @@ export default function App() {
     );
   }
 
+  const playing = status === "playing";
+
   return (
     <div className="h-full w-full flex flex-col">
+      <ControlBar />
       <div className="flex-1 flex overflow-hidden">
-        <ChatPanel projectId={projectId} />
+        <ChatPanel projectId={projectId} collapsed={playing} />
+        {playing && <GameView />}
         <Canvas />
         <Inspector projectId={projectId} />
       </div>

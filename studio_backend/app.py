@@ -9,12 +9,13 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
 from .config import StudioConfig
+from .play import PlaySession
 from .project import Project
 from .sdk_pin import check_sdk_pin
 from .session import read_session_history
 from .spec import Spec, SpecError
 from .agent import StudioAgent
-from .ws import run_prompt_streaming
+from .ws import run_play_streaming, run_prompt_streaming
 
 
 class CreateProjectReq(BaseModel):
@@ -150,13 +151,34 @@ def create_app(config: StudioConfig | None = None) -> FastAPI:
             agent.start_session(active)
 
         streaming_task: asyncio.Task | None = None
+        play_task: asyncio.Task | None = None
 
         try:
             while True:
                 msg = await websocket.receive_json()
                 msg_type = msg.get("type")
 
-                if msg_type == "prompt":
+                if msg_type == "play":
+                    if play_task is not None and not play_task.done():
+                        continue  # 已经在跑，忽略重复 play
+                    play_session = PlaySession(cfg, project, state["spec"])
+                    state["play_session"] = play_session
+                    play_session.play()
+                    play_task = asyncio.create_task(
+                        run_play_streaming(websocket, play_session, project)
+                    )
+
+                elif msg_type == "stop":
+                    play_session = state.get("play_session")
+                    if play_session is not None:
+                        play_session.stop("user stop")
+                    if play_task is not None and not play_task.done():
+                        try:
+                            await play_task
+                        except asyncio.CancelledError:
+                            pass
+
+                elif msg_type == "prompt":
                     # 如果上一个 prompt 还在跑，先中止
                     if streaming_task is not None and not streaming_task.done():
                         agent.abort()
@@ -195,6 +217,15 @@ def create_app(config: StudioConfig | None = None) -> FastAPI:
                 streaming_task.cancel()
                 try:
                     await streaming_task
+                except asyncio.CancelledError:
+                    pass
+            if play_task is not None and not play_task.done():
+                play_session = state.get("play_session")
+                if play_session is not None:
+                    play_session.stop("connection closed")
+                play_task.cancel()
+                try:
+                    await play_task
                 except asyncio.CancelledError:
                     pass
 
