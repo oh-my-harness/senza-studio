@@ -50,7 +50,7 @@ Phase 7 (Export 打包)
 
 **需求文档**：`docs/phases/phase-0-textdelta-requirements.md`
 
-**状态**：实现中
+**状态**：已实现
 
 ---
 
@@ -95,7 +95,7 @@ Phase 7 (Export 打包)
 - 打开旧 session 继续对话
 - Inspector 能编辑 step 属性，画布实时刷新
 
-**状态**：待实现
+**状态**：已实现
 
 ---
 

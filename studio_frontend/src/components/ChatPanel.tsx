@@ -1,13 +1,16 @@
 // studio_frontend/src/components/ChatPanel.tsx
 import { useState, useRef, useEffect } from "react";
 import { useStudioStore } from "../store";
-import { createWebSocket } from "../api";
+import { createWebSocket, api } from "../api";
 
 export default function ChatPanel({ projectId }: { projectId: string }) {
   const [input, setInput] = useState("");
   const [streaming, setStreaming] = useState(false);
+  const [sessions, setSessions] = useState<string[]>([]);
+  const [activeSession, setActiveSession] = useState<string | null>(null);
   const messages = useStudioStore((s) => s.messages);
   const addMessage = useStudioStore((s) => s.addMessage);
+  const setMessages = useStudioStore((s) => s.setMessages);
   const appendToLastAssistant = useStudioStore((s) => s.appendToLastAssistant);
   const setSpec = useStudioStore((s) => s.setSpec);
   const setStatus = useStudioStore((s) => s.setStatus);
@@ -15,6 +18,17 @@ export default function ChatPanel({ projectId }: { projectId: string }) {
   const setWs = useStudioStore((s) => s.setWs);
   const scrollRef = useRef<HTMLDivElement>(null);
   const bottomRef = useRef<HTMLDivElement>(null);
+
+  // 加载 session 列表
+  useEffect(() => {
+    api
+      .listSessions(projectId)
+      .then(({ sessions, active }) => {
+        setSessions(sessions);
+        setActiveSession(active);
+      })
+      .catch(console.error);
+  }, [projectId]);
 
   // 连接 WebSocket
   useEffect(() => {
@@ -60,6 +74,11 @@ export default function ChatPanel({ projectId }: { projectId: string }) {
         setStatus("spec_ready");
       } else if (event.type === "spec_updated") {
         if (event.spec) setSpec(event.spec);
+      } else if (event.type === "session_switched") {
+        const sid = event.session_id as string;
+        setActiveSession(sid);
+        setSessions((prev) => (prev.includes(sid) ? prev : [...prev, sid]));
+        api.getMessages(projectId).then(setMessages).catch(console.error);
       }
     };
 
@@ -95,10 +114,44 @@ export default function ChatPanel({ projectId }: { projectId: string }) {
     setStatus("conversing");
   };
 
+  const switchSession = (sid: string) => {
+    if (!ws || streaming || sid === activeSession) return;
+    ws.send(JSON.stringify({ type: "switch_session", session_id: sid }));
+  };
+
+  const newSession = async () => {
+    if (!ws || streaming) return;
+    const { session_id } = await api.createSession(projectId);
+    setSessions((prev) => [...prev, session_id]);
+    ws.send(JSON.stringify({ type: "switch_session", session_id }));
+  };
+
   return (
     <div className="flex flex-col h-full w-96 border-r border-gray-200 bg-white">
-      <div className="px-4 py-3 border-b border-gray-200 font-medium text-gray-700">
-        对话
+      <div className="px-4 py-3 border-b border-gray-200 font-medium text-gray-700 flex items-center justify-between gap-2">
+        <span>对话</span>
+        <div className="flex items-center gap-1">
+          <select
+            value={activeSession ?? ""}
+            onChange={(e) => switchSession(e.target.value)}
+            disabled={streaming || sessions.length === 0}
+            className="rounded border border-gray-200 text-xs px-1 py-0.5 text-gray-500 bg-white disabled:opacity-50 max-w-[8rem]"
+          >
+            {sessions.map((sid) => (
+              <option key={sid} value={sid}>
+                {sid}
+              </option>
+            ))}
+          </select>
+          <button
+            onClick={newSession}
+            disabled={streaming}
+            title="新建对话"
+            className="rounded border border-gray-200 text-xs px-2 py-0.5 text-gray-500 hover:bg-gray-50 disabled:opacity-50"
+          >
+            +
+          </button>
+        </div>
       </div>
       <div ref={scrollRef} className="flex-1 min-h-0 overflow-y-auto p-4 space-y-3">
         {messages.map((m, i) => (

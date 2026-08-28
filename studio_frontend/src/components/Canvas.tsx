@@ -17,6 +17,81 @@ const TYPE_COLORS: Record<string, string> = {
   terminal: "#6b7280",
 };
 
+const H_SPACING = 220;
+const V_SPACING = 140;
+
+/** 按 next_on_* 边把 step 分层（每层 = 到根节点的最长路径长度），
+ * 同层内的节点水平排开，避免分支被压成一条纵向直线导致边互相重叠。 */
+function layoutStages(stages: Step[]): Record<string, { x: number; y: number }> {
+  const names = new Set(stages.map((s) => s.name));
+  const children: Record<string, Set<string>> = {};
+  const parentCount: Record<string, number> = {};
+  for (const s of stages) {
+    children[s.name] = new Set();
+    parentCount[s.name] = 0;
+  }
+  for (const s of stages) {
+    for (const [key, val] of Object.entries(s)) {
+      if (key.startsWith("next_on_") && typeof val === "string" && names.has(val)) {
+        children[s.name].add(val);
+      }
+    }
+  }
+  for (const s of stages) {
+    for (const child of children[s.name]) {
+      parentCount[child] += 1;
+    }
+  }
+
+  const rank: Record<string, number> = {};
+  const remaining = { ...parentCount };
+  let queue = stages.filter((s) => remaining[s.name] === 0).map((s) => s.name);
+  if (queue.length === 0 && stages.length > 0) queue = [stages[0].name];
+  for (const name of queue) rank[name] = 0;
+
+  const visited = new Set(queue);
+  while (queue.length > 0) {
+    const next: string[] = [];
+    for (const cur of queue) {
+      for (const child of children[cur]) {
+        rank[child] = Math.max(rank[child] ?? 0, rank[cur] + 1);
+        remaining[child] -= 1;
+        if (remaining[child] <= 0 && !visited.has(child)) {
+          visited.add(child);
+          next.push(child);
+        }
+      }
+    }
+    queue = next;
+  }
+  // 环 / 孤立节点兜底：排在已知层级之后，保证仍能渲染
+  let maxRank = Math.max(0, ...Object.values(rank));
+  for (const s of stages) {
+    if (!(s.name in rank)) {
+      maxRank += 1;
+      rank[s.name] = maxRank;
+    }
+  }
+
+  const byRank: Record<number, string[]> = {};
+  for (const s of stages) {
+    (byRank[rank[s.name]] ||= []).push(s.name);
+  }
+
+  const positions: Record<string, { x: number; y: number }> = {};
+  for (const [rankStr, rankNames] of Object.entries(byRank)) {
+    const r = Number(rankStr);
+    const width = rankNames.length * H_SPACING;
+    rankNames.forEach((name, i) => {
+      positions[name] = {
+        x: i * H_SPACING - width / 2 + H_SPACING / 2,
+        y: r * V_SPACING,
+      };
+    });
+  }
+  return positions;
+}
+
 export default function Canvas() {
   const spec = useStudioStore((s) => s.spec);
   const selectStep = useStudioStore((s) => s.selectStep);
@@ -24,9 +99,9 @@ export default function Canvas() {
 
   const { nodes, edges } = useMemo(() => {
     const stages = spec.stages || [];
+    const positions = layoutStages(stages);
 
-    // 简单布局：垂直排列
-    const nodes: Node[] = stages.map((step, i) => ({
+    const nodes: Node[] = stages.map((step) => ({
       id: step.name,
       data: {
         label: (
@@ -36,15 +111,15 @@ export default function Canvas() {
           </div>
         ),
       },
-      position: { x: 250, y: i * 120 },
+      position: positions[step.name],
       style: {
         border: `2px solid ${TYPE_COLORS[step.type] || "#ccc"}`,
         borderRadius: "8px",
         padding: "8px 16px",
         background: selectedStep?.name === step.name ? "#eff6ff" : "#fff",
       },
-      sourcePosition: Position.Right,
-      targetPosition: Position.Left,
+      sourcePosition: Position.Bottom,
+      targetPosition: Position.Top,
     }));
 
     // 从 next_on_* 字段提取边
