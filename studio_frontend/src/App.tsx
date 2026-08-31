@@ -12,10 +12,14 @@ import type { ProjectMeta } from "./types";
 
 export default function App() {
   const [projectId, setProjectId] = useState<string | null>(null);
+  const project = useStudioStore((s) => s.project);
   const setProject = useStudioStore((s) => s.setProject);
   const setSpec = useStudioStore((s) => s.setSpec);
   const setMessages = useStudioStore((s) => s.setMessages);
   const status = useStudioStore((s) => s.status);
+  const setStatus = useStudioStore((s) => s.setStatus);
+  const selectStep = useStudioStore((s) => s.selectStep);
+  const resetPlay = useStudioStore((s) => s.resetPlay);
   const [projects, setProjects] = useState<ProjectMeta[]>([]);
   const [newName, setNewName] = useState("");
 
@@ -46,6 +50,18 @@ export default function App() {
     setSpec(spec);
     setMessages([]);
     setProjectId(id);
+  };
+
+  // 返回项目列表——清空当前项目相关状态，避免切换项目时残留上一个项目的画布/对话
+  const backToProjects = () => {
+    setProjectId(null);
+    setProject(null);
+    setSpec({ stages: [] });
+    setMessages([]);
+    selectStep(null);
+    resetPlay();
+    setStatus("idle");
+    api.listProjects().then(setProjects).catch(console.error);
   };
 
   if (!projectId) {
@@ -91,6 +107,19 @@ export default function App() {
 
   return (
     <div className="h-full w-full flex flex-col">
+      <div className="flex items-center gap-3 px-4 py-2 border-b border-gray-200 bg-white">
+        <button
+          onClick={backToProjects}
+          disabled={playing}
+          title={playing ? "运行中无法切换项目" : "返回项目列表"}
+          className="text-sm text-gray-600 hover:text-gray-900 disabled:opacity-40 disabled:cursor-not-allowed"
+        >
+          ← 返回项目列表
+        </button>
+        {project && (
+          <span className="text-sm font-medium text-gray-700">{project.name}</span>
+        )}
+      </div>
       <ControlBar />
       <div className="flex-1 flex overflow-hidden">
         <ChatPanel projectId={projectId} collapsed={playing} />

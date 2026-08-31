@@ -62,7 +62,7 @@ export default function ChatPanel({
       } else if (event.type === "step_started") {
         startStep(event.step_id, event.step_name);
       } else if (event.type === "step_finished") {
-        finishStep(event.step_id);
+        finishStep(event.step_id, event.output);
       } else if (event.type === "failed") {
         failRunningSteps();
       } else if (event.type === "workflow_done") {

@@ -16,6 +16,7 @@ step_name -> {route_label: target} 两张表。
 """
 from __future__ import annotations
 
+import re
 import sys
 import threading
 from typing import Any, Callable
@@ -116,8 +117,41 @@ def _run_agent_step(harness: Any, prompt: str, emit: Any) -> str:
     return "".join(text_parts)
 
 
+# 匹配 LLM 回答末尾的路由标记，如 {"route": "complaint"}。不用完整 JSON
+# 解析——只要求这个扁平形状，避免被回答正文里其它花括号干扰。
+_ROUTE_RE = re.compile(r'\{\s*"route"\s*:\s*"([^"]+)"\s*\}')
+
+
+def _append_routing_instruction(prompt: str, routes: list[str]) -> str:
+    """多路由时，要求 LLM 在回答末尾用一行 JSON 声明选中的路由。"""
+    options = ", ".join(f'"{r}"' for r in routes)
+    return (
+        f"{prompt}\n\n---\n"
+        f"After your response, end with exactly one line containing only this JSON, "
+        f"choosing whichever option best applies: {{\"route\": \"<one of: {options}>\"}}"
+    )
+
+
+def _extract_route(output: str, routes: list[str]) -> tuple[str, str]:
+    """从 LLM 输出末尾提取路由标记；成功则从展示文本里去掉这行标记。
+
+    找不到标记，或标记的值不在这个 step 声明的路由里，都返回 "error"——
+    交给 judge 报清晰的 fail 消息，而不是猜一个路由走下去。
+    """
+    matches = list(_ROUTE_RE.finditer(output))
+    if not matches:
+        return "error", output
+    last = matches[-1]
+    route = last.group(1)
+    clean_output = (output[: last.start()] + output[last.end() :]).strip()
+    if route not in routes:
+        return "error", clean_output
+    return route, clean_output
+
+
 def make_executor(
     stage_by_name: dict[str, dict],
+    routes_by_name: dict[str, dict[str, str]],
     model: str,
     provider: Any,
     env: Any,
@@ -130,10 +164,11 @@ def make_executor(
     """
 
     def play_executor(ctx: dict) -> dict:
-        stage = stage_by_name.get(ctx["step_id"])
+        step_id = ctx["step_id"]
+        stage = stage_by_name.get(step_id)
         if stage is None:
             return {
-                "output": f"Error: unknown step '{ctx['step_id']}'",
+                "output": f"Error: unknown step '{step_id}'",
                 "structured": {"route_key": "error"},
             }
         stage_type = stage.get("type")
@@ -151,12 +186,24 @@ def make_executor(
         except (KeyError, IndexError):
             prompt = prompt_template
 
+        # 单一路由（或没声明路由，比如直接接 terminal）不用 LLM 决策，
+        # 直接走那条边；多路由才要求 LLM 在回答末尾声明选中哪条。
+        routes = sorted(routes_by_name.get(step_id, {}).keys())
+        if len(routes) > 1:
+            prompt = _append_routing_instruction(prompt, routes)
+
         harness = senza.HarnessBuilder(model).provider("*", provider).env(env).build()
         try:
             output = _run_agent_step(harness, prompt, ctx["emit"])
         except Exception as exc:  # noqa: BLE001
             return {"output": f"Error: {exc}", "structured": {"route_key": "error"}}
-        return {"output": output, "structured": {"route_key": "success"}}
+
+        if len(routes) > 1:
+            route_key, output = _extract_route(output, routes)
+        else:
+            route_key = routes[0] if routes else "success"
+
+        return {"output": output, "structured": {"route_key": route_key}}
 
     return play_executor
 
@@ -187,7 +234,9 @@ class PlaySession:
         provider = _create_provider(self._config)
         env = senza.create_os_env(str(self._project.path))
 
-        executor = make_executor(stage_by_name, self._config.model, provider, env)
+        executor = make_executor(
+            stage_by_name, routes_by_name, self._config.model, provider, env
+        )
         judge = make_judge(routes_by_name)
 
         self._engine = senza.WorkflowEngine(

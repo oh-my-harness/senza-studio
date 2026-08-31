@@ -31,7 +31,7 @@ interface StudioStore {
   resetPlay: () => void;
   startStep: (stepId: string, stepName: string) => void;
   appendStepText: (stepId: string, text: string) => void;
-  finishStep: (stepId: string) => void;
+  finishStep: (stepId: string, output?: string) => void;
   failRunningSteps: () => void;
 }
 
@@ -90,11 +90,13 @@ export const useStudioStore = create<StudioStore>((set) => ({
       return { gameCards: updated };
     }),
 
-  finishStep: (stepId) =>
+  finishStep: (stepId, output) =>
     set((s) => ({
       stepStatus: { ...s.stepStatus, [stepId]: "done" },
       gameCards: s.gameCards.map((c) =>
-        c.stepId === stepId && c.status === "running" ? { ...c, status: "done" } : c
+        c.stepId === stepId && c.status === "running"
+          ? { ...c, status: "done", text: output ?? c.text }
+          : c
       ),
     })),
 

@@ -32,7 +32,17 @@ note it for later (custom tool generation comes in a later phase)."""
 _RULES = """\
 ## Spec Building Rules
 
-- Step types: agent (LLM step), checker (conditional routing), tool (execute a tool), terminal (end).
+- Step types:
+  - agent: an LLM step. For a single next_on_* edge, it always follows it. For MULTIPLE
+    next_on_* edges (branching/classification), write the prompt_template to instruct the
+    model to end its answer with a line like {"route": "<label>"}, where <label> matches one
+    of the edge condition labels exactly — the runtime extracts this to pick the route.
+  - checker: a human-approval gate ONLY (pauses the workflow until an external approval
+    decision is available, e.g. via a request_approval tool, then routes on approve/reject).
+    Do NOT use checker for general classification or branching logic — use an agent step
+    with the routing convention above instead.
+  - tool: execute a bound tool (not yet runnable — coming in a later phase).
+  - terminal: end the workflow.
 - Edges use next_on_<condition> semantics. Common conditions: success, reject, approve, return.
 - Every spec must have at least one terminal step.
 - The first step is the entry point (no incoming edges needed).
