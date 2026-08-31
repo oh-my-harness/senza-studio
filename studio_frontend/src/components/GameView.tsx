@@ -1,6 +1,7 @@
 // studio_frontend/src/components/GameView.tsx
 import { useEffect, useRef } from "react";
 import { useStudioStore } from "../store";
+import Markdown from "./Markdown";
 
 const STATUS_LABEL: Record<string, string> = {
   running: "运行中…",
@@ -34,7 +35,7 @@ export default function GameView() {
             <span className="font-medium">{card.stepName}</span>
             <span>{STATUS_LABEL[card.status]}</span>
           </div>
-          <div className="whitespace-pre-wrap">{card.text}</div>
+          <Markdown text={card.text} />
         </div>
       ))}
       <div ref={bottomRef} />

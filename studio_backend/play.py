@@ -54,6 +54,50 @@ def build_route_maps(
     return stage_by_name, routes_by_name
 
 
+_TEMPLATE_VAR_RE = re.compile(r"\{\{(\w+)\}\}")
+
+
+def render_prompt_template(template: str, context: dict) -> str:
+    """替换 prompt_template 里的 {{var}} 占位符。
+
+    故意不用 str.format()：real prompt_template 经常自带单花括号 JSON 例子
+    （比如 '{"classification": "complaint" | "question"}'），.format() 会把
+    它们当成格式字段解析，多半直接 KeyError，导致整个模板一次替换都不做，
+    连正常的 {{var}} 也不替换。这里只认双花括号，其它内容完全不碰；缺失的
+    变量保留原样（而不是报错/清空模板），方便一眼看出漏填了什么。
+    """
+
+    def _sub(m: re.Match) -> str:
+        key = m.group(1)
+        return str(context[key]) if key in context else m.group(0)
+
+    return _TEMPLATE_VAR_RE.sub(_sub, template)
+
+
+def get_entry_inputs(spec_dict: dict) -> list[str]:
+    """入口 step（第一个 stage，与 stages_to_workflow 的 entry_step 规则一致）
+    prompt_template 里引用的 {{var}} 占位符——Play 前需要真人手动填的种子
+    输入（比如 customer_message），因为 Studio 不接真实生产流量。
+
+    故意扫 prompt_template 本身，而不是 ui.fields：ui.fields 是展示配置
+    （这个 step 结果要在 Game view 用哪些字段渲染 chart/table 卡片），跟
+    "这个 step 需要哪些输入" 是完全不同的两件事——同一个字段名可能两边都
+    用（巧合），也可能像 ui.fields=[route, reasoning] 这种纯输出展示字段
+    完全对不上输入，把它当输入需求会问出不存在的字段。prompt_template 里
+    实际出现的 {{var}} 才是唯一可靠的输入来源。
+    """
+    stages = spec_dict.get("stages", [])
+    if not stages:
+        return []
+    template = stages[0].get("prompt_template", "")
+    seen: list[str] = []
+    for match in _TEMPLATE_VAR_RE.finditer(template):
+        key = match.group(1)
+        if key not in seen:
+            seen.append(key)
+    return seen
+
+
 def make_judge(routes_by_name: dict[str, dict[str, str]]) -> Callable[[dict], str]:
     """路由回调：把 executor 返回的 route_key 翻成 senza judge 的 transition 字符串。"""
 
@@ -181,10 +225,7 @@ def make_executor(
             }
 
         prompt_template = stage.get("prompt_template", "")
-        try:
-            prompt = prompt_template.format(**ctx["context"])
-        except (KeyError, IndexError):
-            prompt = prompt_template
+        prompt = render_prompt_template(prompt_template, ctx["context"])
 
         # 单一路由（或没声明路由，比如直接接 terminal）不用 LLM 决策，
         # 直接走那条边；多路由才要求 LLM 在回答末尾声明选中哪条。
@@ -223,11 +264,15 @@ class PlaySession:
         self._thread: threading.Thread | None = None
         self.run_error: BaseException | None = None
 
-    def play(self) -> None:
+    def play(self, inputs: dict[str, str] | None = None) -> None:
         """构建 WorkflowEngine。不启动 .run()——调用方必须先 events() 订阅，
         再调用 start()，否则 tokio broadcast 会丢掉 run() 线程里发生太快
         （比如立刻 fail 的 step，没有真实 LLM 调用）的早期事件：broadcast
         只推送给"已订阅"的 receiver，订阅前发的消息一律丢弃，不会缓冲。
+
+        inputs 是入口 step 的种子输入（见 get_entry_inputs），构建完 engine
+        后立刻用 set_context_variable 写入共享上下文，让入口 step 的
+        prompt_template 里的 {{field}} 占位符能被替换。
         """
         spec_dict = self._spec.get_current_spec()
         stage_by_name, routes_by_name = build_route_maps(spec_dict)
@@ -243,6 +288,9 @@ class PlaySession:
             spec_dict, provider, self._config.model, senza.create_judge(judge), env=env
         )
         self._engine.with_executor("eda_executor", senza.create_executor(executor))
+
+        for key, value in (inputs or {}).items():
+            self._engine.set_context_variable(key, value)
 
         self._project.meta["status"] = "playing"
         self._project._save_meta()
@@ -267,10 +315,18 @@ class PlaySession:
         self._thread.start()
 
     def stop(self, reason: str = "user stop") -> None:
-        if self._engine is not None:
+        """取消运行中的 engine。项目状态收尾（playing -> editing）由调用方
+        （ws.py 的 _finalize_play）负责，不在这里做——Stop 可能是在运行
+        自然结束（succeeded/failed）之后才点的，那种情况下 engine 已经
+        跑完，.cancel() 会把真实结果悄悄改写成 "cancelled"（亲测行为），
+        所以只在还真的在跑的时候才调用它。
+        """
+        if self._engine is not None and self._engine.state() in (
+            "idle",
+            "running",
+            "paused",
+        ):
             self._engine.cancel(reason)
-        self._project.meta["status"] = "editing"
-        self._project._save_meta()
 
     def events(self, timeout_ms: int = 5000, max_consecutive_timeouts: int = 999):
         if self._engine is None:

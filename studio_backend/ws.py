@@ -146,6 +146,24 @@ async def run_prompt_streaming(
                 pass
 
 
+async def finalize_play(websocket: WebSocket, project: Project) -> None:
+    """把 project 状态从 playing 收尾回 editing，并通知前端。
+
+    幂等（只在真的还处于 playing 时才做）——同一次 Play 可能从两个地方
+    触发收尾：run_play_streaming 自己（用户在跑的过程中点了 Stop，
+    engine 已经是 cancelled 状态）或 app.py 的 "stop" 处理（用户在跑完
+    之后才点 Stop，那时 run_play_streaming 早就退出了）。
+    """
+    if project.meta.get("status") != "playing":
+        return
+    project.meta["status"] = "editing"
+    project._save_meta()
+    try:
+        await websocket.send_json({"type": "play_stopped"})
+    except Exception:
+        pass
+
+
 async def run_play_streaming(
     websocket: WebSocket,
     play_session: PlaySession,
@@ -209,8 +227,6 @@ async def run_play_streaming(
         if play_session._thread is not None:
             play_session._thread.join(timeout=10)
         state = play_session.state()
-        project.meta["status"] = "editing"
-        project._save_meta()
         # engine.run() 在 workflow 失败时 raise——PlaySession 把它捕获存到
         # run_error 而不是让线程崩溃。这里确保前端总能拿到清晰的错误信息，
         # 不依赖 WorkflowEvent::Failed 广播是否先一步送达。
@@ -225,3 +241,8 @@ async def run_play_streaming(
             await websocket.send_json({"type": "workflow_done", "state": state})
         except Exception:
             pass
+        # 运行成功/失败结束——不自动收尾，留在 playing 让用户看完结果再
+        # 自己点 Stop。只有 cancelled（用户在跑的过程中就点了 Stop）才
+        # 立刻收尾，因为这次 workflow_done 本身就是那次 Stop 的直接结果。
+        if state == "cancelled":
+            await finalize_play(websocket, project)

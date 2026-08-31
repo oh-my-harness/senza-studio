@@ -8,8 +8,10 @@ from studio_backend.play import (
     _append_routing_instruction,
     _extract_route,
     build_route_maps,
+    get_entry_inputs,
     make_executor,
     make_judge,
+    render_prompt_template,
 )
 
 
@@ -39,6 +41,81 @@ def test_build_route_maps():
     }
     assert routes_by_name["handle_complaint"] == {"success": "end"}
     assert routes_by_name["end"] == {}
+
+
+# ── get_entry_inputs ─────────────────────────────────────
+
+
+def test_get_entry_inputs_scans_prompt_template_placeholders():
+    spec_dict = {
+        "stages": [
+            {
+                "name": "intake",
+                "type": "agent",
+                "prompt_template": "Customer said: {{customer_message}}",
+            },
+            {"name": "end", "type": "terminal"},
+        ]
+    }
+    assert get_entry_inputs(spec_dict) == ["customer_message"]
+
+
+def test_get_entry_inputs_ignores_ui_fields_display_config():
+    """回归测试：ui.fields 是展示配置（这个 step 的输出用哪些字段渲染
+    chart/table 卡片），不是输入需求——同名字段纯属巧合时不该被当输入。"""
+    spec_dict = {
+        "stages": [
+            {
+                "name": "classify",
+                "type": "agent",
+                "prompt_template": "Classify: {{customer_message}}",
+                "ui": {"display": "chart", "fields": ["route", "reasoning"]},
+            },
+            {"name": "end", "type": "terminal"},
+        ]
+    }
+    assert get_entry_inputs(spec_dict) == ["customer_message"]
+
+
+def test_get_entry_inputs_dedupes_repeated_placeholder():
+    spec_dict = {
+        "stages": [
+            {
+                "name": "intake",
+                "type": "agent",
+                "prompt_template": "{{customer_message}} ... again: {{customer_message}}",
+            },
+        ]
+    }
+    assert get_entry_inputs(spec_dict) == ["customer_message"]
+
+
+def test_get_entry_inputs_empty_when_no_placeholders():
+    spec_dict = {"stages": [{"name": "intake", "type": "agent", "prompt_template": "hi"}]}
+    assert get_entry_inputs(spec_dict) == []
+
+
+def test_get_entry_inputs_empty_spec():
+    assert get_entry_inputs({"stages": []}) == []
+
+
+# ── render_prompt_template ───────────────────────────────
+
+
+def test_render_prompt_template_substitutes_double_brace():
+    result = render_prompt_template("Hello {{name}}!", {"name": "world"})
+    assert result == "Hello world!"
+
+
+def test_render_prompt_template_leaves_missing_var_untouched():
+    result = render_prompt_template("Hello {{name}}!", {})
+    assert result == "Hello {{name}}!"
+
+
+def test_render_prompt_template_ignores_single_brace_json():
+    template = 'Respond as JSON: {"classification": "a" | "b"}. Message: {{customer_message}}'
+    result = render_prompt_template(template, {"customer_message": "hi"})
+    assert result == 'Respond as JSON: {"classification": "a" | "b"}. Message: hi'
 
 
 # ── make_judge ───────────────────────────────────────────

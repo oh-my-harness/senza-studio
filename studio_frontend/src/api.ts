@@ -35,6 +35,8 @@ export const api = {
     fetchJson<{ sessions: string[]; active: string | null }>(
       `${BASE}/projects/${id}/sessions`
     ),
+  getEntryInputs: (id: string) =>
+    fetchJson<{ fields: string[] }>(`${BASE}/projects/${id}/entry_inputs`),
 };
 
 export function createWebSocket(projectId: string): WebSocket {

@@ -5,7 +5,6 @@ import type {
   Spec,
   ChatMessage,
   StudioStatus,
-  Step,
   GameCard,
   StepRunStatus,
 } from "./types";
@@ -15,10 +14,17 @@ interface StudioStore {
   spec: Spec;
   status: StudioStatus;
   messages: ChatMessage[];
-  selectedStep: Step | null;
+  // 只存 name，不存整个 Step 对象——存对象快照会在 spec 更新后过期
+  // （Inspector 编辑一个字段触发 setSpec，selectedStep 却还指着编辑前的
+  // 旧对象），受控输入框的 value 又变回旧值，表现为“打字立刻被吃掉、
+  // 光标跳到末尾”。改成存 name，每次都从当前 spec 里现查，永远不会过期。
+  selectedStepName: string | null;
   ws: WebSocket | null;
   stepStatus: Record<string, StepRunStatus>;
   gameCards: GameCard[];
+  // 运行自然结束（succeeded/failed）后的终态——不自动退出 playing，留给
+  // 用户自己看完结果再点 Stop；这个字段只是用来在 UI 上提示"跑完了"。
+  runFinishedState: string | null;
 
   setProject: (p: ProjectMeta | null) => void;
   setSpec: (s: Spec) => void;
@@ -26,13 +32,14 @@ interface StudioStore {
   addMessage: (m: ChatMessage) => void;
   setMessages: (msgs: ChatMessage[]) => void;
   appendToLastAssistant: (text: string) => void;
-  selectStep: (s: Step | null) => void;
+  selectStep: (name: string | null) => void;
   setWs: (ws: WebSocket | null) => void;
   resetPlay: () => void;
   startStep: (stepId: string, stepName: string) => void;
   appendStepText: (stepId: string, text: string) => void;
   finishStep: (stepId: string, output?: string) => void;
   failRunningSteps: () => void;
+  setRunFinished: (state: string | null) => void;
 }
 
 export const useStudioStore = create<StudioStore>((set) => ({
@@ -40,17 +47,18 @@ export const useStudioStore = create<StudioStore>((set) => ({
   spec: { stages: [] },
   status: "idle",
   messages: [],
-  selectedStep: null,
+  selectedStepName: null,
   ws: null,
   stepStatus: {},
   gameCards: [],
+  runFinishedState: null,
 
   setProject: (project) => set({ project }),
   setSpec: (spec) => set({ spec }),
   setStatus: (status) => set({ status }),
   addMessage: (m) => set((s) => ({ messages: [...s.messages, m] })),
   setMessages: (messages) => set({ messages }),
-  selectStep: (selectedStep) => set({ selectedStep }),
+  selectStep: (selectedStepName) => set({ selectedStepName }),
   setWs: (ws) => set({ ws }),
   appendToLastAssistant: (text) =>
     set((s) => {
@@ -71,7 +79,9 @@ export const useStudioStore = create<StudioStore>((set) => ({
       };
     }),
 
-  resetPlay: () => set({ stepStatus: {}, gameCards: [] }),
+  resetPlay: () => set({ stepStatus: {}, gameCards: [], runFinishedState: null }),
+
+  setRunFinished: (runFinishedState) => set({ runFinishedState }),
 
   startStep: (stepId, stepName) =>
     set((s) => ({

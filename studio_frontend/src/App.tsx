@@ -120,7 +120,7 @@ export default function App() {
           <span className="text-sm font-medium text-gray-700">{project.name}</span>
         )}
       </div>
-      <ControlBar />
+      <ControlBar projectId={projectId} />
       <div className="flex-1 flex overflow-hidden">
         <ChatPanel projectId={projectId} collapsed={playing} />
         {playing && <GameView />}

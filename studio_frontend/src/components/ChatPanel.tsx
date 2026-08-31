@@ -2,6 +2,7 @@
 import { useState, useRef, useEffect } from "react";
 import { useStudioStore } from "../store";
 import { createWebSocket, api } from "../api";
+import Markdown from "./Markdown";
 
 export default function ChatPanel({
   projectId,
@@ -26,6 +27,7 @@ export default function ChatPanel({
   const appendStepText = useStudioStore((s) => s.appendStepText);
   const finishStep = useStudioStore((s) => s.finishStep);
   const failRunningSteps = useStudioStore((s) => s.failRunningSteps);
+  const setRunFinished = useStudioStore((s) => s.setRunFinished);
   const scrollRef = useRef<HTMLDivElement>(null);
   const bottomRef = useRef<HTMLDivElement>(null);
 
@@ -66,6 +68,11 @@ export default function ChatPanel({
       } else if (event.type === "failed") {
         failRunningSteps();
       } else if (event.type === "workflow_done") {
+        // 跑完了（成功或失败）不自动退出 playing——留给用户自己看完结果
+        // 再点 Stop。真正回到 editing 由下面的 play_stopped 触发。
+        setRunFinished(event.state);
+      } else if (event.type === "play_stopped") {
+        setRunFinished(null);
         setStatus("spec_ready");
       } else if (event.type === "text_delta") {
         // 流式文本追加到最近的 assistant 消息
@@ -190,7 +197,7 @@ export default function ChatPanel({
                 : "bg-gray-50 text-gray-800 mr-8"
             }`}
           >
-            {m.content}
+            {m.role === "assistant" ? <Markdown text={m.content} /> : m.content}
           </div>
         ))}
         <div ref={bottomRef} />

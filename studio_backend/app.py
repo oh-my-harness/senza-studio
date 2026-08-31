@@ -9,13 +9,13 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
 from .config import StudioConfig
-from .play import PlaySession
+from .play import PlaySession, get_entry_inputs
 from .project import Project
 from .sdk_pin import check_sdk_pin
 from .session import read_session_history
 from .spec import Spec, SpecError
 from .agent import StudioAgent
-from .ws import run_play_streaming, run_prompt_streaming
+from .ws import finalize_play, run_play_streaming, run_prompt_streaming
 
 
 class CreateProjectReq(BaseModel):
@@ -137,6 +137,12 @@ def create_app(config: StudioConfig | None = None) -> FastAPI:
             return []
         return read_session_history(project.sessions_dir, active)
 
+    # ── Play ───────────────────────────────────────────────
+    @app.get("/api/projects/{project_id}/entry_inputs")
+    async def entry_inputs(project_id: str):
+        state = _get_or_load_project(cfg, project_id)
+        return {"fields": get_entry_inputs(state["spec"].get_current_spec())}
+
     # ── WebSocket ────────────────────────────────────────
     @app.websocket("/ws/projects/{project_id}")
     async def project_ws(websocket: WebSocket, project_id: str):
@@ -163,7 +169,7 @@ def create_app(config: StudioConfig | None = None) -> FastAPI:
                         continue  # 已经在跑，忽略重复 play
                     play_session = PlaySession(cfg, project, state["spec"])
                     state["play_session"] = play_session
-                    play_session.play()
+                    play_session.play(inputs=msg.get("inputs"))
                     play_task = asyncio.create_task(
                         run_play_streaming(websocket, play_session, project)
                     )
@@ -177,6 +183,10 @@ def create_app(config: StudioConfig | None = None) -> FastAPI:
                             await play_task
                         except asyncio.CancelledError:
                             pass
+                    else:
+                        # 运行已经自然结束（succeeded/failed），run_play_streaming
+                        # 早就退出了，得在这里自己收尾回 editing。
+                        await finalize_play(websocket, project)
 
                 elif msg_type == "prompt":
                     # 如果上一个 prompt 还在跑，先中止
@@ -228,6 +238,10 @@ def create_app(config: StudioConfig | None = None) -> FastAPI:
                     await play_task
                 except asyncio.CancelledError:
                     pass
+            elif project.meta.get("status") == "playing":
+                # 运行已自然结束但用户没点 Stop 就断开了连接——项目状态
+                # 不该永远卡在 playing（下次打开这个项目会显示"运行中"）。
+                await finalize_play(websocket, project)
 
 
     return app

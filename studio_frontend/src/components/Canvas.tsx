@@ -102,7 +102,7 @@ function layoutStages(stages: Step[]): Record<string, { x: number; y: number }> 
 export default function Canvas() {
   const spec = useStudioStore((s) => s.spec);
   const selectStep = useStudioStore((s) => s.selectStep);
-  const selectedStep = useStudioStore((s) => s.selectedStep);
+  const selectedStepName = useStudioStore((s) => s.selectedStepName);
   const stepStatus = useStudioStore((s) => s.stepStatus);
 
   const { nodes, edges } = useMemo(() => {
@@ -124,9 +124,15 @@ export default function Canvas() {
         border: `2px solid ${TYPE_COLORS[step.type] || "#ccc"}`,
         borderRadius: "8px",
         padding: "8px 16px",
+        // width 固定值 + nowrap 会让长 step name 溢出边框；改成按内容
+        // 自适应宽度（封顶），超过封顶再换行，而不是简单裁切/溢出。
+        width: "max-content",
+        maxWidth: 200,
+        whiteSpace: "normal",
+        wordBreak: "break-word",
         background:
           RUN_STATUS_BG[stepStatus[step.name]] ??
-          (selectedStep?.name === step.name ? "#eff6ff" : "#fff"),
+          (selectedStepName === step.name ? "#eff6ff" : "#fff"),
       },
       sourcePosition: Position.Bottom,
       targetPosition: Position.Top,
@@ -151,7 +157,7 @@ export default function Canvas() {
     }
 
     return { nodes, edges };
-  }, [spec, selectedStep, stepStatus]);
+  }, [spec, selectedStepName, stepStatus]);
 
   return (
     <div className="flex-1 h-full">
@@ -159,10 +165,7 @@ export default function Canvas() {
         nodes={nodes}
         edges={edges}
         fitView
-        onNodeClick={(_, node) => {
-          const step = spec.stages.find((s) => s.name === node.id);
-          if (step) selectStep(step as Step);
-        }}
+        onNodeClick={(_, node) => selectStep(node.id)}
       >
         <Background />
         <Controls />
