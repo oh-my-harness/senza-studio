@@ -41,7 +41,13 @@ _RULES = """\
     decision is available, e.g. via a request_approval tool, then routes on approve/reject).
     Do NOT use checker for general classification or branching logic — use an agent step
     with the routing convention above instead.
-  - tool: execute a bound tool (not yet runnable — coming in a later phase).
+  - tool: execute a bound tool. Bind it with bind_tool(step, tool_ref) — tool_ref must
+    already exist in this project's tools/registry.py (a human developer writes tool code
+    there; you cannot generate tool code yet). Declare its arguments with
+    set_step_property(step, "tool_args", {"param": "{{var}}", ...}) — same {{var}}
+    substitution as prompt_template, applied to each value. A tool step with no tool_args
+    gets called with no arguments. For MULTIPLE next_on_* edges, the tool's return value
+    must include a "route" field (same convention as agent step routing).
   - terminal: end the workflow.
 - Edges use next_on_<condition> semantics. Common conditions: success, reject, approve, return.
 - Every spec must have at least one terminal step.

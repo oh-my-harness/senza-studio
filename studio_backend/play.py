@@ -1,11 +1,11 @@
-"""Play 模式（Phase 2 最薄切片）：直接用 senza 的 WorkflowEngine 跑 spec。
+"""Play 模式：直接用 senza 的 WorkflowEngine 跑 spec。
 
 `stages_to_workflow`（senza SDK 内置）已经把 `{"stages": [...]}` 编译成
 Workflow：每个非 terminal stage 变成一个 executor step（统一分派到
 "eda_executor"），terminal stage 被引擎直接短路成原生 Step::Terminal——
 永远不会调用这里的 executor 回调。所以 Studio 自己不需要写 spec 预处理器，
-只需要一个 executor 回调（只支持 type: agent，checker/tool 留给 Phase 3）
-和一个 judge 回调（把 executor 返回的 route_key 翻成 "to:<step>"）。
+只需要一个 executor 回调（支持 type: agent/checker/tool）和一个 judge
+回调（把 executor 返回的 route_key 翻成 "to:<step>"）。
 
 `stages_to_workflow` 不会把 stage 的原始字段（type/prompt_template/...）
 透传进 executor_config，所以这里自己维护 step_name -> stage dict 和
@@ -16,10 +16,13 @@ step_name -> {route_label: target} 两张表。
 """
 from __future__ import annotations
 
+import importlib.util
+import inspect
 import json
 import re
 import sys
 import threading
+import uuid
 from typing import Any, Callable
 
 import senza
@@ -73,6 +76,20 @@ def render_prompt_template(template: str, context: dict) -> str:
         return str(context[key]) if key in context else m.group(0)
 
     return _TEMPLATE_VAR_RE.sub(_sub, template)
+
+
+def render_tool_args(tool_args: dict, context: dict) -> dict:
+    """渲染 tool step 的 tool_args——跟 prompt_template 一样用 {{var}} 从
+    context 取值，但作用对象是一个 dict（每个字符串 value 各自替换一次），
+    不是一整段模板。非字符串 value（作者直接写死的数字/布尔等）原样传递。
+    没声明 tool_args 的 step 得到空 dict——工具需要的参数必须显式声明，
+    不能隐式拿整个 context（跟 agent step 只能通过 prompt_template 里的
+    {{var}} 声明输入是同一个原则）。
+    """
+    return {
+        key: render_prompt_template(value, context) if isinstance(value, str) else value
+        for key, value in tool_args.items()
+    }
 
 
 def get_entry_inputs(spec_dict: dict) -> list[str]:
@@ -233,6 +250,79 @@ def _extract_json_fields(output: str) -> tuple[dict, str]:
     return fields, clean_output
 
 
+def load_tool_registry(project: Project) -> tuple[dict[str, Callable], str | None]:
+    """加载 <project>/tools/registry.py 的 get_tools()。
+
+    每次 Play 都重新读一遍（不缓存跨次 Play，也不缓存跨项目）——用
+    spec_from_file_location + 每次换一个新模块名绕开 sys.modules 缓存，
+    这样：(1) 开发者手改 registry.py 后下一次 Play 立刻生效，不用重启
+    Studio 后端；(2) 两个不同项目都可能有一个叫 "registry.py" 的文件，
+    固定用同一个模块名（比如 "tools.registry"）会导致后加载的项目复用
+    前一个项目缓存在 sys.modules 里的模块，读到别的项目的工具。
+
+    没有 registry.py 的项目不算错误——只是没法用 tool step（返回空
+    dict，等真的有 tool step 引用不存在的工具时再报错）。import 失败
+    （语法错误、get_tools 不存在、返回值不是 dict）会被捕获成一条错误
+    消息而不是直接抛出，让 PlaySession.play() 能正常往下走，把这条消息
+    原样透传给每一个用到 tool step 的报错里，而不是让整个 Play 在构建
+    阶段就崩溃。
+    """
+    registry_path = project.path / "tools" / "registry.py"
+    if not registry_path.exists():
+        return {}, None
+
+    module_name = f"_studio_tool_registry_{uuid.uuid4().hex}"
+    try:
+        spec = importlib.util.spec_from_file_location(module_name, registry_path)
+        if spec is None or spec.loader is None:
+            return {}, "无法加载 tools/registry.py: spec_from_file_location 失败"
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[module_name] = module
+        try:
+            spec.loader.exec_module(module)
+            tools = module.get_tools()
+        finally:
+            sys.modules.pop(module_name, None)
+        if not isinstance(tools, dict):
+            return (
+                {},
+                f"tools/registry.py 的 get_tools() 必须返回 dict，"
+                f"实际返回了 {type(tools).__name__}",
+            )
+        return tools, None
+    except Exception as exc:  # noqa: BLE001
+        return {}, f"加载 tools/registry.py 失败: {exc}"
+
+
+def _call_tool(callback: Callable, args: dict, ctx: dict) -> Any:
+    """按回调实际接收几个位置参数决定传 (args) 还是 (args, ctx)——跟 senza
+    自己的 create_tool 回调归一化是同一个思路，方便同一个函数以后不改
+    签名就能直接被 senza.create_tool(callback=fn) 包装复用。"""
+    try:
+        n_params = len(inspect.signature(callback).parameters)
+    except (TypeError, ValueError):
+        n_params = 2
+    if n_params <= 1:
+        return callback(args)
+    return callback(args, ctx)
+
+
+def _normalize_tool_result(result: Any) -> tuple[dict, str, str | None]:
+    """把 tool 回调的返回值统一成 (fields, output, route)，跟 agent step
+    的 _extract_json_fields 是同一个模型：dict 返回值里非 "route" 的字段
+    写进 context 供下游引用，"route" 字段（如果有）用来选边；纯文本返回
+    值直接当展示输出，没有可写进 context 的字段。
+    """
+    if isinstance(result, dict):
+        fields = {k: v for k, v in result.items() if k != "route"}
+        route = result.get("route")
+        output = result.get("output")
+        if output is None:
+            output = json.dumps(fields, ensure_ascii=False, default=str) if fields else ""
+        return fields, output, route
+    return {}, "" if result is None else str(result), None
+
+
 def make_executor(
     stage_by_name: dict[str, dict],
     routes_by_name: dict[str, dict[str, str]],
@@ -240,8 +330,10 @@ def make_executor(
     provider: Any,
     env: Any,
     engine_ref: dict[str, Any],
+    tools_by_name: dict[str, Callable] | None = None,
+    tools_load_error: str | None = None,
 ) -> Callable[[dict], dict]:
-    """执行回调：支持 type: agent 和 type: checker；tool 留给 Phase 3。
+    """执行回调：支持 type: agent、checker、tool。
 
     engine_ref 是个可变的"晚绑定"容器——PlaySession.play() 构造 executor
     时 WorkflowEngine 还不存在（executor 得先造好才能传给 WorkflowEngine
@@ -290,11 +382,45 @@ def make_executor(
                 "structured": {"route_key": decision},
             }
 
+        if stage_type == "tool":
+            if tools_load_error:
+                return {
+                    "output": f"Error: {tools_load_error}",
+                    "structured": {"route_key": "error"},
+                }
+            tool_ref = stage.get("tool")
+            if not tool_ref:
+                return {
+                    "output": "Error: step has no bound tool (use bind_tool)",
+                    "structured": {"route_key": "error"},
+                }
+            callback = (tools_by_name or {}).get(tool_ref)
+            if callback is None:
+                return {
+                    "output": f"Error: tool '{tool_ref}' not found in tools/registry.py",
+                    "structured": {"route_key": "error"},
+                }
+
+            args = render_tool_args(stage.get("tool_args") or {}, ctx["context"])
+            try:
+                raw_result = _call_tool(callback, args, {"step_id": step_id})
+            except Exception as exc:  # noqa: BLE001
+                return {"output": f"Error: {exc}", "structured": {"route_key": "error"}}
+
+            fields, output, route = _normalize_tool_result(raw_result)
+            routes = sorted(routes_by_name.get(step_id, {}).keys())
+            if len(routes) > 1:
+                route_key = route if route in routes else "error"
+            else:
+                route_key = routes[0] if routes else "success"
+
+            _write_context(stage.get("output_key"), {**fields, "_output": output})
+
+            return {"output": output, "structured": {"route_key": route_key}}
+
         if stage_type != "agent":
             return {
-                "output": (
-                    f"Error: step type '{stage_type}' not supported until Phase 3"
-                ),
+                "output": f"Error: unknown step type '{stage_type}'",
                 "structured": {"route_key": "error"},
             }
 
@@ -362,6 +488,9 @@ class PlaySession:
         stage_by_name, routes_by_name = build_route_maps(spec_dict)
         provider = _create_provider(self._config)
         env = senza.create_os_env(str(self._project.path))
+        # 每次 Play 都重新读一遍项目的 tools/registry.py（见 load_tool_registry
+        # 注释）——不是只加载一次缓存住，开发者手改工具代码后不用重启后端。
+        tools_by_name, tools_load_error = load_tool_registry(self._project)
 
         executor = make_executor(
             stage_by_name,
@@ -370,6 +499,8 @@ class PlaySession:
             provider,
             env,
             self._engine_ref,
+            tools_by_name,
+            tools_load_error,
         )
         judge = make_judge(routes_by_name)
 

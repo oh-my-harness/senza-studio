@@ -22,6 +22,8 @@ def test_create_project(tmp_config):
     assert (proj.path / "pipeline.yaml").exists()
     assert (proj.path / "tools" / "generated").is_dir()
     assert (proj.path / "tools" / "custom").is_dir()
+    assert (proj.path / "tools" / "registry.py").exists()
+    assert "get_tools" in (proj.path / "tools" / "registry.py").read_text()
     assert (proj.path / "plugins").is_dir()
     assert (proj.path / ".studio" / "sessions").is_dir()
 

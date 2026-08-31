@@ -3,18 +3,26 @@
 与 test_tools.py 同一模式：直接调用 make_executor/make_judge 产出的回调
 闭包，而不经过 senza.create_executor/create_judge 包装（不暴露 .callback）。
 """
+import pytest
+
 import studio_backend.play as play
+from studio_backend.config import StudioConfig
 from studio_backend.play import (
     PENDING_APPROVAL,
     _append_routing_instruction,
+    _call_tool,
     _extract_json_fields,
+    _normalize_tool_result,
     build_route_maps,
     decision_context_key,
     get_entry_inputs,
+    load_tool_registry,
     make_executor,
     make_judge,
     render_prompt_template,
+    render_tool_args,
 )
+from studio_backend.project import Project
 
 
 class FakeEngine:
@@ -201,14 +209,13 @@ def test_executor_rejects_unknown_step():
 
 
 def test_executor_rejects_unsupported_type():
-    stage_by_name = {"tool1": {"name": "tool1", "type": "tool"}}
+    stage_by_name = {"weird1": {"name": "weird1", "type": "component"}}
     executor = make_executor(
         stage_by_name, {}, "test-model", provider=None, env=None, engine_ref={}
     )
-    result = executor({"step_id": "tool1"})
+    result = executor({"step_id": "weird1"})
     assert result["structured"]["route_key"] == "error"
-    assert "tool" in result["output"]
-    assert "Phase 3" in result["output"]
+    assert "component" in result["output"]
 
 
 # ── make_executor: checker steps (human approval) ─────────
@@ -425,3 +432,359 @@ def test_executor_no_engine_ref_does_not_crash(monkeypatch):
     )
     result = executor({"step_id": "draft", "context": {}, "emit": None})
     assert result["output"] == "ok"
+
+
+# ── render_tool_args ──────────────────────────────────────
+
+
+def test_render_tool_args_substitutes_string_values():
+    args = render_tool_args({"city": "{{city}}"}, {"city": "Boston"})
+    assert args == {"city": "Boston"}
+
+
+def test_render_tool_args_passes_through_non_string_values():
+    args = render_tool_args({"limit": 5, "verbose": True}, {})
+    assert args == {"limit": 5, "verbose": True}
+
+
+def test_render_tool_args_empty_dict_for_no_declared_args():
+    assert render_tool_args({}, {"anything": "in context"}) == {}
+
+
+# ── _normalize_tool_result ─────────────────────────────────
+
+
+def test_normalize_tool_result_string_is_output_directly():
+    fields, output, route = _normalize_tool_result("72F and sunny")
+    assert fields == {}
+    assert output == "72F and sunny"
+    assert route is None
+
+
+def test_normalize_tool_result_none_is_empty_output():
+    fields, output, route = _normalize_tool_result(None)
+    assert fields == {}
+    assert output == ""
+    assert route is None
+
+
+def test_normalize_tool_result_dict_extracts_route_and_fields():
+    fields, output, route = _normalize_tool_result(
+        {"route": "approve", "risk_score": 0.2}
+    )
+    assert route == "approve"
+    assert fields == {"risk_score": 0.2}
+    assert "route" not in fields
+
+
+def test_normalize_tool_result_dict_uses_explicit_output_field():
+    fields, output, route = _normalize_tool_result({"output": "done", "extra": 1})
+    assert output == "done"
+    assert fields == {"output": "done", "extra": 1}
+
+
+def test_normalize_tool_result_dict_without_output_falls_back_to_json():
+    fields, output, route = _normalize_tool_result({"temperature": 72})
+    assert output == '{"temperature": 72}'
+
+
+def test_normalize_tool_result_empty_dict_has_empty_output():
+    fields, output, route = _normalize_tool_result({})
+    assert fields == {}
+    assert output == ""
+
+
+# ── _call_tool (arity detection) ───────────────────────────
+
+
+def test_call_tool_single_arg_callback():
+    calls = []
+
+    def cb(args):
+        calls.append(args)
+        return "ok"
+
+    result = _call_tool(cb, {"a": 1}, {"step_id": "s"})
+    assert result == "ok"
+    assert calls == [{"a": 1}]
+
+
+def test_call_tool_two_arg_callback_receives_ctx():
+    calls = []
+
+    def cb(args, ctx):
+        calls.append((args, ctx))
+        return "ok"
+
+    _call_tool(cb, {"a": 1}, {"step_id": "s"})
+    assert calls == [({"a": 1}, {"step_id": "s"})]
+
+
+# ── load_tool_registry ──────────────────────────────────────
+
+
+@pytest.fixture
+def tmp_config(tmp_path):
+    return StudioConfig(
+        home_dir=str(tmp_path / ".senza-studio"),
+        model="test-model",
+        api_key="test-key",
+        api_base="",
+    )
+
+
+def test_load_tool_registry_starter_file_returns_empty_no_error(tmp_config):
+    """Project.create() 写的起始文件 get_tools() 返回 {}——新项目应该能
+    干净地加载出一个空注册表，不报错。"""
+    proj = Project.create(tmp_config, "测试项目")
+    tools, error = load_tool_registry(proj)
+    assert tools == {}
+    assert error is None
+
+
+def test_load_tool_registry_missing_file_returns_empty_no_error(tmp_config):
+    proj = Project.create(tmp_config, "测试项目")
+    (proj.path / "tools" / "registry.py").unlink()
+    tools, error = load_tool_registry(proj)
+    assert tools == {}
+    assert error is None
+
+
+def test_load_tool_registry_loads_real_callables(tmp_config):
+    proj = Project.create(tmp_config, "测试项目")
+    (proj.path / "tools" / "registry.py").write_text(
+        "def add(args):\n"
+        "    return {'sum': args['a'] + args['b']}\n"
+        "\n"
+        "def get_tools():\n"
+        "    return {'add': add}\n",
+        encoding="utf-8",
+    )
+    tools, error = load_tool_registry(proj)
+    assert error is None
+    assert tools["add"]({"a": 1, "b": 2}) == {"sum": 3}
+
+
+def test_load_tool_registry_syntax_error_reports_message_not_raise(tmp_config):
+    proj = Project.create(tmp_config, "测试项目")
+    (proj.path / "tools" / "registry.py").write_text("def get_tools(:\n", encoding="utf-8")
+    tools, error = load_tool_registry(proj)
+    assert tools == {}
+    assert error is not None
+
+
+def test_load_tool_registry_non_dict_return_reports_message(tmp_config):
+    proj = Project.create(tmp_config, "测试项目")
+    (proj.path / "tools" / "registry.py").write_text(
+        "def get_tools():\n    return ['not', 'a', 'dict']\n", encoding="utf-8"
+    )
+    tools, error = load_tool_registry(proj)
+    assert tools == {}
+    assert error is not None
+    assert "dict" in error
+
+
+def test_load_tool_registry_two_projects_do_not_leak_tools(tmp_config):
+    """两个不同项目各自的 registry.py 不能互相污染——回归测试固定模块名
+    缓存 bug（sys.modules 复用会让后加载的项目读到前一个项目的工具）。"""
+    proj_a = Project.create(tmp_config, "项目A")
+    proj_b = Project.create(tmp_config, "项目B")
+    (proj_a.path / "tools" / "registry.py").write_text(
+        "def get_tools():\n    return {'only_in_a': lambda args: 'a'}\n", encoding="utf-8"
+    )
+    (proj_b.path / "tools" / "registry.py").write_text(
+        "def get_tools():\n    return {'only_in_b': lambda args: 'b'}\n", encoding="utf-8"
+    )
+    tools_a, _ = load_tool_registry(proj_a)
+    tools_b, _ = load_tool_registry(proj_b)
+    assert "only_in_a" in tools_a and "only_in_b" not in tools_a
+    assert "only_in_b" in tools_b and "only_in_a" not in tools_b
+
+
+# ── make_executor: tool steps ───────────────────────────────
+
+
+def test_executor_tool_missing_binding_is_clean_error():
+    stage_by_name = {"lookup": {"name": "lookup", "type": "tool"}}
+    executor = make_executor(
+        stage_by_name, {}, "test-model", provider=None, env=None, engine_ref={}
+    )
+    result = executor({"step_id": "lookup", "context": {}})
+    assert result["structured"]["route_key"] == "error"
+    assert "bind_tool" in result["output"]
+
+
+def test_executor_tool_unknown_ref_is_clean_error():
+    stage_by_name = {"lookup": {"name": "lookup", "type": "tool", "tool": "ghost_tool"}}
+    executor = make_executor(
+        stage_by_name,
+        {},
+        "test-model",
+        provider=None,
+        env=None,
+        engine_ref={},
+        tools_by_name={},
+    )
+    result = executor({"step_id": "lookup", "context": {}})
+    assert result["structured"]["route_key"] == "error"
+    assert "ghost_tool" in result["output"]
+
+
+def test_executor_tool_load_error_surfaces_on_every_tool_step():
+    stage_by_name = {"lookup": {"name": "lookup", "type": "tool", "tool": "whatever"}}
+    executor = make_executor(
+        stage_by_name,
+        {},
+        "test-model",
+        provider=None,
+        env=None,
+        engine_ref={},
+        tools_by_name={},
+        tools_load_error="加载 tools/registry.py 失败: bad syntax",
+    )
+    result = executor({"step_id": "lookup", "context": {}})
+    assert result["structured"]["route_key"] == "error"
+    assert "bad syntax" in result["output"]
+
+
+def test_executor_tool_single_route_calls_with_rendered_args():
+    calls = []
+
+    def weather_tool(args):
+        calls.append(args)
+        return {"temperature": 72}
+
+    stage_by_name = {
+        "lookup": {
+            "name": "lookup",
+            "type": "tool",
+            "tool": "weather",
+            "tool_args": {"city": "{{city}}"},
+            "output_key": "weather_result",
+            "next_on_success": "end",
+        },
+    }
+    fake_engine = FakeEngine()
+    executor = make_executor(
+        stage_by_name,
+        {"lookup": {"success": "end"}},
+        "test-model",
+        provider=None,
+        env=None,
+        engine_ref={"engine": fake_engine},
+        tools_by_name={"weather": weather_tool},
+    )
+    result = executor({"step_id": "lookup", "context": {"city": "Boston"}})
+
+    assert calls == [{"city": "Boston"}]
+    assert result["structured"]["route_key"] == "success"
+    assert fake_engine.written["weather_result"] == '{"temperature": 72}'
+    assert fake_engine.written["temperature"] == 72
+
+
+def test_executor_tool_multi_route_uses_returned_route_field():
+    def risk_check(args):
+        return {"route": "reject", "risk_score": 0.9}
+
+    stage_by_name = {
+        "check": {
+            "name": "check",
+            "type": "tool",
+            "tool": "risk_check",
+            "next_on_approve": "end",
+            "next_on_reject": "manual",
+        },
+    }
+    executor = make_executor(
+        stage_by_name,
+        {"check": {"approve": "end", "reject": "manual"}},
+        "test-model",
+        provider=None,
+        env=None,
+        engine_ref={},
+        tools_by_name={"risk_check": risk_check},
+    )
+    result = executor({"step_id": "check", "context": {}})
+    assert result["structured"]["route_key"] == "reject"
+
+
+def test_executor_tool_multi_route_invalid_route_is_error():
+    def bad_tool(args):
+        return {"route": "not_a_real_route"}
+
+    stage_by_name = {
+        "check": {
+            "name": "check",
+            "type": "tool",
+            "tool": "bad",
+            "next_on_approve": "end",
+            "next_on_reject": "manual",
+        },
+    }
+    executor = make_executor(
+        stage_by_name,
+        {"check": {"approve": "end", "reject": "manual"}},
+        "test-model",
+        provider=None,
+        env=None,
+        engine_ref={},
+        tools_by_name={"bad": bad_tool},
+    )
+    result = executor({"step_id": "check", "context": {}})
+    assert result["structured"]["route_key"] == "error"
+
+
+def test_executor_tool_string_return_is_used_as_output():
+    stage_by_name = {"lookup": {"name": "lookup", "type": "tool", "tool": "echo"}}
+    executor = make_executor(
+        stage_by_name,
+        {},
+        "test-model",
+        provider=None,
+        env=None,
+        engine_ref={},
+        tools_by_name={"echo": lambda args: "plain text result"},
+    )
+    result = executor({"step_id": "lookup", "context": {}})
+    assert result["output"] == "plain text result"
+    assert result["structured"]["route_key"] == "success"
+
+
+def test_executor_tool_exception_is_clean_error_not_crash():
+    def broken(args):
+        raise ValueError("boom")
+
+    stage_by_name = {"lookup": {"name": "lookup", "type": "tool", "tool": "broken"}}
+    executor = make_executor(
+        stage_by_name,
+        {},
+        "test-model",
+        provider=None,
+        env=None,
+        engine_ref={},
+        tools_by_name={"broken": broken},
+    )
+    result = executor({"step_id": "lookup", "context": {}})
+    assert result["structured"]["route_key"] == "error"
+    assert "boom" in result["output"]
+
+
+def test_executor_tool_receives_ctx_with_step_id():
+    seen_ctx = {}
+
+    def cb(args, ctx):
+        seen_ctx.update(ctx)
+        return "ok"
+
+    stage_by_name = {"lookup": {"name": "lookup", "type": "tool", "tool": "cb"}}
+    executor = make_executor(
+        stage_by_name,
+        {},
+        "test-model",
+        provider=None,
+        env=None,
+        engine_ref={},
+        tools_by_name={"cb": cb},
+    )
+    executor({"step_id": "lookup", "context": {}})
+    assert seen_ctx["step_id"] == "lookup"

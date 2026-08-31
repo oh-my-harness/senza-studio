@@ -20,6 +20,32 @@ def _gen_id(prefix: str = "proj") -> str:
     return f"{prefix}-{int(time.time() * 1000)}-{secrets.token_hex(3)}"
 
 
+# play.py 的 load_tool_registry() 每次 Play 都会 import 这个文件的
+# get_tools()——新项目一创建就给一份能直接 import 成功的起始文件，
+# 而不是等 tool step 第一次运行时才因为文件不存在而报错。
+_TOOL_REGISTRY_STARTER = '''\
+"""Play 模式的工具注册表 —— get_tools() 返回 {tool 名: 回调函数}。
+
+回调签名: def my_tool(args: dict) -> dict | str
+  也支持 def my_tool(args: dict, ctx: dict) -> dict | str
+
+- args 来自 spec 里这个 tool step 的 tool_args（对 context 做过 {{var}}
+  替换）。
+- 返回值可以是纯文本（直接作为这个 step 的输出显示），也可以是 dict——
+  dict 里除 "route" 外的字段会被写入 workflow 的共享 context，供后续
+  step 用 {{var}} 引用；如果这个 tool step 有多条 next_on_* 路由，dict
+  需要带上 "route": "<label>" 字段来选路由。
+
+在这里 import 你在 tools/custom/ 或 tools/generated/ 里写的函数，
+组装进下面的字典，然后用 bind_tool(step, "tool_name") 把 step 绑定过去。
+"""
+
+
+def get_tools():
+    return {}
+'''
+
+
 class Project:
     """单个 Studio 项目。"""
 
@@ -42,6 +68,7 @@ class Project:
         (path / ".studio" / "sessions").mkdir(parents=True, exist_ok=True)
         (path / "tools" / "generated").mkdir(parents=True, exist_ok=True)
         (path / "tools" / "custom").mkdir(parents=True, exist_ok=True)
+        (path / "tools" / "registry.py").write_text(_TOOL_REGISTRY_STARTER, encoding="utf-8")
         (path / "plugins").mkdir(parents=True, exist_ok=True)
         (path / "exports").mkdir(parents=True, exist_ok=True)
 
