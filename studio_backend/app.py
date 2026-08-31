@@ -90,6 +90,23 @@ def create_app(config: StudioConfig | None = None) -> FastAPI:
         state = _get_or_load_project(cfg, project_id)
         return state["project"].meta
 
+    @app.delete("/api/projects/{project_id}")
+    async def delete_project(project_id: str):
+        state = _studio_state.get(project_id)
+        if state is not None:
+            play_session = state.get("play_session")
+            if play_session is not None and play_session.state() in (
+                "running",
+                "paused",
+            ):
+                return JSONResponse(
+                    status_code=409,
+                    content={"detail": "项目正在运行，请先停止再删除"},
+                )
+            _studio_state.pop(project_id, None)
+        Project.delete(cfg, project_id)
+        return {"status": "ok"}
+
     # ── Spec ─────────────────────────────────────────────
     @app.get("/api/projects/{project_id}/spec")
     async def get_spec(project_id: str):

@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import secrets
+import shutil
 import time
 from pathlib import Path
 
@@ -75,6 +76,16 @@ class Project:
             raise FileNotFoundError(f"project {project_id} not found")
         meta = json.loads(meta_path.read_text(encoding="utf-8"))
         return cls(config, meta, path)
+
+    @classmethod
+    def delete(cls, config: StudioConfig, project_id: str) -> None:
+        """删除项目目录。路径安全检查与 open() 一致，防止越界删除。"""
+        path = (config.projects_dir / project_id).resolve()
+        if not path.is_relative_to(config.projects_dir.resolve()):
+            raise FileNotFoundError(f"project {project_id} not found")
+        if not path.exists():
+            raise FileNotFoundError(f"project {project_id} not found")
+        shutil.rmtree(path)
 
     @classmethod
     def list_all(cls, config: StudioConfig) -> list[dict]:

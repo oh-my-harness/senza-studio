@@ -73,6 +73,33 @@ def test_list_projects_after_create(app_client):
     assert len(r.json()) == 2
 
 
+def test_delete_project(app_client):
+    r = app_client.post("/api/projects", json={"name": "测试"})
+    pid = r.json()["id"]
+    r = app_client.delete(f"/api/projects/{pid}")
+    assert r.status_code == 200
+    r = app_client.get(f"/api/projects/{pid}")
+    assert r.status_code == 404
+    r = app_client.get("/api/projects")
+    assert r.json() == []
+
+
+def test_delete_project_not_found(app_client):
+    r = app_client.delete("/api/projects/nonexistent")
+    assert r.status_code == 404
+
+
+def test_delete_project_clears_cache(app_client):
+    """先 GET 把项目载入 _studio_state 缓存，再删——缓存也要清掉。"""
+    r = app_client.post("/api/projects", json={"name": "测试"})
+    pid = r.json()["id"]
+    app_client.get(f"/api/projects/{pid}")  # 载入缓存
+    r = app_client.delete(f"/api/projects/{pid}")
+    assert r.status_code == 200
+    r = app_client.get(f"/api/projects/{pid}")
+    assert r.status_code == 404
+
+
 # ── Spec ────────────────────────────────────────────────
 
 

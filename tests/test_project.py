@@ -38,6 +38,31 @@ def test_open_project_not_found(tmp_config):
         Project.open(tmp_config, "nonexistent-id")
 
 
+def test_delete_project(tmp_config):
+    proj = Project.create(tmp_config, "测试")
+    pid = proj.meta["id"]
+    Project.delete(tmp_config, pid)
+    assert not proj.path.exists()
+    with pytest.raises(FileNotFoundError):
+        Project.open(tmp_config, pid)
+
+
+def test_delete_project_not_found(tmp_config):
+    with pytest.raises(FileNotFoundError):
+        Project.delete(tmp_config, "nonexistent-id")
+
+
+def test_delete_project_rejects_path_traversal(tmp_config):
+    with pytest.raises(FileNotFoundError):
+        Project.delete(tmp_config, "../../etc")
+
+
+def test_delete_project_removes_from_list(tmp_config):
+    proj = Project.create(tmp_config, "测试")
+    Project.delete(tmp_config, proj.meta["id"])
+    assert Project.list_all(tmp_config) == []
+
+
 def test_list_projects(tmp_config):
     Project.create(tmp_config, "项目A")
     Project.create(tmp_config, "项目B")
