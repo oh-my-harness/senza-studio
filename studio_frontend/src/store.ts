@@ -30,6 +30,9 @@ interface StudioStore {
   runFinishedState: string | null;
   logs: LogEntry[];
   toolCalls: ToolCallEntry[];
+  // checker step 暂停等待人工审批时，是哪个 step——非空时 GameView 显示
+  // 审批按钮。
+  pausedStepId: string | null;
 
   setProject: (p: ProjectMeta | null) => void;
   setSpec: (s: Spec) => void;
@@ -49,6 +52,8 @@ interface StudioStore {
   clearLogs: () => void;
   addToolCall: (entry: ToolCallEntry) => void;
   setToolCalls: (entries: ToolCallEntry[]) => void;
+  setPausedStep: (stepId: string | null) => void;
+  markAwaitingApproval: (stepId: string, text: string) => void;
 }
 
 export const useStudioStore = create<StudioStore>((set) => ({
@@ -63,6 +68,7 @@ export const useStudioStore = create<StudioStore>((set) => ({
   runFinishedState: null,
   logs: [],
   toolCalls: [],
+  pausedStepId: null,
 
   setProject: (project) => set({ project }),
   setSpec: (spec) => set({ spec }),
@@ -92,7 +98,15 @@ export const useStudioStore = create<StudioStore>((set) => ({
 
   // 点 Play 时调用——顺带清空日志面板，避免上一次运行的日志跟这次的混在一起。
   resetPlay: () =>
-    set({ stepStatus: {}, gameCards: [], runFinishedState: null, logs: [] }),
+    set({
+      stepStatus: {},
+      gameCards: [],
+      runFinishedState: null,
+      logs: [],
+      pausedStepId: null,
+    }),
+
+  setPausedStep: (pausedStepId) => set({ pausedStepId }),
 
   setRunFinished: (runFinishedState) => set({ runFinishedState }),
 
@@ -108,10 +122,33 @@ export const useStudioStore = create<StudioStore>((set) => ({
   setToolCalls: (toolCalls) => set({ toolCalls }),
 
   startStep: (stepId, stepName) =>
-    set((s) => ({
-      stepStatus: { ...s.stepStatus, [stepId]: "running" },
-      gameCards: [...s.gameCards, { stepId, stepName, text: "", status: "running" }],
-    })),
+    set((s) => {
+      const last = [...s.gameCards].reverse().find((c) => c.stepId === stepId);
+      if (last && last.status === "running") {
+        // checker step 暂停后被 resume 重新 run()，同一个 step 会再收到一次
+        // step_started——这不是新 step，别再插一张重复卡片。
+        return {};
+      }
+      return {
+        stepStatus: { ...s.stepStatus, [stepId]: "running" },
+        gameCards: [...s.gameCards, { stepId, stepName, text: "", status: "running" }],
+      };
+    }),
+
+  // checker step 卡在"等审批"时用这个，而不是 finishStep——它不是真的
+  // 执行完了，只是这一轮 run() 提前退出；卡片状态留在 running，好让
+  // resume 之后的 step_finished 命中 finishStep 里 "status === running"
+  // 的更新条件，原地刷新同一张卡片而不是留一张永远过期的卡片。
+  markAwaitingApproval: (stepId, text) =>
+    set((s) => {
+      const cards = s.gameCards;
+      const idx = [...cards].reverse().findIndex((c) => c.stepId === stepId);
+      if (idx === -1) return {};
+      const realIdx = cards.length - 1 - idx;
+      const updated = [...cards];
+      updated[realIdx] = { ...updated[realIdx], text, status: "running" };
+      return { gameCards: updated };
+    }),
 
   appendStepText: (stepId, text) =>
     set((s) => {

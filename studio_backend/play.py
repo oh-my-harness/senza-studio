@@ -16,6 +16,7 @@ step_name -> {route_label: target} 两张表。
 """
 from __future__ import annotations
 
+import json
 import re
 import sys
 import threading
@@ -98,16 +99,38 @@ def get_entry_inputs(spec_dict: dict) -> list[str]:
     return seen
 
 
+# checker step 在等人工审批时，executor 返回这个 route_key——judge 认出
+# 它就转成 "pause:..."，而不是当成一个查不到边的路由错误。
+PENDING_APPROVAL = "__pending_approval__"
+
+
+def decision_context_key(step_id: str) -> str:
+    """人工审批结果存在 context 里的 key——完全是 Studio 内部记账，spec
+    作者不需要（也不能）声明它。checker executor 检查它决定要不要 pause，
+    submit_decision() 写它然后 resume。"""
+    return f"__decision_{step_id}__"
+
+
 def make_judge(routes_by_name: dict[str, dict[str, str]]) -> Callable[[dict], str]:
     """路由回调：把 executor 返回的 route_key 翻成 senza judge 的 transition 字符串。"""
 
     def play_judge(ctx: dict) -> str:
         structured = ctx.get("structured") or {}
         route_key = structured.get("route_key")
+        if route_key == PENDING_APPROVAL:
+            return f"pause:waiting for approval on '{ctx['step_id']}'"
         routes = routes_by_name.get(ctx["step_id"], {})
         target = routes.get(route_key)
         if target is None:
-            return f"fail:no route for '{route_key}' from '{ctx['step_id']}'"
+            reason = f"no route for '{route_key}' from '{ctx['step_id']}'"
+            # ctx["output"] 是 executor 真正返回的错误详情（比如 "step type
+            # 'checker' not supported until Phase 3"）——不带上的话，日志面板
+            # 只会看到一句不知道为什么的路由失败，得跑去 Game view 才看得到
+            # 真正原因。
+            output = ctx.get("output")
+            if output:
+                reason += f" — {output}"
+            return f"fail:{reason}"
         return f"to:{target}"
 
     return play_judge
@@ -161,36 +184,53 @@ def _run_agent_step(harness: Any, prompt: str, emit: Any) -> str:
     return "".join(text_parts)
 
 
-# 匹配 LLM 回答末尾的路由标记，如 {"route": "complaint"}。不用完整 JSON
-# 解析——只要求这个扁平形状，避免被回答正文里其它花括号干扰。
-_ROUTE_RE = re.compile(r'\{\s*"route"\s*:\s*"([^"]+)"\s*\}')
+# 匹配回答里的扁平 JSON 对象（不支持嵌套花括号）——LLM 按我们的指示只会
+# 在末尾吐一个简单对象，比如 {"route": "complaint", "summary": "..."}。
+# 用来既提取路由标记，也提取其它想传给下游 step 的结构化字段。
+_JSON_BLOB_RE = re.compile(r"\{[^{}]*\}")
 
 
 def _append_routing_instruction(prompt: str, routes: list[str]) -> str:
-    """多路由时，要求 LLM 在回答末尾用一行 JSON 声明选中的路由。"""
+    """多路由时，要求 LLM 在回答末尾用一行 JSON 声明选中的路由。
+
+    如果 prompt_template 本身已经要求了别的 JSON 字段（比如给 output_key
+    用的 summary），这条指令必须显式提醒"保留原有字段"——否则模型会把
+    这条指令当成最后、最具体的要求，只吐一个只有 route 的 JSON，
+    _extract_json_fields 取最后一个 JSON blob 时就会把 summary 等字段
+    丢掉（实测触发过一次：多路由 + output_key 同时出现时 summary 消失）。
+    """
     options = ", ".join(f'"{r}"' for r in routes)
     return (
         f"{prompt}\n\n---\n"
-        f"After your response, end with exactly one line containing only this JSON, "
-        f"choosing whichever option best applies: {{\"route\": \"<one of: {options}>\"}}"
+        f"After your response, end with exactly one line containing a single JSON "
+        f"object with a \"route\" field, choosing whichever option best applies: "
+        f'{{"route": "<one of: {options}>"}}. '
+        f"If your instructions above already asked for other JSON fields (e.g. a "
+        f"summary), keep them in this same JSON object alongside \"route\" — "
+        f"do not drop them."
     )
 
 
-def _extract_route(output: str, routes: list[str]) -> tuple[str, str]:
-    """从 LLM 输出末尾提取路由标记；成功则从展示文本里去掉这行标记。
+def _extract_json_fields(output: str) -> tuple[dict, str]:
+    """找输出里最后一个扁平 JSON 对象，解析出字段，并从展示文本里去掉这段。
 
-    找不到标记，或标记的值不在这个 step 声明的路由里，都返回 "error"——
-    交给 judge 报清晰的 fail 消息，而不是猜一个路由走下去。
+    找不到、解析失败、或解析出来不是 dict，都原样返回（fields={}）——不是
+    每个 agent step 都会吐 JSON，纯文字回复（比如草拟的客服回信）应该
+    完全不受影响。
     """
-    matches = list(_ROUTE_RE.finditer(output))
-    if not matches:
-        return "error", output
-    last = matches[-1]
-    route = last.group(1)
-    clean_output = (output[: last.start()] + output[last.end() :]).strip()
-    if route not in routes:
-        return "error", clean_output
-    return route, clean_output
+    last_match = None
+    for m in _JSON_BLOB_RE.finditer(output):
+        last_match = m
+    if last_match is None:
+        return {}, output
+    try:
+        fields = json.loads(last_match.group(0))
+    except (json.JSONDecodeError, ValueError):
+        return {}, output
+    if not isinstance(fields, dict):
+        return {}, output
+    clean_output = (output[: last_match.start()] + output[last_match.end() :]).strip()
+    return fields, clean_output
 
 
 def make_executor(
@@ -199,13 +239,32 @@ def make_executor(
     model: str,
     provider: Any,
     env: Any,
+    engine_ref: dict[str, Any],
 ) -> Callable[[dict], dict]:
-    """执行回调：只支持 type: agent，其它类型返回 error route（Phase 3 补全）。
+    """执行回调：支持 type: agent 和 type: checker；tool 留给 Phase 3。
+
+    engine_ref 是个可变的"晚绑定"容器——PlaySession.play() 构造 executor
+    时 WorkflowEngine 还不存在（executor 得先造好才能传给 WorkflowEngine
+    构造函数），engine 建好之后才把它塞进 engine_ref["engine"]。这样
+    executor 自己才能在 agent step 算完结果后调用
+    engine.set_context_variable(...) 往共享 context 写数据（ctx 参数本身
+    只有 context 的只读快照，没有写入口）——实测同一个 engine 在自己的
+    executor 回调里反过来调用它自己的 set_context_variable 不会死锁。
 
     短生命周期 harness——不带元 agent 的 spec/doc/prefab 工具或 strategy
     插件栈，那些是 Studio 自己的 meta agent 专属（agent.py）。这里跑的是
     spec 里被作者定义出来的 agent，项目自己的 plugins/（Phase 4）暂未接入。
     """
+
+    def _write_context(output_key: str | None, fields: dict) -> None:
+        engine = engine_ref.get("engine")
+        if engine is None:
+            return
+        if output_key:
+            engine.set_context_variable(output_key, fields.get("_output", ""))
+        for key, value in fields.items():
+            if key not in ("route", "_output"):
+                engine.set_context_variable(key, value)
 
     def play_executor(ctx: dict) -> dict:
         step_id = ctx["step_id"]
@@ -216,6 +275,21 @@ def make_executor(
                 "structured": {"route_key": "error"},
             }
         stage_type = stage.get("type")
+
+        if stage_type == "checker":
+            # 人工审批门——不调用 LLM，只看 submit_decision() 有没有写过
+            # 决定。没有就让 judge pause；有就直接按决定路由。
+            decision = ctx["context"].get(decision_context_key(step_id))
+            if decision is None:
+                return {
+                    "output": "等待人工审批…",
+                    "structured": {"route_key": PENDING_APPROVAL},
+                }
+            return {
+                "output": f"人工审批结果: {decision}",
+                "structured": {"route_key": decision},
+            }
+
         if stage_type != "agent":
             return {
                 "output": (
@@ -235,14 +309,23 @@ def make_executor(
 
         harness = senza.HarnessBuilder(model).provider("*", provider).env(env).build()
         try:
-            output = _run_agent_step(harness, prompt, ctx["emit"])
+            raw_output = _run_agent_step(harness, prompt, ctx["emit"])
         except Exception as exc:  # noqa: BLE001
             return {"output": f"Error: {exc}", "structured": {"route_key": "error"}}
 
+        # 不管路由数量，都尝试从回答里摘 JSON 字段——分类步骤常常在
+        # {"route": ...} 之外还顺带吐 summary/classification 这类给下游用
+        # 的字段，即使这个 step 本身只有一条路由也一样。
+        fields, output = _extract_json_fields(raw_output)
+
         if len(routes) > 1:
-            route_key, output = _extract_route(output, routes)
+            route_key = fields.get("route")
+            if route_key not in routes:
+                route_key = "error"
         else:
             route_key = routes[0] if routes else "success"
+
+        _write_context(stage.get("output_key"), {**fields, "_output": output})
 
         return {"output": output, "structured": {"route_key": route_key}}
 
@@ -261,6 +344,7 @@ class PlaySession:
         self._project = project
         self._spec = spec
         self._engine: Any = None
+        self._engine_ref: dict[str, Any] = {}
         self._thread: threading.Thread | None = None
         self.run_error: BaseException | None = None
 
@@ -280,7 +364,12 @@ class PlaySession:
         env = senza.create_os_env(str(self._project.path))
 
         executor = make_executor(
-            stage_by_name, routes_by_name, self._config.model, provider, env
+            stage_by_name,
+            routes_by_name,
+            self._config.model,
+            provider,
+            env,
+            self._engine_ref,
         )
         judge = make_judge(routes_by_name)
 
@@ -288,6 +377,10 @@ class PlaySession:
             spec_dict, provider, self._config.model, senza.create_judge(judge), env=env
         )
         self._engine.with_executor("eda_executor", senza.create_executor(executor))
+        # 晚绑定：executor 闭包在 engine 造好之前就已经创建，这里把真正的
+        # engine 塞进去，让它自己在 agent step 算完后能调用
+        # set_context_variable 往 context 写数据（详见 make_executor 注释）。
+        self._engine_ref["engine"] = self._engine
 
         for key, value in (inputs or {}).items():
             self._engine.set_context_variable(key, value)
@@ -295,24 +388,46 @@ class PlaySession:
         self._project.meta["status"] = "playing"
         self._project._save_meta()
 
+    def _run_once(self) -> None:
+        """跑一次 .run()（初次启动或 pause 后 resume 都调这个）。
+
+        engine.run() 在 workflow 失败时 raise senza.SenzaError（比如
+        judge 返回 "fail:..."）——记到 run_error，让 run_play_streaming
+        能把清晰的 error 消息转发给前端，而不是让线程默认打印一个吓人的
+        未捕获异常 traceback 然后悄悄退出。
+
+        WorkflowPausedError 单独处理：judge 返回 "pause:..." 时 run() 也是
+        靠 raise 这个异常来通知调用方，但这是正常的"等人工审批"状态，不是
+        错误——不该记进 run_error，也不该打印成报错。
+        """
+        try:
+            self._engine.run()
+        except senza.WorkflowPausedError:
+            pass
+        except BaseException as exc:  # noqa: BLE001
+            self.run_error = exc
+            print(f"Play run error: {exc}", file=sys.stderr)
+
     def start(self) -> None:
         """在后台线程启动 .run()。必须在 events() 订阅之后调用（见 play()）。"""
         if self._engine is None:
             raise RuntimeError("Engine not built. Call play() first.")
-
-        def _run() -> None:
-            # engine.run() 在 workflow 失败时 raise senza.SenzaError（比如
-            # judge 返回 "fail:..."）。默认线程行为是打印一个吓人的未捕获
-            # 异常 traceback 然后悄悄退出——这里改成记录到 run_error，让
-            # run_play_streaming 能把清晰的 error 消息转发给前端。
-            try:
-                self._engine.run()
-            except BaseException as exc:  # noqa: BLE001
-                self.run_error = exc
-                print(f"Play run error: {exc}", file=sys.stderr)
-
-        self._thread = threading.Thread(target=_run, daemon=True)
+        self._thread = threading.Thread(target=self._run_once, daemon=True)
         self._thread.start()
+
+    def submit_decision(self, step_id: str, decision: str) -> None:
+        """人工审批提交后调用：把决定写进 context，resume 引擎，再跑一次
+        run()——resume() 本身只翻内部状态，不会真的继续执行，得再调一次
+        run()（亲测行为）；同一个 .subscribe() 迭代器在多次 run() 之间
+        持续有效，不需要重新订阅。checker executor 在下一次被调用时会看到
+        这个 context 变量，不再返回 pending，从而正常路由下去。
+        """
+        if self._engine is None:
+            raise RuntimeError("Engine not built. Call play() first.")
+        self._engine.set_context_variable(decision_context_key(step_id), decision)
+        self._engine.resume()
+        self.run_error = None
+        self.start()
 
     def stop(self, reason: str = "user stop") -> None:
         """取消运行中的 engine。项目状态收尾（playing -> editing）由调用方

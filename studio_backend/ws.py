@@ -207,7 +207,14 @@ async def run_play_streaming(
                 # fail 的 checker）可能后台线程已经结束但事件流早就抽干，
                 # 只在这里检查线程是否还活着才能及时退出，否则要傻等到
                 # max_consecutive_timeouts 耗尽（最多 999*5s）。
-                if not (play_session._thread and play_session._thread.is_alive()):
+                #
+                # 但线程死了不等于跑完了——checker 等人工审批时，run()
+                # 因为 WorkflowPausedError 也会让线程退出，这时 engine 状态
+                # 是 "paused"，不是终态。同一个 subscribe() 迭代器在
+                # submit_decision() 重新 run() 之后还能继续收到事件（亲测
+                # 行为），所以这里不能 break，得继续等，直到真的有终态。
+                thread_dead = not (play_session._thread and play_session._thread.is_alive())
+                if thread_dead and play_session.state() != "paused":
                     break
                 continue
 

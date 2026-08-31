@@ -4,6 +4,9 @@ import { useStudioStore } from "../store";
 import { createWebSocket, api } from "../api";
 import Markdown from "./Markdown";
 import { splitToolCalls } from "../utils";
+import { PENDING_APPROVAL_ROUTE_KEY } from "../types";
+
+const MAX_TEXTAREA_HEIGHT = 160; // px，约 6~7 行，超过就交给滚动条
 
 export default function ChatPanel({ projectId }: { projectId: string }) {
   const [input, setInput] = useState("");
@@ -26,8 +29,11 @@ export default function ChatPanel({ projectId }: { projectId: string }) {
   const addLog = useStudioStore((s) => s.addLog);
   const addToolCall = useStudioStore((s) => s.addToolCall);
   const setToolCalls = useStudioStore((s) => s.setToolCalls);
+  const setPausedStep = useStudioStore((s) => s.setPausedStep);
+  const markAwaitingApproval = useStudioStore((s) => s.markAwaitingApproval);
   const scrollRef = useRef<HTMLDivElement>(null);
   const bottomRef = useRef<HTMLDivElement>(null);
+  const textareaRef = useRef<HTMLTextAreaElement>(null);
 
   // 加载 session 列表
   useEffect(() => {
@@ -62,7 +68,23 @@ export default function ChatPanel({ projectId }: { projectId: string }) {
       } else if (event.type === "step_started") {
         startStep(event.step_id, event.step_name);
       } else if (event.type === "step_finished") {
-        finishStep(event.step_id, event.output);
+        // checker step 卡在"等审批"——用 route_key 判断，不解析 reason 字符串
+        // （paused 事件本身只有一句人类可读文案，没带 step_id）。这轮 run()
+        // 只是提前退出，不是真的执行完了，所以不能用 finishStep（会把卡片
+        // 标成 done，resume 之后同一个 step 的第二次 step_finished 就再也
+        // 找不到 running 状态的卡片可更新）。
+        const structured = event.structured as { route_key?: string } | null | undefined;
+        if (structured?.route_key === PENDING_APPROVAL_ROUTE_KEY) {
+          markAwaitingApproval(event.step_id as string, event.output ?? "");
+          setPausedStep(event.step_id as string);
+        } else {
+          finishStep(event.step_id, event.output);
+          setPausedStep(null);
+        }
+      } else if (event.type === "paused") {
+        addLog("info", `⏸ ${event.reason || "已暂停，等待人工审批"}`);
+      } else if (event.type === "resumed") {
+        addLog("info", "▶ 已恢复运行");
       } else if (event.type === "failed") {
         failRunningSteps();
         addLog("error", event.error || "工作流失败");
@@ -75,6 +97,7 @@ export default function ChatPanel({ projectId }: { projectId: string }) {
         }
       } else if (event.type === "play_stopped") {
         setRunFinished(null);
+        setPausedStep(null);
         setStatus("spec_ready");
       } else if (event.type === "text_delta") {
         // 流式文本追加到最近的 assistant 消息
@@ -145,6 +168,21 @@ export default function ChatPanel({ projectId }: { projectId: string }) {
     bottomRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages]);
 
+  // 输入框按内容自动长高，封顶后交给 overflow-y-auto 滚动，而不是无限撑高。
+  useEffect(() => {
+    const el = textareaRef.current;
+    if (!el) return;
+    el.style.height = "auto";
+    el.style.height = `${Math.min(el.scrollHeight, MAX_TEXTAREA_HEIGHT)}px`;
+  }, [input]);
+
+  // 提交后到第一个 token 到达前有个空档——纯 streaming 状态看不出区别，
+  // 加个"思考中"指示。一旦助手气泡有内容了，流式文字本身就是反馈，不再
+  // 需要这个指示。
+  const lastMessage = messages[messages.length - 1];
+  const waitingForResponse =
+    streaming && (!lastMessage || lastMessage.role !== "assistant" || !lastMessage.content);
+
   const send = () => {
     if (!input.trim() || !ws || streaming) return;
     addMessage({ role: "user", content: input, timestamp: Date.now() });
@@ -206,16 +244,43 @@ export default function ChatPanel({ projectId }: { projectId: string }) {
             {m.role === "assistant" ? <Markdown text={m.content} /> : m.content}
           </div>
         ))}
+        {waitingForResponse && (
+          <div className="flex items-center gap-2 text-gray-400 text-sm mr-8 px-1">
+            <svg
+              className="animate-spin h-4 w-4"
+              xmlns="http://www.w3.org/2000/svg"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth={2}
+            >
+              <path
+                strokeLinecap="round"
+                strokeLinejoin="round"
+                d="M16.023 9.348h4.992v-.001M2.985 19.644v-4.992m0 0h4.992m-4.993 0l3.181 3.183a8.25 8.25 0 0013.803-3.7M4.031 9.865a8.25 8.25 0 0113.803-3.7l3.181 3.182m0-4.991v4.99"
+              />
+            </svg>
+            <span>思考中…</span>
+          </div>
+        )}
         <div ref={bottomRef} />
       </div>
       <div className="p-4 border-t border-gray-200">
-        <div className="flex gap-2">
-          <input
+        <div className="flex gap-2 items-end">
+          <textarea
+            ref={textareaRef}
             value={input}
             onChange={(e) => setInput(e.target.value)}
-            onKeyDown={(e) => e.key === "Enter" && !e.shiftKey && send()}
-            placeholder="描述你想要的 Agent 流程…"
-            className="flex-1 rounded-lg border border-gray-300 px-3 py-2 text-sm focus:outline-none focus:border-blue-400"
+            onKeyDown={(e) => {
+              if (e.key === "Enter" && !e.shiftKey) {
+                e.preventDefault();
+                send();
+              }
+            }}
+            placeholder="描述你想要的 Agent 流程…（Shift+Enter 换行）"
+            rows={1}
+            style={{ maxHeight: MAX_TEXTAREA_HEIGHT }}
+            className="flex-1 resize-none overflow-y-auto rounded-lg border border-gray-300 px-3 py-2 text-sm focus:outline-none focus:border-blue-400"
             disabled={streaming}
           />
           <button

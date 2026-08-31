@@ -205,6 +205,18 @@ def create_app(config: StudioConfig | None = None) -> FastAPI:
                         # 早就退出了，得在这里自己收尾回 editing。
                         await finalize_play(websocket, project)
 
+                elif msg_type == "submit_decision":
+                    # checker step 在等人工审批——run_play_streaming 的事件
+                    # 循环在 paused 状态下不会退出（见 ws.py 里的注释），
+                    # 同一个 subscribe() 订阅在 submit_decision() 重新
+                    # run() 之后还能继续收到事件，不需要另起 play_task。
+                    play_session = state.get("play_session")
+                    if play_session is not None:
+                        step_id = msg.get("step_id")
+                        decision = msg.get("decision")
+                        if step_id and decision:
+                            play_session.submit_decision(step_id, decision)
+
                 elif msg_type == "prompt":
                     # 如果上一个 prompt 还在跑，先中止
                     if streaming_task is not None and not streaming_task.done():

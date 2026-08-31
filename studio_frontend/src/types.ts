@@ -56,6 +56,10 @@ export interface GameCard {
   status: StepRunStatus;
 }
 
+// 必须和 studio_backend/play.py 里的 PENDING_APPROVAL 保持一致——checker
+// step 用这个 route_key 表示"还没等到人工审批"。
+export const PENDING_APPROVAL_ROUTE_KEY = "__pending_approval__";
+
 export type LogLevel = "error" | "info";
 
 export interface LogEntry {
