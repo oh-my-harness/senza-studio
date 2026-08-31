@@ -37,6 +37,8 @@ export const api = {
     ),
   getEntryInputs: (id: string) =>
     fetchJson<{ fields: string[] }>(`${BASE}/projects/${id}/entry_inputs`),
+  deleteProject: (id: string) =>
+    fetchJson<{ status: string }>(`${BASE}/projects/${id}`, { method: "DELETE" }),
 };
 
 export function createWebSocket(projectId: string): WebSocket {
