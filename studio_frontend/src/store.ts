@@ -7,6 +7,9 @@ import type {
   StudioStatus,
   GameCard,
   StepRunStatus,
+  LogEntry,
+  LogLevel,
+  ToolCallEntry,
 } from "./types";
 
 interface StudioStore {
@@ -25,6 +28,8 @@ interface StudioStore {
   // 运行自然结束（succeeded/failed）后的终态——不自动退出 playing，留给
   // 用户自己看完结果再点 Stop；这个字段只是用来在 UI 上提示"跑完了"。
   runFinishedState: string | null;
+  logs: LogEntry[];
+  toolCalls: ToolCallEntry[];
 
   setProject: (p: ProjectMeta | null) => void;
   setSpec: (s: Spec) => void;
@@ -40,6 +45,10 @@ interface StudioStore {
   finishStep: (stepId: string, output?: string) => void;
   failRunningSteps: () => void;
   setRunFinished: (state: string | null) => void;
+  addLog: (level: LogLevel, message: string) => void;
+  clearLogs: () => void;
+  addToolCall: (entry: ToolCallEntry) => void;
+  setToolCalls: (entries: ToolCallEntry[]) => void;
 }
 
 export const useStudioStore = create<StudioStore>((set) => ({
@@ -52,6 +61,8 @@ export const useStudioStore = create<StudioStore>((set) => ({
   stepStatus: {},
   gameCards: [],
   runFinishedState: null,
+  logs: [],
+  toolCalls: [],
 
   setProject: (project) => set({ project }),
   setSpec: (spec) => set({ spec }),
@@ -79,9 +90,22 @@ export const useStudioStore = create<StudioStore>((set) => ({
       };
     }),
 
-  resetPlay: () => set({ stepStatus: {}, gameCards: [], runFinishedState: null }),
+  // 点 Play 时调用——顺带清空日志面板，避免上一次运行的日志跟这次的混在一起。
+  resetPlay: () =>
+    set({ stepStatus: {}, gameCards: [], runFinishedState: null, logs: [] }),
 
   setRunFinished: (runFinishedState) => set({ runFinishedState }),
+
+  addLog: (level, message) =>
+    set((s) => ({
+      logs: [...s.logs, { level, message, timestamp: Date.now() }],
+    })),
+
+  clearLogs: () => set({ logs: [] }),
+
+  addToolCall: (entry) => set((s) => ({ toolCalls: [...s.toolCalls, entry] })),
+
+  setToolCalls: (toolCalls) => set({ toolCalls }),
 
   startStep: (stepId, stepName) =>
     set((s) => ({

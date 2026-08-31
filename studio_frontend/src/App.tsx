@@ -1,5 +1,6 @@
 // studio_frontend/src/App.tsx
 import { useEffect, useState } from "react";
+import { Group, Panel, Separator } from "react-resizable-panels";
 import { useStudioStore } from "./store";
 import { api } from "./api";
 import ChatPanel from "./components/ChatPanel";
@@ -7,8 +8,10 @@ import Canvas from "./components/Canvas";
 import ControlBar from "./components/ControlBar";
 import GameView from "./components/GameView";
 import Inspector from "./components/Inspector";
+import BottomPanel from "./components/BottomPanel";
 import StatusBar from "./components/StatusBar";
 import type { ProjectMeta } from "./types";
+import { splitToolCalls } from "./utils";
 
 export default function App() {
   const [projectId, setProjectId] = useState<string | null>(null);
@@ -16,6 +19,7 @@ export default function App() {
   const setProject = useStudioStore((s) => s.setProject);
   const setSpec = useStudioStore((s) => s.setSpec);
   const setMessages = useStudioStore((s) => s.setMessages);
+  const setToolCalls = useStudioStore((s) => s.setToolCalls);
   const status = useStudioStore((s) => s.status);
   const setStatus = useStudioStore((s) => s.setStatus);
   const selectStep = useStudioStore((s) => s.selectStep);
@@ -33,9 +37,11 @@ export default function App() {
     const meta = await api.getProject(id);
     const spec = await api.getSpec(id);
     const messages = await api.getMessages(id);
+    const { chat, tools } = splitToolCalls(messages);
     setProject(meta);
     setSpec(spec);
-    setMessages(messages);
+    setMessages(chat);
+    setToolCalls(tools);
     setProjectId(id);
   };
 
@@ -49,6 +55,7 @@ export default function App() {
     setProject(meta);
     setSpec(spec);
     setMessages([]);
+    setToolCalls([]);
     setProjectId(id);
   };
 
@@ -58,6 +65,7 @@ export default function App() {
     setProject(null);
     setSpec({ stages: [] });
     setMessages([]);
+    setToolCalls([]);
     selectStep(null);
     resetPlay();
     setStatus("idle");
@@ -121,12 +129,28 @@ export default function App() {
         )}
       </div>
       <ControlBar projectId={projectId} />
-      <div className="flex-1 flex overflow-hidden">
-        <ChatPanel projectId={projectId} collapsed={playing} />
-        {playing && <GameView />}
-        <Canvas />
-        <Inspector projectId={projectId} />
-      </div>
+      <Group orientation="horizontal" className="flex-1 min-h-0">
+        <Panel id="chat" defaultSize={playing ? "20%" : "25%"} minSize="15%">
+          <ChatPanel projectId={projectId} />
+        </Panel>
+        <Separator className="w-1 bg-gray-200 hover:bg-blue-400 transition-colors cursor-col-resize" />
+        {playing && (
+          <>
+            <Panel id="game" defaultSize="25%" minSize="15%">
+              <GameView />
+            </Panel>
+            <Separator className="w-1 bg-gray-200 hover:bg-blue-400 transition-colors cursor-col-resize" />
+          </>
+        )}
+        <Panel id="canvas" defaultSize={playing ? "35%" : "50%"} minSize="20%">
+          <Canvas />
+        </Panel>
+        <Separator className="w-1 bg-gray-200 hover:bg-blue-400 transition-colors cursor-col-resize" />
+        <Panel id="inspector" defaultSize="20%" minSize="15%">
+          <Inspector projectId={projectId} />
+        </Panel>
+      </Group>
+      <BottomPanel />
       <StatusBar />
     </div>
   );

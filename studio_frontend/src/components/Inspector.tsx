@@ -30,8 +30,11 @@ export default function Inspector({ projectId }: { projectId: string }) {
 
   if (!selectedStep || !draft) {
     return (
-      <div className="w-80 border-l border-gray-200 bg-white p-4 text-sm text-gray-400">
-        选择一个节点查看属性
+      <div className="h-full w-full border-l border-gray-200 bg-white flex flex-col">
+        <div className="px-4 py-3 border-b border-gray-200 font-medium text-gray-700 shrink-0">
+          Inspector
+        </div>
+        <div className="p-4 text-sm text-gray-400">选择一个节点查看属性</div>
       </div>
     );
   }
@@ -62,12 +65,13 @@ export default function Inspector({ projectId }: { projectId: string }) {
     .map(([k, v]) => ({ condition: k.replace("next_on_", ""), to: v as string }));
 
   return (
-    <div className="w-80 border-l border-gray-200 bg-white p-4 overflow-y-auto flex flex-col">
-      <div className="flex items-center justify-between mb-3">
-        <h3 className="font-medium text-gray-700">属性</h3>
-        {isDirty && <span className="text-xs text-amber-600">有未保存的修改</span>}
+    <div className="h-full w-full border-l border-gray-200 bg-white flex flex-col">
+      <div className="px-4 py-3 border-b border-gray-200 font-medium text-gray-700 flex items-center justify-between gap-2 shrink-0">
+        <span>Inspector</span>
+        {isDirty && <span className="text-xs text-amber-600 font-normal">有未保存的修改</span>}
       </div>
-      <div className="space-y-3 flex-1">
+      <div className="flex-1 min-h-0 overflow-y-auto p-4">
+        <div className="space-y-3">
         <div>
           <label className="block text-xs text-gray-500 mb-1">name</label>
           <input
@@ -173,8 +177,9 @@ export default function Inspector({ projectId }: { projectId: string }) {
             </div>
           </div>
         )}
+        </div>
       </div>
-      <div className="flex gap-2 pt-3 mt-3 border-t border-gray-200">
+      <div className="flex gap-2 p-4 border-t border-gray-200 shrink-0">
         <button
           onClick={save}
           disabled={!isDirty}

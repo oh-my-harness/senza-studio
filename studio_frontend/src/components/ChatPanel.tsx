@@ -3,14 +3,9 @@ import { useState, useRef, useEffect } from "react";
 import { useStudioStore } from "../store";
 import { createWebSocket, api } from "../api";
 import Markdown from "./Markdown";
+import { splitToolCalls } from "../utils";
 
-export default function ChatPanel({
-  projectId,
-  collapsed = false,
-}: {
-  projectId: string;
-  collapsed?: boolean;
-}) {
+export default function ChatPanel({ projectId }: { projectId: string }) {
   const [input, setInput] = useState("");
   const [streaming, setStreaming] = useState(false);
   const [sessions, setSessions] = useState<string[]>([]);
@@ -28,6 +23,9 @@ export default function ChatPanel({
   const finishStep = useStudioStore((s) => s.finishStep);
   const failRunningSteps = useStudioStore((s) => s.failRunningSteps);
   const setRunFinished = useStudioStore((s) => s.setRunFinished);
+  const addLog = useStudioStore((s) => s.addLog);
+  const addToolCall = useStudioStore((s) => s.addToolCall);
+  const setToolCalls = useStudioStore((s) => s.setToolCalls);
   const scrollRef = useRef<HTMLDivElement>(null);
   const bottomRef = useRef<HTMLDivElement>(null);
 
@@ -67,10 +65,14 @@ export default function ChatPanel({
         finishStep(event.step_id, event.output);
       } else if (event.type === "failed") {
         failRunningSteps();
+        addLog("error", event.error || "工作流失败");
       } else if (event.type === "workflow_done") {
         // 跑完了（成功或失败）不自动退出 playing——留给用户自己看完结果
         // 再点 Stop。真正回到 editing 由下面的 play_stopped 触发。
         setRunFinished(event.state);
+        if (event.state === "succeeded") {
+          addLog("info", "✅ 运行成功完成");
+        }
       } else if (event.type === "play_stopped") {
         setRunFinished(null);
         setStatus("spec_ready");
@@ -81,15 +83,15 @@ export default function ChatPanel({
         // 新消息开始 — 插入空 assistant 气泡，后续 text_delta 追加到它
         addMessage({ role: "assistant", content: "", timestamp: Date.now() });
       } else if (event.type === "tool_call_start") {
-        addMessage({
-          role: "tool",
+        // 工具调用不算对话内容，挪到底部面板的"工具调用"标签页，
+        // 免得聊天记录被一堆调用/结果气泡塞满。
+        addToolCall({
           content: `调用工具: ${event.tool_name}`,
           toolName: event.tool_name,
           timestamp: Date.now(),
         });
       } else if (event.type === "tool_result") {
-        addMessage({
-          role: "tool",
+        addToolCall({
           content: `结果: ${event.result}`,
           toolName: event.tool_name,
           timestamp: Date.now(),
@@ -97,7 +99,10 @@ export default function ChatPanel({
       } else if (event.type === "settled" || event.type === "aborted" || event.type === "error" || event.type === "agent_end") {
         setStreaming(false);
         if (event.type === "error") {
-          addMessage({ role: "assistant", content: `⚠️ ${event.message || "发生错误"}`, timestamp: Date.now() });
+          // 这个 "error" 事件对话/Play 共用（run_prompt_streaming 和
+          // run_play_streaming 都会发）——统一记到日志面板，不再插进聊天
+          // 记录（插的假 assistant 气泡本来也不会被真实持久化，刷新就没了）。
+          addLog("error", event.message || "发生错误");
         }
         setStatus("spec_ready");
       } else if (event.type === "spec_updated") {
@@ -106,7 +111,14 @@ export default function ChatPanel({
         const sid = event.session_id as string;
         setActiveSession(sid);
         setSessions((prev) => (prev.includes(sid) ? prev : [...prev, sid]));
-        api.getMessages(projectId).then(setMessages).catch(console.error);
+        api
+          .getMessages(projectId)
+          .then((msgs) => {
+            const { chat, tools } = splitToolCalls(msgs);
+            setMessages(chat);
+            setToolCalls(tools);
+          })
+          .catch(console.error);
       }
     };
 
@@ -120,7 +132,7 @@ export default function ChatPanel({
       if (!isCurrent) return;
       setStreaming(false);
       setStatus("idle");
-      addMessage({ role: "assistant", content: "⚠️ 连接断开，请刷新页面重试", timestamp: Date.now() });
+      addLog("error", "WebSocket 连接断开，请刷新页面重试");
     };
 
     return () => {
@@ -155,11 +167,7 @@ export default function ChatPanel({
   };
 
   return (
-    <div
-      className={`flex flex-col h-full border-r border-gray-200 bg-white ${
-        collapsed ? "w-64" : "w-96"
-      }`}
-    >
+    <div className="flex flex-col h-full w-full border-r border-gray-200 bg-white">
       <div className="px-4 py-3 border-b border-gray-200 font-medium text-gray-700 flex items-center justify-between gap-2">
         <span>对话</span>
         <div className="flex items-center gap-1">
@@ -192,8 +200,6 @@ export default function ChatPanel({
             className={`rounded-lg p-3 text-sm ${
               m.role === "user"
                 ? "bg-blue-50 text-blue-900 ml-8"
-                : m.role === "tool"
-                ? "bg-gray-50 text-gray-600 text-xs font-mono"
                 : "bg-gray-50 text-gray-800 mr-8"
             }`}
           >

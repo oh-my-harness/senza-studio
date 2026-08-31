@@ -55,3 +55,17 @@ export interface GameCard {
   text: string;
   status: StepRunStatus;
 }
+
+export type LogLevel = "error" | "info";
+
+export interface LogEntry {
+  level: LogLevel;
+  message: string;
+  timestamp: number;
+}
+
+export interface ToolCallEntry {
+  content: string;
+  toolName?: string;
+  timestamp: number;
+}

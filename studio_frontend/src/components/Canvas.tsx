@@ -160,16 +160,21 @@ export default function Canvas() {
   }, [spec, selectedStepName, stepStatus]);
 
   return (
-    <div className="flex-1 h-full">
-      <ReactFlow
-        nodes={nodes}
-        edges={edges}
-        fitView
-        onNodeClick={(_, node) => selectStep(node.id)}
-      >
-        <Background />
-        <Controls />
-      </ReactFlow>
+    <div className="flex flex-col h-full w-full">
+      <div className="px-4 py-3 border-b border-gray-200 font-medium text-gray-700 shrink-0">
+        DAG
+      </div>
+      <div className="flex-1 min-h-0">
+        <ReactFlow
+          nodes={nodes}
+          edges={edges}
+          fitView
+          onNodeClick={(_, node) => selectStep(node.id)}
+        >
+          <Background />
+          <Controls />
+        </ReactFlow>
+      </div>
     </div>
   );
 }
