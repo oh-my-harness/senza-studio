@@ -186,7 +186,10 @@ def create_app(config: StudioConfig | None = None) -> FastAPI:
                         continue  # 已经在跑，忽略重复 play
                     play_session = PlaySession(cfg, project, state["spec"])
                     state["play_session"] = play_session
-                    play_session.play(inputs=msg.get("inputs"))
+                    play_session.play(
+                        inputs=msg.get("inputs"),
+                        start_paused=bool(msg.get("start_paused")),
+                    )
                     play_task = asyncio.create_task(
                         run_play_streaming(websocket, play_session, project)
                     )
@@ -216,6 +219,25 @@ def create_app(config: StudioConfig | None = None) -> FastAPI:
                         decision = msg.get("decision")
                         if step_id and decision:
                             play_session.submit_decision(step_id, decision)
+
+                elif msg_type == "pause":
+                    play_session = state.get("play_session")
+                    if play_session is not None:
+                        play_session.request_pause()
+
+                elif msg_type == "resume":
+                    # 跟 submit_decision 同一个道理——run_play_streaming 的
+                    # 事件循环在 paused 状态下不会退出，同一个 subscribe()
+                    # 订阅在 resume_run() 重新 run() 之后还能继续收到事件，
+                    # 不需要另起 play_task。
+                    play_session = state.get("play_session")
+                    if play_session is not None:
+                        play_session.resume_run()
+
+                elif msg_type == "step":
+                    play_session = state.get("play_session")
+                    if play_session is not None:
+                        play_session.step()
 
                 elif msg_type == "prompt":
                     # 如果上一个 prompt 还在跑，先中止

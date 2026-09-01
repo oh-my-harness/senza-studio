@@ -21,8 +21,10 @@ from studio_backend.play import (
     make_judge,
     render_prompt_template,
     render_tool_args,
+    PlaySession,
 )
 from studio_backend.project import Project
+from studio_backend.spec import Spec
 
 
 class FakeEngine:
@@ -954,3 +956,227 @@ def test_executor_tool_receives_ctx_with_step_id():
     )
     executor({"step_id": "lookup", "context": {}})
     assert seen_ctx["step_id"] == "lookup"
+
+
+# ── PlaySession: pause / resume / step ───────────────────────
+
+
+class FakeStatefulEngine:
+    """假 WorkflowEngine——记录 pause()/resume() 调用顺序，state() 可手动
+    切换，不碰真实 SDK（PlaySession.__init__ 本身不构造 engine，直接把
+    _engine 换成这个假对象即可单测这三个方法）。"""
+
+    def __init__(self, initial_state: str):
+        self._state = initial_state
+        self.calls: list[tuple] = []
+
+    def state(self):
+        return self._state
+
+    def pause(self, reason):
+        self.calls.append(("pause", reason))
+
+    def resume(self):
+        self.calls.append(("resume",))
+        # 亲测行为：resume() 会把 pause_requested 标志清空——step() 依赖
+        # 这个副作用的测试需要能观察到 resume 之后 state 仍是 "paused"
+        # （亲测：Paused -> Running 的转换由 run() 自己做，不是 resume()）。
+
+    def set_context_variable(self, key, value):
+        self.calls.append(("set_context_variable", key, value))
+
+
+def _make_session_with_fake_engine(initial_state: str):
+    session = PlaySession(None, None, None)
+    session._engine = FakeStatefulEngine(initial_state)
+    return session
+
+
+def test_request_pause_calls_engine_pause_when_running():
+    session = _make_session_with_fake_engine("running")
+    session.request_pause("test reason")
+    assert session._engine.calls == [("pause", "test reason")]
+
+
+def test_request_pause_noop_when_not_running():
+    for state in ("idle", "paused", "succeeded"):
+        session = _make_session_with_fake_engine(state)
+        session.request_pause()
+        assert session._engine.calls == []
+
+
+def test_resume_run_calls_resume_then_start_when_paused(monkeypatch):
+    session = _make_session_with_fake_engine("paused")
+    started = []
+    monkeypatch.setattr(session, "start", lambda: started.append(True))
+    session.run_error = RuntimeError("stale")
+
+    session.resume_run()
+
+    assert session._engine.calls == [("resume",)]
+    assert started == [True]
+    assert session.run_error is None
+
+
+def test_resume_run_noop_when_not_paused(monkeypatch):
+    session = _make_session_with_fake_engine("running")
+    started = []
+    monkeypatch.setattr(session, "start", lambda: started.append(True))
+
+    session.resume_run()
+
+    assert session._engine.calls == []
+    assert started == []
+
+
+def test_step_calls_resume_before_pause_then_start(monkeypatch):
+    """顺序很关键：resume() 会把 pause_requested 清空，先 pause() 后
+    resume() 的话，pause() 刚设的标志就会被 resume() 自己清掉。"""
+    session = _make_session_with_fake_engine("paused")
+    started = []
+    monkeypatch.setattr(session, "start", lambda: started.append(True))
+    session.run_error = RuntimeError("stale")
+
+    session.step("single-step")
+
+    assert session._engine.calls == [("resume",), ("pause", "single-step")]
+    assert started == [True]
+    assert session.run_error is None
+
+
+def test_step_noop_when_not_paused(monkeypatch):
+    session = _make_session_with_fake_engine("running")
+    started = []
+    monkeypatch.setattr(session, "start", lambda: started.append(True))
+
+    session.step()
+
+    assert session._engine.calls == []
+    assert started == []
+
+
+# ── PlaySession: _step_mode interaction with submit_decision ─
+
+
+def test_submit_decision_rearms_pause_when_in_step_mode(monkeypatch):
+    """回归测试：Play Paused/Step 走到一个 checker，点 approve 之后不该
+    一路跑到底——审批本身也是往前走了一步，应该跟其它 step 一样只跑这一
+    步就再暂停（亲测复现过：不这么做的话，approve 之后会直接冲到终点，
+    把"逐步执行"的节奏在 checker 这里打断）。"""
+    session = _make_session_with_fake_engine("paused")
+    session._step_mode = True
+    started = []
+    monkeypatch.setattr(session, "start", lambda: started.append(True))
+
+    session.submit_decision("review", "approve")
+
+    calls = session._engine.calls
+    assert ("set_context_variable", decision_context_key("review"), "approve") in calls
+    assert ("resume",) in calls
+    assert ("pause", "single-step (after approval)") in calls
+    # resume 必须在 pause 之前——resume() 会清空 pause_requested。
+    assert calls.index(("resume",)) < calls.index(("pause", "single-step (after approval)"))
+    assert started == [True]
+
+
+def test_submit_decision_does_not_pause_when_not_in_step_mode(monkeypatch):
+    """默认（没在 Play Paused/Step 模式下）走到 checker，approve 之后应该
+    照旧一路跑下去——这是这个功能加进来之前就有的行为，不该被破坏。"""
+    session = _make_session_with_fake_engine("paused")
+    assert session._step_mode is False
+    started = []
+    monkeypatch.setattr(session, "start", lambda: started.append(True))
+
+    session.submit_decision("review", "approve")
+
+    calls = session._engine.calls
+    assert ("resume",) in calls
+    assert not any(c[0] == "pause" for c in calls)
+    assert started == [True]
+
+
+def test_play_start_paused_sets_step_mode(monkeypatch, tmp_config):
+    project = Project.create(tmp_config, "测试项目")
+    spec = Spec({"stages": [{"name": "a", "type": "agent"}]})
+    fake_engine = FakeStatefulEngineForPlay("idle")
+    monkeypatch.setattr(play.senza, "providers", type("P", (), {"openai": staticmethod(lambda **k: object())}))
+    monkeypatch.setattr(play.senza, "create_os_env", lambda path: object())
+    monkeypatch.setattr(play.senza, "WorkflowEngine", lambda *a, **k: fake_engine)
+    monkeypatch.setattr(play.senza, "create_judge", lambda cb: cb)
+    monkeypatch.setattr(play.senza, "create_executor", lambda cb: cb)
+
+    session = PlaySession(tmp_config, project, spec)
+    session.play(inputs={}, start_paused=True)
+    assert session._step_mode is True
+
+    session2 = PlaySession(tmp_config, project, spec)
+    session2.play(inputs={}, start_paused=False)
+    assert session2._step_mode is False
+
+
+def test_resume_run_turns_off_step_mode(monkeypatch):
+    session = _make_session_with_fake_engine("paused")
+    session._step_mode = True
+    monkeypatch.setattr(session, "start", lambda: None)
+
+    session.resume_run()
+
+    assert session._step_mode is False
+
+
+def test_pause_resume_step_noop_when_engine_is_none():
+    """PlaySession 还没调用 play() 构建 engine（_engine 是 None）时，三个
+    方法都应该静默跳过，不报错——跟 stop() 的现有防御风格一致。"""
+    session = PlaySession(None, None, None)
+    session.request_pause()
+    session.resume_run()
+    session.step()
+
+
+class FakeStatefulEngineForPlay(FakeStatefulEngine):
+    """FakeStatefulEngine 加上 play() 需要的其它接口（with_executor 等），
+    全部原样返回 self 或什么都不做，只关心 pause() 有没有被调用。"""
+
+    def with_executor(self, name, executor):
+        return self
+
+    def set_context_variable(self, key, value):
+        pass
+
+
+def test_play_start_paused_arms_pause_before_first_run(monkeypatch, tmp_config):
+    """start_paused=True 时，play() 应该在构造完 engine、还没 run() 过
+    就调 engine.pause()——这样不管流程跑多快，都保证恰好第一个 step 跑完
+    就自动暂停，用户可以从头开始逐步执行（而不是可能被手动 Pause 追不上、
+    一次漏过好几个 step）。"""
+    project = Project.create(tmp_config, "测试项目")
+    spec = Spec({"stages": [{"name": "a", "type": "agent"}]})
+
+    fake_engine = FakeStatefulEngineForPlay("idle")
+    monkeypatch.setattr(play.senza, "providers", type("P", (), {"openai": staticmethod(lambda **k: object())}))
+    monkeypatch.setattr(play.senza, "create_os_env", lambda path: object())
+    monkeypatch.setattr(play.senza, "WorkflowEngine", lambda *a, **k: fake_engine)
+    monkeypatch.setattr(play.senza, "create_judge", lambda cb: cb)
+    monkeypatch.setattr(play.senza, "create_executor", lambda cb: cb)
+
+    session = PlaySession(tmp_config, project, spec)
+    session.play(inputs={}, start_paused=True)
+
+    assert ("pause", "start paused") in fake_engine.calls
+
+
+def test_play_without_start_paused_does_not_call_pause(monkeypatch, tmp_config):
+    project = Project.create(tmp_config, "测试项目")
+    spec = Spec({"stages": [{"name": "a", "type": "agent"}]})
+
+    fake_engine = FakeStatefulEngineForPlay("idle")
+    monkeypatch.setattr(play.senza, "providers", type("P", (), {"openai": staticmethod(lambda **k: object())}))
+    monkeypatch.setattr(play.senza, "create_os_env", lambda path: object())
+    monkeypatch.setattr(play.senza, "WorkflowEngine", lambda *a, **k: fake_engine)
+    monkeypatch.setattr(play.senza, "create_judge", lambda cb: cb)
+    monkeypatch.setattr(play.senza, "create_executor", lambda cb: cb)
+
+    session = PlaySession(tmp_config, project, spec)
+    session.play(inputs={})
+
+    assert fake_engine.calls == []

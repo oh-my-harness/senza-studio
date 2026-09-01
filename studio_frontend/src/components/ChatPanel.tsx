@@ -31,6 +31,7 @@ export default function ChatPanel({ projectId }: { projectId: string }) {
   const setToolCalls = useStudioStore((s) => s.setToolCalls);
   const setPausedStep = useStudioStore((s) => s.setPausedStep);
   const markAwaitingApproval = useStudioStore((s) => s.markAwaitingApproval);
+  const setEnginePaused = useStudioStore((s) => s.setEnginePaused);
   const scrollRef = useRef<HTMLDivElement>(null);
   const bottomRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
@@ -93,8 +94,12 @@ export default function ChatPanel({ projectId }: { projectId: string }) {
           setPausedStep(null);
         }
       } else if (event.type === "paused") {
+        // 不管暂停原因是 checker 审批还是控制条手动 Pause/Step，都置位——
+        // 区分"是不是审批"用 pausedStepId（上面 step_finished 里单独维护）。
+        setEnginePaused(true);
         addLog("info", `⏸ ${event.reason || "已暂停，等待人工审批"}`);
       } else if (event.type === "resumed") {
+        setEnginePaused(false);
         addLog("info", "▶ 已恢复运行");
       } else if (event.type === "failed") {
         failRunningSteps();
@@ -109,6 +114,7 @@ export default function ChatPanel({ projectId }: { projectId: string }) {
       } else if (event.type === "play_stopped") {
         setRunFinished(null);
         setPausedStep(null);
+        setEnginePaused(false);
         setStatus("spec_ready");
       } else if (event.type === "text_delta") {
         // 流式文本追加到最近的 assistant 消息

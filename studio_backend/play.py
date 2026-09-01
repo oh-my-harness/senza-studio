@@ -530,8 +530,15 @@ class PlaySession:
         self._engine_ref: dict[str, Any] = {}
         self._thread: threading.Thread | None = None
         self.run_error: BaseException | None = None
+        # 用户是不是在"手动逐步执行"——Step 按钮或 Play Paused 打开它，
+        # Resume 按钮关掉它。submit_decision（checker 审批）需要知道这个：
+        # 不看这个标志的话，用户在单步模式下走到一个 checker、点了
+        # approve，resume() 之后会一路跑到底，而不是像其它 step 一样审批
+        # 完也只跑这一步就重新暂停——审批本质上也是"往前走了一步"，理应
+        # 遵守同一个单步节奏（亲测复现过这个 bug）。
+        self._step_mode = False
 
-    def play(self, inputs: dict[str, str] | None = None) -> None:
+    def play(self, inputs: dict[str, str] | None = None, start_paused: bool = False) -> None:
         """构建 WorkflowEngine。不启动 .run()——调用方必须先 events() 订阅，
         再调用 start()，否则 tokio broadcast 会丢掉 run() 线程里发生太快
         （比如立刻 fail 的 step，没有真实 LLM 调用）的早期事件：broadcast
@@ -540,6 +547,16 @@ class PlaySession:
         inputs 是入口 step 的种子输入（见 get_entry_inputs），构建完 engine
         后立刻用 set_context_variable 写入共享上下文，让入口 step 的
         prompt_template 里的 {{field}} 占位符能被替换。
+
+        start_paused=True 时提前武装 pause（构造完 engine、还没 run() 过
+        就调 engine.pause()）——亲测 run() 的 pause 检查点在"当前 step 的
+        transition 已经 apply 之后"，不存在"一个 step 都不跑就暂停"这种
+        粒度；能做到的最好效果是保证恰好只跑第一个 step 就自动暂停，不管
+        流程本身跑多快，用户都能在第一个 step 后拿到控制权，用 Step 逐步
+        往下走，而不是像纯靠手动点 Pause 那样可能因为跑得太快漏过好几个
+        step 才追上（用户原话："even then the agent would have gone
+        through multiple steps if flow is fast enough"）。这次 pause 之后
+        的 Step/Resume 走的是已有的 step()/resume_run()，不需要额外改动。
         """
         spec_dict = self._spec.get_current_spec()
         stage_by_name, routes_by_name = build_route_maps(spec_dict)
@@ -572,6 +589,10 @@ class PlaySession:
 
         for key, value in (inputs or {}).items():
             self._engine.set_context_variable(key, value)
+
+        self._step_mode = start_paused
+        if start_paused:
+            self._engine.pause("start paused")
 
         self._project.meta["status"] = "playing"
         self._project._save_meta()
@@ -609,13 +630,63 @@ class PlaySession:
         run()（亲测行为）；同一个 .subscribe() 迭代器在多次 run() 之间
         持续有效，不需要重新订阅。checker executor 在下一次被调用时会看到
         这个 context 变量，不再返回 pending，从而正常路由下去。
+
+        _step_mode 时（用户在用 Play Paused/Step 手动逐步执行）额外重新
+        武装一次 pause——跟 step() 同样的 resume-then-pause 顺序（resume()
+        会清空 pause_requested，必须先 resume 再 pause，不然刚设的标志会
+        被清掉）。不这样做的话，审批完这一步会一路跑到底，把"逐步执行"
+        的节奏在 checker 这里打断（亲测复现过：Play Paused 一路 Step 到
+        审批节点，点 approve 后直接冲到终点）——审批本身也是往前走了一步，
+        应该跟其它 step 一样只跑这一步就再暂停。
         """
         if self._engine is None:
             raise RuntimeError("Engine not built. Call play() first.")
         self._engine.set_context_variable(decision_context_key(step_id), decision)
         self._engine.resume()
+        if self._step_mode:
+            self._engine.pause("single-step (after approval)")
         self.run_error = None
         self.start()
+
+    def request_pause(self, reason: str = "user pause") -> None:
+        """控制条的 Pause 按钮用——跟 checker 的 pause 是两回事：这个是
+        engine.pause()（亲测：非阻塞，只是设个标志位，run() 在当前 step
+        的 transition 已经 apply 之后、下一个 step 开始之前才检查并消费），
+        不是 judge 返回 "pause:..."。区别很关键——judge 那种 pause 因为
+        路由还没定下来，resume 后会重新调用"当前"这个 step 的 executor；
+        这个 engine.pause() 因为 transition 已经 apply 过了，resume 后
+        会正常执行"下一个" step，不会把刚跑完、可能有副作用（发邮件、
+        真实 LLM 调用）的 step 重跑一遍。只在真的在跑的时候才有意义。
+        """
+        if self._engine is not None and self._engine.state() == "running":
+            self._engine.pause(reason)
+
+    def resume_run(self) -> None:
+        """控制条的 Resume 按钮用——从任意原因的暂停（checker 或手动
+        pause）恢复成正常连续运行，不重新武装暂停标志。关掉 _step_mode——
+        用户明确选择"别再逐步走了，跑到底"，之后再遇到 checker 审批
+        （submit_decision）也不该再帮它重新暂停。"""
+        if self._engine is not None and self._engine.state() == "paused":
+            self._step_mode = False
+            self._engine.resume()
+            self.run_error = None
+            self.start()
+
+    def step(self, reason: str = "single-step") -> None:
+        """控制条的 Step 按钮用——从暂停状态恰好再跑一个 step 就自动
+        重新暂停。必须先 resume() 再 pause()：resume() 会顺带把
+        pause_requested 标志清空（亲测行为），顺序反过来的话这里刚设的
+        标志会被 resume() 自己清掉，run() 就会一路跑到底而不是只跑一步。
+
+        打开 _step_mode——之后如果走到 checker 审批（submit_decision），
+        也会记得再帮它重新暂停一次，而不是让审批打断"逐步执行"的节奏。
+        """
+        if self._engine is not None and self._engine.state() == "paused":
+            self._step_mode = True
+            self._engine.resume()
+            self._engine.pause(reason)
+            self.run_error = None
+            self.start()
 
     def stop(self, reason: str = "user stop") -> None:
         """取消运行中的 engine。项目状态收尾（playing -> editing）由调用方

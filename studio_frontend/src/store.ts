@@ -33,6 +33,10 @@ interface StudioStore {
   // checker step 暂停等待人工审批时，是哪个 step——非空时 GameView 显示
   // 审批按钮。
   pausedStepId: string | null;
+  // engine 是否处于暂停状态（不管原因——checker 审批或控制条手动
+  // Pause/Step 都会让这个变 true）。跟 pausedStepId 是两个不同维度：
+  // 后者专门只在 checker 审批时才非空，用来单独控制审批横幅。
+  enginePaused: boolean;
 
   setProject: (p: ProjectMeta | null) => void;
   setSpec: (s: Spec) => void;
@@ -62,6 +66,7 @@ interface StudioStore {
   setToolCalls: (entries: ToolCallEntry[]) => void;
   setPausedStep: (stepId: string | null) => void;
   markAwaitingApproval: (stepId: string, text: string) => void;
+  setEnginePaused: (paused: boolean) => void;
 }
 
 export const useStudioStore = create<StudioStore>((set) => ({
@@ -77,6 +82,7 @@ export const useStudioStore = create<StudioStore>((set) => ({
   logs: [],
   toolCalls: [],
   pausedStepId: null,
+  enginePaused: false,
 
   setProject: (project) => set({ project }),
   setSpec: (spec) => set({ spec }),
@@ -112,9 +118,11 @@ export const useStudioStore = create<StudioStore>((set) => ({
       runFinishedState: null,
       logs: [],
       pausedStepId: null,
+      enginePaused: false,
     }),
 
   setPausedStep: (pausedStepId) => set({ pausedStepId }),
+  setEnginePaused: (enginePaused) => set({ enginePaused }),
 
   setRunFinished: (runFinishedState) => set({ runFinishedState }),
 
