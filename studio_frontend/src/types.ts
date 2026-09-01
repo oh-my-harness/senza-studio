@@ -54,6 +54,11 @@ export interface GameCard {
   stepName: string;
   text: string;
   status: StepRunStatus;
+  // Inspector 运行态用——play.py 塞进 structured._debug 的调试信息：
+  // agent step 是 {prompt, tool_calls_count, usage}，tool step 是
+  // {tool, args}，checker/pending 状态没有（undefined）。
+  debug?: Record<string, unknown> | null;
+  route?: string;
 }
 
 // 必须和 studio_backend/play.py 里的 PENDING_APPROVAL 保持一致——checker

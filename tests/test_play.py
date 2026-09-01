@@ -314,7 +314,10 @@ def test_executor_multi_route_extracts_from_llm_output(monkeypatch):
     monkeypatch.setattr(
         play,
         "_run_agent_step",
-        lambda harness, prompt, emit: 'This is a complaint.\n{"route": "complaint"}',
+        lambda harness, prompt, emit: (
+            'This is a complaint.\n{"route": "complaint"}',
+            0,
+        ),
     )
 
     executor = make_executor(
@@ -354,7 +357,8 @@ def test_executor_writes_extra_json_fields_to_context(monkeypatch):
         play,
         "_run_agent_step",
         lambda harness, prompt, emit: (
-            'Some reasoning here.\n{"route": "complaint", "summary": "customer is upset"}'
+            'Some reasoning here.\n{"route": "complaint", "summary": "customer is upset"}',
+            0,
         ),
     )
 
@@ -393,7 +397,7 @@ def test_executor_writes_output_key_to_context(monkeypatch):
 
     monkeypatch.setattr(play.senza, "HarnessBuilder", lambda model: FakeBuilder())
     monkeypatch.setattr(
-        play, "_run_agent_step", lambda harness, prompt, emit: "Dear customer, sorry..."
+        play, "_run_agent_step", lambda harness, prompt, emit: ("Dear customer, sorry...", 0)
     )
 
     fake_engine = FakeEngine()
@@ -405,6 +409,95 @@ def test_executor_writes_output_key_to_context(monkeypatch):
 
     assert fake_engine.written["draft_reply"] == "Dear customer, sorry..."
     assert result["structured"]["route_key"] == "success"
+
+
+# ── make_executor: Inspector runtime "_debug" payload ───────
+
+
+def test_executor_agent_debug_includes_rendered_prompt_and_tool_calls(monkeypatch):
+    stage_by_name = {
+        "draft": {"name": "draft", "type": "agent", "prompt_template": "hi {{name}}"},
+    }
+
+    class FakeHarness:
+        def usage(self):
+            return {"input_tokens": 10, "output_tokens": 5}
+
+    class FakeBuilder:
+        def provider(self, *a, **k):
+            return self
+
+        def env(self, *a, **k):
+            return self
+
+        def build(self):
+            return FakeHarness()
+
+    monkeypatch.setattr(play.senza, "HarnessBuilder", lambda model: FakeBuilder())
+    monkeypatch.setattr(
+        play, "_run_agent_step", lambda harness, prompt, emit: ("hello", 3)
+    )
+
+    executor = make_executor(
+        stage_by_name, {}, "test-model", provider=None, env=None, engine_ref={}
+    )
+    result = executor({"step_id": "draft", "context": {"name": "Bob"}, "emit": None})
+
+    debug = result["structured"]["_debug"]
+    assert debug["prompt"] == "hi Bob"
+    assert debug["tool_calls_count"] == 3
+    assert debug["usage"] == {"input_tokens": 10, "output_tokens": 5}
+
+
+def test_executor_agent_debug_usage_none_when_harness_has_no_usage(monkeypatch):
+    """harness.usage() 报错（比如假 harness 根本没这方法）不该让整个 step
+    崩掉——usage 只是 Inspector 的锦上添花信息，取不到就是 None。"""
+    stage_by_name = {"draft": {"name": "draft", "type": "agent", "prompt_template": "x"}}
+
+    class FakeBuilder:
+        def provider(self, *a, **k):
+            return self
+
+        def env(self, *a, **k):
+            return self
+
+        def build(self):
+            return "fake-harness-with-no-usage-method"
+
+    monkeypatch.setattr(play.senza, "HarnessBuilder", lambda model: FakeBuilder())
+    monkeypatch.setattr(play, "_run_agent_step", lambda harness, prompt, emit: ("ok", 0))
+
+    executor = make_executor(
+        stage_by_name, {}, "test-model", provider=None, env=None, engine_ref={}
+    )
+    result = executor({"step_id": "draft", "context": {}, "emit": None})
+    assert result["structured"]["_debug"]["usage"] is None
+
+
+def test_executor_tool_debug_includes_tool_name_and_rendered_args():
+    def echo(args):
+        return "ok"
+
+    stage_by_name = {
+        "lookup": {
+            "name": "lookup",
+            "type": "tool",
+            "tool": "echo",
+            "tool_args": {"city": "{{city}}"},
+        },
+    }
+    executor = make_executor(
+        stage_by_name,
+        {},
+        "test-model",
+        provider=None,
+        env=None,
+        engine_ref={},
+        tools_by_name={"echo": echo},
+    )
+    result = executor({"step_id": "lookup", "context": {"city": "Boston"}})
+
+    assert result["structured"]["_debug"] == {"tool": "echo", "args": {"city": "Boston"}}
 
 
 def test_executor_no_engine_ref_does_not_crash(monkeypatch):
@@ -425,7 +518,7 @@ def test_executor_no_engine_ref_does_not_crash(monkeypatch):
             return "fake-harness"
 
     monkeypatch.setattr(play.senza, "HarnessBuilder", lambda model: FakeBuilder())
-    monkeypatch.setattr(play, "_run_agent_step", lambda harness, prompt, emit: "ok")
+    monkeypatch.setattr(play, "_run_agent_step", lambda harness, prompt, emit: ("ok", 0))
 
     executor = make_executor(
         stage_by_name, {}, "test-model", provider=None, env=None, engine_ref={}

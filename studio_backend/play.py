@@ -153,11 +153,17 @@ def make_judge(routes_by_name: dict[str, dict[str, str]]) -> Callable[[dict], st
     return play_judge
 
 
-def _run_agent_step(harness: Any, prompt: str, emit: Any) -> str:
+def _run_agent_step(harness: Any, prompt: str, emit: Any) -> tuple[str, int]:
     """驱动一个短生命周期 harness 跑一轮 prompt，streaming 转发到 emit。
 
     与 ws.py 的 run_prompt_streaming 同一模式：prompt() 阻塞到整轮结束，
     必须放到独立线程，当前线程负责同步迭代 events() 拿 streaming token。
+
+    顺带数一遍这一轮里 LLM 发起了几次工具调用（tool_call_start）——
+    WorkflowEvent::StepFinished 自带的 tool_calls_count 字段对 Studio 的
+    executor-驱动 step 永远是硬编码的 0（Rust 侧看不到 Python 回调内部
+    发生了什么），这是唯一能拿到真实数字的地方，因为 harness.events()
+    是一次性消费的迭代器，事后没法回头再数。返回 (输出文本, 工具调用次数)。
     """
     errors: list[BaseException] = []
     done = threading.Event()
@@ -175,6 +181,7 @@ def _run_agent_step(harness: Any, prompt: str, emit: Any) -> str:
     prompt_thread.start()
 
     text_parts: list[str] = []
+    tool_calls_count = 0
     for event in harness.events(timeout_ms=5000, max_consecutive_timeouts=999):
         if event is None:
             if not prompt_thread.is_alive():
@@ -192,13 +199,15 @@ def _run_agent_step(harness: Any, prompt: str, emit: Any) -> str:
             text = event.get("text", "")
             text_parts.append(text)
             emit.text_delta(text)
+        elif etype == "tool_call_start":
+            tool_calls_count += 1
         elif etype in _TERMINAL_TYPES:
             break
 
     prompt_thread.join(timeout=125)
     if errors:
         raise errors[0]
-    return "".join(text_parts)
+    return "".join(text_parts), tool_calls_count
 
 
 # 匹配回答里的扁平 JSON 对象（不支持嵌套花括号）——LLM 按我们的指示只会
@@ -416,7 +425,13 @@ def make_executor(
 
             _write_context(stage.get("output_key"), {**fields, "_output": output})
 
-            return {"output": output, "structured": {"route_key": route_key}}
+            return {
+                "output": output,
+                "structured": {
+                    "route_key": route_key,
+                    "_debug": {"tool": tool_ref, "args": args},
+                },
+            }
 
         if stage_type != "agent":
             return {
@@ -435,9 +450,16 @@ def make_executor(
 
         harness = senza.HarnessBuilder(model).provider("*", provider).env(env).build()
         try:
-            raw_output = _run_agent_step(harness, prompt, ctx["emit"])
+            raw_output, tool_calls_count = _run_agent_step(harness, prompt, ctx["emit"])
         except Exception as exc:  # noqa: BLE001
             return {"output": f"Error: {exc}", "structured": {"route_key": "error"}}
+
+        # usage() 是 harness 累计值，但这是个一次性、单轮 prompt 用完就扔的
+        # harness（每个 agent step 一个新的），累计值就是这一轮的值。
+        try:
+            usage = harness.usage()
+        except Exception:  # noqa: BLE001
+            usage = None
 
         # 不管路由数量，都尝试从回答里摘 JSON 字段——分类步骤常常在
         # {"route": ...} 之外还顺带吐 summary/classification 这类给下游用
@@ -453,7 +475,19 @@ def make_executor(
 
         _write_context(stage.get("output_key"), {**fields, "_output": output})
 
-        return {"output": output, "structured": {"route_key": route_key}}
+        return {
+            "output": output,
+            "structured": {
+                "route_key": route_key,
+                # Inspector 运行态用——prompt 是真正发给模型的完整文本（包含
+                # 多路由时追加的 routing 指令），不是没渲染过的 prompt_template。
+                "_debug": {
+                    "prompt": prompt,
+                    "tool_calls_count": tool_calls_count,
+                    "usage": usage,
+                },
+            },
+        }
 
     return play_executor
 

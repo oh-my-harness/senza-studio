@@ -73,12 +73,18 @@ export default function ChatPanel({ projectId }: { projectId: string }) {
         // 只是提前退出，不是真的执行完了，所以不能用 finishStep（会把卡片
         // 标成 done，resume 之后同一个 step 的第二次 step_finished 就再也
         // 找不到 running 状态的卡片可更新）。
-        const structured = event.structured as { route_key?: string } | null | undefined;
+        const structured = event.structured as
+          | { route_key?: string; _debug?: Record<string, unknown> | null }
+          | null
+          | undefined;
         if (structured?.route_key === PENDING_APPROVAL_ROUTE_KEY) {
           markAwaitingApproval(event.step_id as string, event.output ?? "");
           setPausedStep(event.step_id as string);
         } else {
-          finishStep(event.step_id, event.output);
+          finishStep(event.step_id, event.output, {
+            route: structured?.route_key,
+            debug: structured?._debug,
+          });
           setPausedStep(null);
         }
       } else if (event.type === "paused") {
