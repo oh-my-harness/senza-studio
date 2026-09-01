@@ -78,14 +78,33 @@ def render_prompt_template(template: str, context: dict) -> str:
     return _TEMPLATE_VAR_RE.sub(_sub, template)
 
 
-def render_tool_args(tool_args: dict, context: dict) -> dict:
+def render_tool_args(tool_args: Any, context: dict) -> dict:
     """渲染 tool step 的 tool_args——跟 prompt_template 一样用 {{var}} 从
     context 取值，但作用对象是一个 dict（每个字符串 value 各自替换一次），
     不是一整段模板。非字符串 value（作者直接写死的数字/布尔等）原样传递。
     没声明 tool_args 的 step 得到空 dict——工具需要的参数必须显式声明，
     不能隐式拿整个 context（跟 agent step 只能通过 prompt_template 里的
     {{var}} 声明输入是同一个原则）。
+
+    tool_args 来自 spec（可能是元 agent 通过 set_step_property 写进去的，
+    也可能是人手改 pipeline.yaml）——不是 Studio 自己生成的可信数据，是个
+    真实的输入边界。实测元 agent 的 LLM 调用 set_step_property 时会偶尔把
+    这个本该是 dict 的 value 参数吐成一段 JSON 字符串（比如
+    '{"city": "{{city}}"}'）而不是真正的嵌套对象——大概率是模型在处理一个
+    schema 里没标注具体 type（"any JSON type"）的参数时的常见毛病。不做
+    防御的话，这里会直接 AttributeError（字符串没有 .items()），而且是在
+    调用方 try/except 包裹的范围之外抛出，会把整个 executor 回调打崩，而
+    不是干净地失败成这一个 step 的 error。所以这里既接受字符串（尝试当
+    JSON 解析一遍），也接受任何解析不出 dict 的情况——一律退化成空 dict，
+    而不是让整个 workflow 崩掉。
     """
+    if isinstance(tool_args, str):
+        try:
+            tool_args = json.loads(tool_args)
+        except (json.JSONDecodeError, ValueError):
+            tool_args = {}
+    if not isinstance(tool_args, dict):
+        return {}
     return {
         key: render_prompt_template(value, context) if isinstance(value, str) else value
         for key, value in tool_args.items()
@@ -429,6 +448,7 @@ def make_executor(
                 "output": output,
                 "structured": {
                     "route_key": route_key,
+                    "fields": fields,
                     "_debug": {"tool": tool_ref, "args": args},
                 },
             }
@@ -479,6 +499,9 @@ def make_executor(
             "output": output,
             "structured": {
                 "route_key": route_key,
+                # GameView 的 table/chart 卡片用——spec 作者在 ui.fields 里点名
+                # 要展示哪些字段，这里把这一轮实际算出来的字段值原样带上。
+                "fields": fields,
                 # Inspector 运行态用——prompt 是真正发给模型的完整文本（包含
                 # 多路由时追加的 routing 指令），不是没渲染过的 prompt_template。
                 "_debug": {

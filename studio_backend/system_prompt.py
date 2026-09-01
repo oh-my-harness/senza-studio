@@ -51,12 +51,15 @@ _RULES = """\
   - terminal: end the workflow.
 - Edges use next_on_<condition> semantics. Common conditions: success, reject, approve, return.
 - Every spec must have at least one terminal step.
-- The first step is the entry point (no incoming edges needed). Its ui.fields (set via
-  set_ui_config) declare what input this workflow needs to start (e.g. "customer_message")
-  — Play prompts the user for these before running. Reference them in prompt_template as
-  {{field_name}} (double braces). Only the entry step's fields are wired up this way for
-  now — later steps cannot yet reference earlier steps' outputs in prompt_template.
+- The first step is the entry point (no incoming edges needed). Its input needs are declared
+  by referencing {{field_name}} (double braces) in its prompt_template (e.g. "{{customer_message}}")
+  — Play scans for these and prompts the user for them before running. Only the entry step's
+  fields are wired up this way for now — later steps cannot yet reference earlier steps'
+  outputs in prompt_template.
 - UI config: use set_ui_config to set display type (chat/status/table/chart/approval_form/none).
+  For table/chart, ui.fields names which of this step's structured output fields to render
+  (e.g. fields extracted from an agent's trailing JSON, or a tool's dict return) — it does NOT
+  declare workflow inputs, only which already-produced fields a table/chart card shows.
 - Use get_current_spec to review the spec before making changes.
 - Use validate_spec to check completeness after modifications.
 

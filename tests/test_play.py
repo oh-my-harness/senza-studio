@@ -500,6 +500,61 @@ def test_executor_tool_debug_includes_tool_name_and_rendered_args():
     assert result["structured"]["_debug"] == {"tool": "echo", "args": {"city": "Boston"}}
 
 
+# ── make_executor: GameView table/chart "fields" payload ────
+
+
+def test_executor_agent_structured_includes_fields_for_table_chart(monkeypatch):
+    stage_by_name = {
+        "classify": {"name": "classify", "type": "agent", "prompt_template": "classify this"},
+    }
+
+    class FakeBuilder:
+        def provider(self, *a, **k):
+            return self
+
+        def env(self, *a, **k):
+            return self
+
+        def build(self):
+            return "fake-harness"
+
+    monkeypatch.setattr(play.senza, "HarnessBuilder", lambda model: FakeBuilder())
+    monkeypatch.setattr(
+        play,
+        "_run_agent_step",
+        lambda harness, prompt, emit: (
+            'Some text.\n{"risk_score": 0.4, "category": "billing"}',
+            0,
+        ),
+    )
+
+    executor = make_executor(
+        stage_by_name, {}, "test-model", provider=None, env=None, engine_ref={}
+    )
+    result = executor({"step_id": "classify", "context": {}, "emit": None})
+
+    assert result["structured"]["fields"] == {"risk_score": 0.4, "category": "billing"}
+
+
+def test_executor_tool_structured_includes_fields_for_table_chart():
+    def weather_tool(args):
+        return {"temperature": 72, "condition": "sunny"}
+
+    stage_by_name = {"lookup": {"name": "lookup", "type": "tool", "tool": "weather"}}
+    executor = make_executor(
+        stage_by_name,
+        {},
+        "test-model",
+        provider=None,
+        env=None,
+        engine_ref={},
+        tools_by_name={"weather": weather_tool},
+    )
+    result = executor({"step_id": "lookup", "context": {}})
+
+    assert result["structured"]["fields"] == {"temperature": 72, "condition": "sunny"}
+
+
 def test_executor_no_engine_ref_does_not_crash(monkeypatch):
     """engine_ref["engine"] 还没设置（比如测试直接调用 make_executor 且不
     模拟 play() 的晚绑定）时，写 context 应该静默跳过，不报错。"""
@@ -542,6 +597,24 @@ def test_render_tool_args_passes_through_non_string_values():
 
 def test_render_tool_args_empty_dict_for_no_declared_args():
     assert render_tool_args({}, {"anything": "in context"}) == {}
+
+
+def test_render_tool_args_parses_json_encoded_string():
+    """回归测试：实测元 agent 的 LLM 调用 set_step_property 时偶尔会把
+    tool_args 吐成一段 JSON 字符串而不是真正的嵌套 dict——不防御的话
+    tool_args.items() 会直接 AttributeError，把整个 executor 回调打崩。"""
+    args = render_tool_args('{"city": "{{city}}"}', {"city": "Boston"})
+    assert args == {"city": "Boston"}
+
+
+def test_render_tool_args_invalid_json_string_is_empty_dict():
+    assert render_tool_args("not valid json", {}) == {}
+
+
+def test_render_tool_args_non_dict_non_string_is_empty_dict():
+    assert render_tool_args(["a", "list"], {}) == {}
+    assert render_tool_args(None, {}) == {}
+    assert render_tool_args(42, {}) == {}
 
 
 # ── _normalize_tool_result ─────────────────────────────────

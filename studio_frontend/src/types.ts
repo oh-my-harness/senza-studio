@@ -59,6 +59,9 @@ export interface GameCard {
   // {tool, args}，checker/pending 状态没有（undefined）。
   debug?: Record<string, unknown> | null;
   route?: string;
+  // GameView 的 table/chart 卡片用——structured.fields，ui.fields 点名的
+  // 字段值从这里取。
+  fields?: Record<string, unknown> | null;
 }
 
 // 必须和 studio_backend/play.py 里的 PENDING_APPROVAL 保持一致——checker
