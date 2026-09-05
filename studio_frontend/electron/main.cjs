@@ -1,53 +1,176 @@
 // studio_frontend/electron/main.cjs
 const { app, BrowserWindow } = require("electron");
-const { spawn } = require("child_process");
 const crypto = require("crypto");
 const fs = require("fs");
 const http = require("http");
 const path = require("path");
+const { DesktopDiagnosticsLog } = require("./desktop-diagnostics.cjs");
+const { DesktopProcessHost } = require("./desktop-process-host.cjs");
+const {
+  AgentTeamRuntimeSupervisor,
+  sanitizeProcessOutput,
+} = require("./runtime-host.cjs");
 
-let pythonProcess = null;
-let viteProcess = null;
+let backendHost = null;
+let viteHost = null;
+let runtimeSupervisor = null;
 let mainWindow = null;
 let backendExit = null;
+let desktopDiagnostics = null;
+let shuttingDown = false;
+let shutdownPromise = null;
 
 const projectRoot = path.resolve(__dirname, "../../");
 const frontendRoot = path.resolve(__dirname, "..");
+const backendRoot = app.isPackaged
+  ? path.join(process.resourcesPath, "senza-studio-backend")
+  : projectRoot;
 const apiToken =
   process.env.SENZA_STUDIO_API_TOKEN || crypto.randomBytes(32).toString("hex");
 const backendUrl = "http://127.0.0.1:7878";
 const frontendUrl = "http://localhost:5173";
 
 function pythonCommand() {
+  const configuredPython = process.env.SENZA_STUDIO_PYTHON;
+  if (configuredPython) return configuredPython;
+  if (app.isPackaged) {
+    return path.join(
+      process.resourcesPath,
+      "python",
+      process.platform === "win32" ? "python.exe" : "bin/python"
+    );
+  }
   const venvPython = path.join(
-    projectRoot,
+    backendRoot,
     ".venv",
     process.platform === "win32" ? "Scripts/python.exe" : "bin/python"
   );
   return fs.existsSync(venvPython) ? venvPython : "python";
 }
 
-function startBackend() {
-  const backendEnv = { ...process.env };
-  delete backendEnv.SENZA_STUDIO_API_TOKEN_FILE;
-  pythonProcess = spawn(pythonCommand(), ["-m", "studio_backend.server"], {
-    cwd: projectRoot,
-    env: {
-      ...backendEnv,
-      PYTHONPATH: projectRoot,
-      SENZA_STUDIO_API_TOKEN: apiToken,
-    },
-  });
-  backendExit = new Promise((resolve, reject) => {
-    pythonProcess.once("exit", reject);
-  });
+function agentTeamBinaryPath(isPackaged) {
+  const configuredPath = process.env.SENZA_STUDIO_AGENT_TEAM_BIN;
+  if (configuredPath) return configuredPath;
+  if (isPackaged) {
+    return path.join(
+      process.resourcesPath,
+      process.platform === "win32" ? "agent-studio.exe" : "agent-studio"
+    );
+  }
+  return path.join(
+    projectRoot,
+    "..",
+    "llm-harness-runtime",
+    "target",
+    "debug",
+    process.platform === "win32" ? "agent-studio.exe" : "agent-studio"
+  );
+}
 
-  pythonProcess.stdout.on("data", (data) => {
-    console.log(`[backend] ${data}`);
+function formatExit(code, signal) {
+  if (signal) return `signal ${signal}`;
+  return `exit code ${code}`;
+}
+
+function recordDiagnostics(source, data) {
+  if (desktopDiagnostics) desktopDiagnostics.record(source, data);
+}
+
+function logRuntimeEvent(event) {
+  recordDiagnostics("agent-team", event);
+  if (event.type === "stderr") {
+    console.error(
+      `[agent-team] ${sanitizeProcessOutput(event.text, [apiToken])}`
+    );
+    return;
+  }
+  if (event.type === "error") {
+    console.error(
+      `[agent-team] ${sanitizeProcessOutput(event.message, [apiToken])}`
+    );
+    return;
+  }
+  console.log(`[agent-team] ${event.type}`);
+}
+
+function logProcessEvent(source, event) {
+  recordDiagnostics(source, event);
+  if (event.type === "stdout") {
+    console.log(`[${source}] ${event.text}`);
+  } else if (event.type === "stderr") {
+    console.error(`[${source}] ${event.text}`);
+  } else if (event.type === "error") {
+    console.error(`[${source}] ${event.message}`);
+  } else if (event.type === "exit" && !shuttingDown) {
+    console.error(
+      `[${source}] exited unexpectedly: ${formatExit(
+        event.exit.code,
+        event.exit.signal
+      )}`
+    );
+    app.quit();
+  }
+}
+
+async function startDiagnostics() {
+  desktopDiagnostics = new DesktopDiagnosticsLog({
+    filePath: path.join(app.getPath("userData"), "logs", "desktop.jsonl"),
+    sanitizeOutput: (output) => sanitizeProcessOutput(output, [apiToken]),
+    applicationVersion: app.getVersion(),
   });
-  pythonProcess.stderr.on("data", (data) => {
-    console.error(`[backend] ${data}`);
+  await desktopDiagnostics.open();
+  recordDiagnostics("host", {
+    type: "starting",
+    platform: process.platform,
+    packaged: app.isPackaged,
+    electron_version: process.versions.electron,
   });
+}
+
+async function closeDiagnostics() {
+  if (!desktopDiagnostics) return;
+  await desktopDiagnostics.flush();
+  await desktopDiagnostics.close();
+}
+
+async function startAgentTeamRuntime() {
+  runtimeSupervisor = new AgentTeamRuntimeSupervisor({
+    program: agentTeamBinaryPath(app.isPackaged),
+    dataRoot: path.join(app.getPath("userData"), "agent-team"),
+    onEvent: logRuntimeEvent,
+  });
+  return runtimeSupervisor.start();
+}
+
+function startBackend(agentTeamDescriptorPath) {
+  const backendEnvironment = { ...process.env };
+  delete backendEnvironment.SENZA_STUDIO_API_TOKEN_FILE;
+  delete backendEnvironment.SENZA_STUDIO_AGENT_TEAM_DESCRIPTOR;
+  backendHost = new DesktopProcessHost({
+    name: "backend",
+    command: pythonCommand(),
+    arguments: ["-m", "studio_backend.server"],
+    cwd: backendRoot,
+    environment: {
+      ...backendEnvironment,
+      PYTHONPATH: backendRoot,
+      SENZA_STUDIO_API_TOKEN: apiToken,
+      SENZA_STUDIO_AGENT_TEAM_DESCRIPTOR: agentTeamDescriptorPath,
+      ...(app.isPackaged
+        ? {
+            SENZA_STUDIO_STATIC_DIR: path.join(
+              process.resourcesPath,
+              "studio_frontend",
+              "dist"
+            ),
+          }
+        : {}),
+    },
+    formatOutput: (output) => sanitizeProcessOutput(output, [apiToken]),
+    onEvent: (event) => logProcessEvent("backend", event),
+  });
+  backendHost.start();
+  backendExit = backendHost.exitPromise;
 }
 
 function startVite() {
@@ -58,16 +181,16 @@ function startVite() {
     "bin",
     "vite.js"
   );
-  viteProcess = spawn(process.execPath, [viteEntry], {
+  viteHost = new DesktopProcessHost({
+    name: "vite",
+    command: process.execPath,
+    arguments: [viteEntry],
     cwd: frontendRoot,
-    env: { ...process.env, ELECTRON_RUN_AS_NODE: "1" },
+    environment: { ...process.env, ELECTRON_RUN_AS_NODE: "1" },
+    formatOutput: (output) => sanitizeProcessOutput(output, [apiToken]),
+    onEvent: (event) => logProcessEvent("vite", event),
   });
-  viteProcess.stdout.on("data", (data) => {
-    console.log(`[vite] ${data}`);
-  });
-  viteProcess.stderr.on("data", (data) => {
-    console.error(`[vite] ${data}`);
-  });
+  viteHost.start();
 }
 
 function waitForHttp(url, timeoutMs) {
@@ -100,6 +223,41 @@ function waitForHttp(url, timeoutMs) {
   });
 }
 
+async function stopProcesses() {
+  shuttingDown = true;
+  recordDiagnostics("host", { type: "shutdown-starting" });
+  const targets = [
+    {
+      name: "backend",
+      stop: () => (backendHost ? backendHost.stop() : Promise.resolve()),
+    },
+    {
+      name: "vite",
+      stop: () => (viteHost ? viteHost.stop() : Promise.resolve()),
+    },
+    {
+      name: "agent-team",
+      stop: () =>
+        runtimeSupervisor ? runtimeSupervisor.stop() : Promise.resolve(),
+    },
+  ];
+  const results = await Promise.allSettled(
+    targets.map((target) => target.stop())
+  );
+  results.forEach((result, index) => {
+    if (result.status === "rejected") {
+      recordDiagnostics("host", {
+        type: "shutdown-failed",
+        target: targets[index].name,
+        error: result.reason,
+      });
+    }
+  });
+  const failure = results.find((result) => result.status === "rejected");
+  if (failure) throw failure.reason;
+  recordDiagnostics("host", { type: "shutdown-stopped" });
+}
+
 async function createWindow() {
   mainWindow = new BrowserWindow({
     width: 1400,
@@ -129,18 +287,37 @@ async function createWindow() {
 
 app.whenReady().then(async () => {
   try {
-    startBackend();
+    await startDiagnostics();
+    const agentTeamDescriptorPath = await startAgentTeamRuntime();
+    startBackend(agentTeamDescriptorPath);
+    const backendStartupFailure = backendExit.then((exit) => {
+      throw new Error(
+        `backend exited before readiness: ${formatExit(exit.code, exit.signal)}`
+      );
+    });
+    backendStartupFailure.catch(() => {});
     await Promise.race([
       waitForHttp(`${backendUrl}/api/health`, 15000),
-      backendExit,
+      backendStartupFailure,
     ]);
     if (!app.isPackaged) {
       startVite();
-      await waitForHttp(frontendUrl, 15000);
+      const viteStartupFailure = viteHost.exitPromise.then((exit) => {
+        throw new Error(
+          `vite exited before readiness: ${formatExit(exit.code, exit.signal)}`
+        );
+      });
+      viteStartupFailure.catch(() => {});
+      await Promise.race([
+        waitForHttp(frontendUrl, 15000),
+        viteStartupFailure,
+      ]);
     }
     await createWindow();
+    recordDiagnostics("host", { type: "started" });
   } catch (error) {
-    console.error(error);
+    recordDiagnostics("host", { type: "startup-failed", error });
+    console.error(sanitizeProcessOutput(error.message, [apiToken]));
     app.quit();
   }
 
@@ -157,11 +334,22 @@ app.on("window-all-closed", () => {
   }
 });
 
-app.on("before-quit", () => {
-  if (pythonProcess) {
-    pythonProcess.kill();
-  }
-  if (viteProcess) {
-    viteProcess.kill();
-  }
+app.on("before-quit", (event) => {
+  if (shutdownPromise) return;
+  event.preventDefault();
+  recordDiagnostics("host", { type: "shutdown-requested" });
+  shutdownPromise = stopProcesses()
+    .then(async () => {
+      await closeDiagnostics();
+      app.quit();
+    })
+    .catch(async (error) => {
+      recordDiagnostics("host", { type: "shutdown-error", error });
+      console.error(sanitizeProcessOutput(error.message, [apiToken]));
+      try {
+        await closeDiagnostics();
+      } finally {
+      app.quit();
+      }
+    });
 });

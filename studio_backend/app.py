@@ -3,13 +3,17 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
+import stat
 import sys
 from contextlib import asynccontextmanager
+from pathlib import Path
+from mimetypes import guess_type
 
 import httpx
 from fastapi import FastAPI, File, Request, UploadFile, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, ValidationError
 
 from .config import StudioConfig
@@ -81,6 +85,51 @@ class UpdateSettingsReq(BaseModel):
     values: dict
 
 
+def _open_static_file(
+    root: Path, relative_path: str
+) -> tuple[int, os.stat_result, Path] | None:
+    if not relative_path or "\\" in relative_path or "\x00" in relative_path:
+        return None
+    segments = relative_path.split("/")
+    if any(segment in ("", ".", "..") for segment in segments):
+        return None
+    if any(
+        ord(character) < 32 or ord(character) == 127
+        for segment in segments
+        for character in segment
+    ):
+        return None
+    candidate = root.joinpath(*segments)
+    try:
+        opened_metadata = candidate.lstat()
+    except OSError:
+        return None
+    if not stat.S_ISREG(opened_metadata.st_mode):
+        return None
+    try:
+        file_descriptor = os.open(
+            candidate,
+            os.O_RDONLY
+            | os.O_NONBLOCK
+            | getattr(os, "O_NOFOLLOW", 0),
+        )
+    except OSError:
+        return None
+    try:
+        metadata = os.fstat(file_descriptor)
+        if (
+            not stat.S_ISREG(metadata.st_mode)
+            or metadata.st_dev != opened_metadata.st_dev
+            or metadata.st_ino != opened_metadata.st_ino
+        ):
+            os.close(file_descriptor)
+            return None
+    except OSError:
+        os.close(file_descriptor)
+        return None
+    return file_descriptor, metadata, candidate
+
+
 # ── 全局状态 ──────────────────────────────────────────────
 # 活跃项目缓存: {project_id: {"project": Project, "spec": Spec, "agent": StudioAgent}}
 _studio_state: dict = {}
@@ -113,6 +162,11 @@ def create_app(config: StudioConfig | None = None) -> FastAPI:
             "Senza Studio API token is required; set "
             "SENZA_STUDIO_API_TOKEN or SENZA_STUDIO_API_TOKEN_FILE"
         )
+    static_root = None
+    if cfg.static_dir:
+        static_root = Path(cfg.static_dir).resolve(strict=True)
+        if not static_root.is_dir():
+            raise ValueError("Senza Studio static directory is invalid")
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
@@ -614,6 +668,34 @@ def create_app(config: StudioConfig | None = None) -> FastAPI:
                 # 运行已自然结束但用户没点 Stop 就断开了连接——项目状态
                 # 不该永远卡在 playing（下次打开这个项目会显示"运行中"）。
                 await finalize_play(websocket, project)
+
+    if static_root is not None:
+        @app.get("/{full_path:path}")
+        async def serve_static_file(full_path: str):
+            opened_file = _open_static_file(
+                static_root, full_path if full_path else "index.html"
+            )
+            if opened_file is None:
+                return JSONResponse(status_code=404, content={"detail": "Not found"})
+            file_descriptor, metadata, file_path = opened_file
+            media_type = guess_type(file_path.name)[0] or "application/octet-stream"
+            headers = {
+                "Cache-Control": "no-store",
+                "Content-Length": str(metadata.st_size),
+            }
+            if file_path.relative_to(static_root).parts[0] == "assets":
+                headers["Cache-Control"] = "public, max-age=31536000, immutable"
+
+            def static_file_chunks():
+                with os.fdopen(file_descriptor, "rb") as static_file:
+                    while chunk := static_file.read(64 * 1024):
+                        yield chunk
+
+            return StreamingResponse(
+                static_file_chunks(),
+                media_type=media_type,
+                headers=headers,
+            )
 
 
     return app
