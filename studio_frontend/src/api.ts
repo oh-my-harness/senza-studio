@@ -2,9 +2,26 @@
 import type { ChatMessage, ProjectMeta, SettingsField, Spec } from "./types";
 
 const BASE = "/api";
+const bootstrapToken = import.meta.env.DEV
+  ? import.meta.env.VITE_SENZA_STUDIO_API_TOKEN
+  : undefined;
+let authenticationReady: Promise<void> | null = null;
+
+export function initializeAuthentication(): Promise<void> {
+  if (!bootstrapToken) return Promise.resolve();
+  authenticationReady ??= fetch("/auth/bootstrap", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ token: bootstrapToken }),
+  }).then((response) => {
+    if (!response.ok) throw new Error(`authentication failed: ${response.status}`);
+  });
+  return authenticationReady;
+}
 
 async function fetchJson<T>(url: string, init?: RequestInit): Promise<T> {
-  const r = await fetch(url, init);
+  await initializeAuthentication();
+  const r = await fetch(url, { ...init, credentials: "same-origin" });
   if (!r.ok) throw new Error(`${r.status}: ${await r.text()}`);
   return r.json();
 }

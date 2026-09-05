@@ -7,10 +7,10 @@ import sys
 from contextlib import asynccontextmanager
 
 import httpx
-from fastapi import FastAPI, File, UploadFile, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, File, Request, UploadFile, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, ValidationError
 
 from .config import StudioConfig
 from .docingest import ingest
@@ -39,6 +39,13 @@ from .settings import (
 from .spec import Spec, SpecError
 from .agent import StudioAgent
 from .agent_team import PROXY_TIMEOUT_SECONDS, install_agent_team_proxy
+from .auth import (
+    API_COOKIE_NAME,
+    http_request_is_authenticated,
+    is_valid_api_token,
+    token_matches,
+    websocket_is_authenticated,
+)
 from .ws import finalize_play, run_play_streaming, run_prompt_streaming
 
 
@@ -48,6 +55,26 @@ class CreateProjectReq(BaseModel):
 
 class UpdateSpecReq(BaseModel):
     spec: dict
+
+
+class BootstrapAuthReq(BaseModel):
+    token: str
+
+
+MAX_BOOTSTRAP_BODY_BYTES = 1024
+
+
+async def read_limited_bootstrap_body(request: Request) -> bytes:
+    chunks: list[bytes] = []
+    total_size = 0
+    async for chunk in request.stream():
+        if not chunk:
+            continue
+        total_size += len(chunk)
+        if total_size > MAX_BOOTSTRAP_BODY_BYTES:
+            raise ValueError("Bootstrap request body is too large")
+        chunks.append(chunk)
+    return b"".join(chunks)
 
 
 class UpdateSettingsReq(BaseModel):
@@ -81,6 +108,11 @@ def _get_or_load_project(config: StudioConfig, project_id: str) -> dict:
 def create_app(config: StudioConfig | None = None) -> FastAPI:
     check_sdk_pin()
     cfg = config or StudioConfig.from_env()
+    if not is_valid_api_token(cfg.api_token):
+        raise ValueError(
+            "Senza Studio API token is required; set "
+            "SENZA_STUDIO_API_TOKEN or SENZA_STUDIO_API_TOKEN_FILE"
+        )
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
@@ -92,16 +124,28 @@ def create_app(config: StudioConfig | None = None) -> FastAPI:
         yield
         await app.state.agent_team_client.aclose()
 
-    app = FastAPI(title="Senza Studio", lifespan=lifespan)
+    app = FastAPI(
+        title="Senza Studio",
+        lifespan=lifespan,
+        docs_url=None,
+        redoc_url=None,
+        openapi_url=None,
+    )
 
     @app.middleware("http")
-    async def reject_foreign_origin(request, call_next):
+    async def enforce_local_api_security(request, call_next):
         origin = request.headers.get("origin")
         if origin is not None and origin not in cfg.allowed_origins:
             return JSONResponse(
                 status_code=403,
                 content={"detail": "Origin is not allowed"},
             )
+        if request.url.path not in ("/api/health", "/auth/bootstrap") and not (
+            http_request_is_authenticated(request, cfg.api_token)
+        ):
+            response = JSONResponse(status_code=401, content={"detail": "Not authenticated"})
+            response.headers["WWW-Authenticate"] = "Bearer"
+            return response
         return await call_next(request)
 
     app.add_middleware(
@@ -109,12 +153,14 @@ def create_app(config: StudioConfig | None = None) -> FastAPI:
         allow_origins=list(cfg.allowed_origins),
         allow_methods=["*"],
         allow_headers=["*"],
+        allow_credentials=True,
     )
 
     install_agent_team_proxy(
         app,
         cfg.agent_team_descriptor,
         cfg.allowed_origins,
+        cfg.api_token,
     )
 
     # 先快照"哪些设置项来自真正的环境变量"，再注入 settings.json——顺序不
@@ -165,6 +211,36 @@ def create_app(config: StudioConfig | None = None) -> FastAPI:
     @app.get("/api/health")
     async def health():
         return {"status": "ok"}
+
+
+    # ── Authentication ────────────────────────────────────
+    @app.post("/auth/bootstrap")
+    async def bootstrap_auth(request: Request):
+        try:
+            body = await read_limited_bootstrap_body(request)
+            req = BootstrapAuthReq.model_validate_json(body)
+        except ValueError:
+            return JSONResponse(
+                status_code=413,
+                content={"detail": "Bootstrap request body is too large"},
+            )
+        except json.JSONDecodeError:
+            return JSONResponse(status_code=422, content={"detail": "Invalid JSON"})
+        except ValidationError:
+            return JSONResponse(status_code=422, content={"detail": "Invalid request"})
+        if not token_matches(req.token, cfg.api_token):
+            return JSONResponse(status_code=401, content={"detail": "Not authenticated"})
+        response = JSONResponse({"status": "ok"})
+        response.set_cookie(
+            API_COOKIE_NAME,
+            cfg.api_token,
+            path="/",
+            httponly=True,
+            samesite="strict",
+        )
+        response.headers["Cache-Control"] = "no-store"
+        return response
+
 
     # ── Settings ─────────────────────────────────────────
     @app.get("/api/settings")
@@ -385,6 +461,13 @@ def create_app(config: StudioConfig | None = None) -> FastAPI:
     # ── WebSocket ────────────────────────────────────────
     @app.websocket("/ws/projects/{project_id}")
     async def project_ws(websocket: WebSocket, project_id: str):
+        origin = websocket.headers.get("origin")
+        if origin is not None and origin not in cfg.allowed_origins:
+            await websocket.close(code=1008)
+            return
+        if not websocket_is_authenticated(websocket, cfg.api_token):
+            await websocket.close(code=1008)
+            return
         await websocket.accept()
         state = _get_or_load_project(cfg, project_id)
         agent = state["agent"]

@@ -21,6 +21,7 @@ from studio_backend.config import StudioConfig
 
 
 RUNTIME_TOKEN = "runtime-token-0123456789abcdef"
+STUDIO_TOKEN = "studio-test-token-0123456789abcdef"
 
 
 class RecordingHandler(BaseHTTPRequestHandler):
@@ -173,8 +174,12 @@ def make_client(descriptor: str, home: Path) -> TestClient:
         api_key="test-key",
         api_base="",
         agent_team_descriptor=descriptor,
+        api_token=STUDIO_TOKEN,
     )
-    return TestClient(create_app(config))
+    return TestClient(
+        create_app(config),
+        headers={"Authorization": f"Bearer {STUDIO_TOKEN}"},
+    )
 
 
 def test_proxy_forwards_requests_and_strips_token(tmp_path):
@@ -315,6 +320,22 @@ def test_proxy_rejects_descriptor_symlink(tmp_path):
     assert response.json() == {
         "ok": False,
         "error": "Agent Team runtime is unavailable",
+    }
+    _reset_state()
+
+
+@pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="requires POSIX FIFO")
+def test_proxy_rejects_fifo_descriptor_without_blocking(tmp_path):
+    _reset_state()
+    descriptor = tmp_path / "panel.json"
+    os.mkfifo(descriptor)
+    with make_client(str(descriptor), tmp_path) as client:
+        response = client.get("/api/team/projects")
+
+    assert response.status_code == 503
+    assert response.json() == {
+        "ok": False,
+        "error": "Agent Team runtime descriptor is invalid",
     }
     _reset_state()
 
