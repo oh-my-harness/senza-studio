@@ -131,8 +131,25 @@ def test_config_from_env(monkeypatch):
     monkeypatch.setenv("SENZA_STUDIO_MODEL", "gpt-4o")
     monkeypatch.setenv("SENZA_STUDIO_API_KEY", "sk-test")
     monkeypatch.setenv("SENZA_STUDIO_API_BASE", "https://api.test.com")
+    monkeypatch.setenv(
+        "SENZA_STUDIO_ALLOWED_ORIGINS",
+        "http://localhost:5173,http://localhost,"
+        "http://localhost:5173,http://127.0.0.1:5173",
+    )
     config = StudioConfig.from_env()
     assert config.home_dir == "/tmp/test-studio"
     assert config.model == "gpt-4o"
     assert config.api_key == "sk-test"
     assert config.api_base == "https://api.test.com"
+    assert config.allowed_origins == (
+        "http://localhost:5173",
+        "http://localhost",
+        "http://127.0.0.1:5173",
+    )
+
+
+def test_config_rejects_wildcard_origin(monkeypatch):
+    monkeypatch.setenv("SENZA_STUDIO_ALLOWED_ORIGINS", "*")
+
+    with pytest.raises(ValueError, match="Invalid Senza Studio browser origin"):
+        StudioConfig.from_env()
