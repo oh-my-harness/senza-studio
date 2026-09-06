@@ -1,0 +1,138 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_NET_GIT_FETCH_WITH_CLI: "true"
+  CARGO_TERM_COLOR: always
+
+jobs:
+  python:
+    name: Python validation
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Check out studio
+        uses: actions/checkout@v4
+
+      - name: Read pinned Senza commit
+        id: senza
+        shell: bash
+        run: |
+          set -euo pipefail
+          commit="$(jq -r '.senza_commit' senza-sdk.lock)"
+          if [[ ! "$commit" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error title=Invalid Senza pin::senza-sdk.lock does not contain a 40-character commit SHA"
+            exit 1
+          fi
+          echo "commit=$commit" >> "$GITHUB_OUTPUT"
+
+      - name: Check out pinned Senza source
+        uses: actions/checkout@v4
+        with:
+          repository: oh-my-harness/Senza
+          ref: ${{ steps.senza.outputs.commit }}
+          path: Senza
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Cargo build artifacts
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo
+            Senza/target
+          key: senza-cargo-${{ runner.os }}-${{ steps.senza.outputs.commit }}-${{ hashFiles('Senza/Cargo.lock', 'Senza/senza-pkg/runtime.lock') }}
+          restore-keys: |
+            senza-cargo-${{ runner.os }}-${{ steps.senza.outputs.commit }}-
+            senza-cargo-${{ runner.os }}-
+
+      - name: Build pinned Senza wheel
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m venv "$RUNNER_TEMP/senza-build-venv"
+          "$RUNNER_TEMP/senza-build-venv/bin/python" -m pip install --upgrade pip maturin
+          cd Senza
+          VENV="$RUNNER_TEMP/senza-build-venv" \
+            BASE_PYTHON="$(command -v python)" \
+            ./scripts/build_wheel.sh
+
+      - name: Install project and pinned SDK
+        shell: bash
+        run: |
+          set -euo pipefail
+          mapfile -t wheels < <(find Senza/dist -maxdepth 1 -type f -name 'senza_sdk*.whl' -print)
+          if [[ "${#wheels[@]}" -ne 1 ]]; then
+            echo "::error title=Unexpected wheel set::Expected exactly one senza_sdk wheel, found ${#wheels[@]}"
+            find Senza/dist -maxdepth 1 -type f -print
+            exit 1
+          fi
+          python -m pip install "${wheels[0]}"
+          python -m pip install -e ".[dev]"
+
+      - name: Run Python tests
+        run: PYTHONPATH=. python -m pytest -q
+
+      - name: Check Senza API compatibility
+        run: python scripts/check_senza_compat.py
+
+      - name: Check installed Python dependencies
+        run: python -m pip check
+
+      - name: Check shell scripts
+        run: bash -n dev.sh
+
+  frontend:
+    name: Frontend validation
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Check out studio
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: studio_frontend/package-lock.json
+
+      - name: Install frontend dependencies
+        working-directory: studio_frontend
+        env:
+          ELECTRON_SKIP_BINARY_DOWNLOAD: "1"
+        run: npm ci
+
+      - name: Build frontend
+        working-directory: studio_frontend
+        run: npm run build
+
+      - name: Audit production frontend dependencies
+        working-directory: studio_frontend
+        run: npm audit --omit=dev
+
+      - name: Check Electron entry syntax
+        run: node --check studio_frontend/electron/main.cjs
+
+      - name: Check repository diff hygiene
+        run: git diff --check
