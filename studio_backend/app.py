@@ -15,6 +15,14 @@ from .play import PlaySession, get_entry_inputs
 from .project import Project
 from .sdk_pin import check_sdk_pin
 from .session import read_session_history
+from .settings import (
+    SETTINGS_SCHEMA,
+    SETTINGS_SECTIONS,
+    apply_to_environ,
+    load_settings,
+    masked_values,
+    save_settings,
+)
 from .spec import Spec, SpecError
 from .agent import StudioAgent
 from .agent_team import PROXY_TIMEOUT_SECONDS, install_agent_team_proxy
@@ -27,6 +35,10 @@ class CreateProjectReq(BaseModel):
 
 class UpdateSpecReq(BaseModel):
     spec: dict
+
+
+class UpdateSettingsReq(BaseModel):
+    values: dict
 
 
 # ── 全局状态 ──────────────────────────────────────────────
@@ -92,6 +104,10 @@ def create_app(config: StudioConfig | None = None) -> FastAPI:
         cfg.allowed_origins,
     )
 
+    # 启动时把 settings.json 注入环境变量，供预制件工具（send_email 等）
+    # 读取。override=False——显式 export 的环境变量优先，见 settings.py。
+    apply_to_environ(load_settings(cfg))
+
     @app.exception_handler(FileNotFoundError)
     async def not_found_handler(request, exc):
         return JSONResponse(status_code=404, content={"detail": str(exc)})
@@ -104,6 +120,24 @@ def create_app(config: StudioConfig | None = None) -> FastAPI:
     @app.get("/api/health")
     async def health():
         return {"status": "ok"}
+
+    # ── Settings ─────────────────────────────────────────
+    @app.get("/api/settings")
+    async def get_settings():
+        """schema 给前端渲染表单用；values 里的密钥字段是哨兵而非明文
+        （见 settings.masked_values）。"""
+        return {
+            "schema": SETTINGS_SCHEMA,
+            "sections": SETTINGS_SECTIONS,
+            "values": masked_values(load_settings(cfg)),
+        }
+
+    @app.put("/api/settings")
+    async def update_settings(req: UpdateSettingsReq):
+        saved = save_settings(cfg, req.values)
+        # override=True：用户刚点了保存，就该立刻生效，不用重启后端。
+        apply_to_environ(saved, override=True)
+        return {"status": "ok", "values": masked_values(saved)}
 
     # ── Projects ─────────────────────────────────────────
     @app.get("/api/projects")

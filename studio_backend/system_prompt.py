@@ -41,9 +41,12 @@ _RULES = """\
     decision is available, e.g. via a request_approval tool, then routes on approve/reject).
     Do NOT use checker for general classification or branching logic — use an agent step
     with the routing convention above instead.
-  - tool: execute a bound tool. Bind it with bind_tool(step, tool_ref) — tool_ref must
-    already exist in this project's tools/registry.py (a human developer writes tool code
-    there; you cannot generate tool code yet). Declare its arguments with
+  - tool: execute a bound tool. Bind it with bind_tool(step, tool_ref) — tool_ref resolves
+    against a shared prefab library first (check with list_prefabs/search_prefabs/
+    recommend_prefabs), then this project's own tools/registry.py, which overrides a prefab
+    of the same name if both exist. If no prefab covers the need, a human developer writes
+    tool code directly in this project's tools/registry.py (you cannot generate tool code
+    yet). Declare its arguments with
     set_step_property(step, "tool_args", {"param": "{{var}}", ...}) — same {{var}}
     substitution as prompt_template, applied to each value. A tool step with no tool_args
     gets called with no arguments. For MULTIPLE next_on_* edges, the tool's return value
@@ -81,9 +84,14 @@ _RULES = """\
 - list_documents() — list project documents
 
 ### Prefabs
-- list_prefabs(kind?) — list available prefabs (empty in current phase)
-- search_prefabs(query) — search prefabs (empty in current phase)
-- recommend_prefabs(description) — recommend prefabs (empty in current phase)"""
+- list_prefabs(kind?) — list available prefab tools (kind: "tool"/"component"/"all"; components
+  are not implemented yet, always empty)
+- search_prefabs(query) — keyword search over prefab name + description
+- recommend_prefabs(description) — rank prefabs by keyword overlap with a stated need
+
+Always check list_prefabs/search_prefabs/recommend_prefabs before telling the user a tool needs
+to be hand-written — a prefab may already cover the need, in which case bind_tool alone is
+enough and no code changes are required from the user."""
 
 
 def _spec_summary(spec: Spec) -> str:

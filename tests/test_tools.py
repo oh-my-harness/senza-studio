@@ -10,6 +10,7 @@ from studio_backend.config import StudioConfig
 from studio_backend.project import Project
 from studio_backend.spec import Spec
 from studio_backend.tools.doc_tools import make_doc_callbacks, make_doc_tools
+import studio_backend.tools.prefab_tools as prefab_tools
 from studio_backend.tools.prefab_tools import make_prefab_callbacks, make_prefab_tools
 from studio_backend.tools.spec_tools import make_spec_callbacks, make_spec_tools
 
@@ -234,22 +235,39 @@ def test_doc_tools_factory_returns_tools_with_names():
 # ── prefab_tools ─────────────────────────────────────────
 
 
-def test_prefab_tools_return_empty():
+def test_prefab_tools_list_returns_real_prefabs():
+    """Phase 4：senza_studio_components 装好了以后，list_prefabs 应该返回
+    真实内容，不再是 Phase 1 的占位空列表。"""
     cbs = make_prefab_callbacks()
-    result = _cb(cbs, "list_prefabs")({}, None)
-    assert "[]" in result or "empty" in result.lower() or "no" in result.lower()
+    result = json.loads(_cb(cbs, "list_prefabs")({}, None))
+    names = {t["name"] for t in result["tools"]}
+    assert {"db_query", "lookup_topic", "send_email"} <= names
+    assert result["components"] == []  # 能力组件是 Phase 4 之后的切片
 
 
-def test_prefab_search_returns_empty():
+def test_prefab_search_matches_real_prefab():
     cbs = make_prefab_callbacks()
-    result = _cb(cbs, "search_prefabs")({"query": "db"}, None)
-    assert json.loads(result) == []
+    result = json.loads(_cb(cbs, "search_prefabs")({"query": "sql"}, None))
+    assert {r["name"] for r in result} == {"db_query"}
 
 
-def test_prefab_recommend_returns_empty():
+def test_prefab_recommend_ranks_relevant_prefab_first():
     cbs = make_prefab_callbacks()
-    result = _cb(cbs, "recommend_prefabs")({"description": "query a db"}, None)
-    assert json.loads(result) == []
+    result = json.loads(
+        _cb(cbs, "recommend_prefabs")({"description": "I need to query a database"}, None)
+    )
+    assert result
+    assert result[0]["name"] == "db_query"
+
+
+def test_prefab_tools_degrade_to_empty_when_package_not_installed(monkeypatch):
+    """senza_studio_components 是子目录里的独立 pip 包——没装的话不该让
+    整个元 agent harness 构建失败，应该降级成 Phase 1 那样的空列表。"""
+    monkeypatch.setattr(prefab_tools, "_prefab_registry", None)
+    cbs = make_prefab_callbacks()
+    assert json.loads(_cb(cbs, "list_prefabs")({}, None)) == {"tools": [], "components": []}
+    assert json.loads(_cb(cbs, "search_prefabs")({"query": "db"}, None)) == []
+    assert json.loads(_cb(cbs, "recommend_prefabs")({"description": "query a db"}, None)) == []
 
 
 def test_prefab_tools_factory_returns_three_tools():

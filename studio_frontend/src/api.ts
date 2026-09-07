@@ -1,5 +1,5 @@
 // studio_frontend/src/api.ts
-import type { ChatMessage, ProjectMeta, Spec } from "./types";
+import type { ChatMessage, ProjectMeta, SettingsField, Spec } from "./types";
 
 const BASE = "/api";
 
@@ -39,6 +39,18 @@ export const api = {
     fetchJson<{ fields: string[] }>(`${BASE}/projects/${id}/entry_inputs`),
   deleteProject: (id: string) =>
     fetchJson<{ status: string }>(`${BASE}/projects/${id}`, { method: "DELETE" }),
+  getSettings: () =>
+    fetchJson<{
+      schema: SettingsField[];
+      sections: Record<string, string>;
+      values: Record<string, string>;
+    }>(`${BASE}/settings`),
+  updateSettings: (values: Record<string, string>) =>
+    fetchJson<{ status: string; values: Record<string, string> }>(`${BASE}/settings`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ values }),
+    }),
 };
 
 export function createWebSocket(projectId: string): WebSocket {

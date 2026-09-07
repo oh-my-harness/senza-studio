@@ -166,12 +166,13 @@ Phase 7 (Export 打包)
 
 ## Phase 4: 预制件 + 能力组件
 
-**仓库**：`senza-studio` + `senza-studio-components`（新包）
+**仓库**：`senza-studio`（`senza-studio-components` 是它的子目录包，不是单独的仓库——见下方说明）
 
 **目标**：spec 能引用预制件和能力组件，画布能看到组件 group。
 
 **交付内容**：
-- `senza-studio-components` pip 包：基础工具预制件（send_email/db_query/web_search 等）+ 能力组件定义（approval_flow 等）
+- `senza-studio-components` pip 包：基础工具预制件（send_email/db_query/lookup_topic 等）+ 能力组件定义（approval_flow 等）。
+  住在 `senza-studio/senza-studio-components/`，自带 pyproject.toml。**包**必须独立可安装（Phase 7 导出的项目 pip install 它就能脱离 Studio 独立运行），但**仓库**没必要拆——目前两者是同节奏开发的，同一个改动经常同时动 Studio 和预制件，拆仓库只会让这类改动没法原子提交、也没东西钉住版本对应关系。等以后真要做插件市场（§10，v1 不做）再 `git subtree split` 拆出去，带着历史一起走。
 - 预处理器加组件展开：`component: approval_flow` → 查注册表 → params 填充模板 → 生成 step + edge（带 `_component` 元数据）
 - 预制件工具实现：list_prefabs/search_prefabs/recommend_prefabs 返回实际内容
 - Scene 视图加组件折叠/展开：`_component` 元数据 → ReactFlow group 容器

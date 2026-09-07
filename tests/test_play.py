@@ -701,16 +701,19 @@ def tmp_config(tmp_path):
     )
 
 
-def test_load_tool_registry_starter_file_returns_empty_no_error(tmp_config):
+def test_load_tool_registry_starter_file_returns_empty_no_error(tmp_config, monkeypatch):
     """Project.create() 写的起始文件 get_tools() 返回 {}——新项目应该能
-    干净地加载出一个空注册表，不报错。"""
+    干净地加载出一个空注册表，不报错。屏蔽预制件层，单独测项目文件本身
+    的加载行为，不跟 senza_studio_components 装没装、里面有什么耦合。"""
+    monkeypatch.setattr(play, "_load_prefab_tools", lambda: {})
     proj = Project.create(tmp_config, "测试项目")
     tools, error = load_tool_registry(proj)
     assert tools == {}
     assert error is None
 
 
-def test_load_tool_registry_missing_file_returns_empty_no_error(tmp_config):
+def test_load_tool_registry_missing_file_returns_empty_no_error(tmp_config, monkeypatch):
+    monkeypatch.setattr(play, "_load_prefab_tools", lambda: {})
     proj = Project.create(tmp_config, "测试项目")
     (proj.path / "tools" / "registry.py").unlink()
     tools, error = load_tool_registry(proj)
@@ -733,7 +736,8 @@ def test_load_tool_registry_loads_real_callables(tmp_config):
     assert tools["add"]({"a": 1, "b": 2}) == {"sum": 3}
 
 
-def test_load_tool_registry_syntax_error_reports_message_not_raise(tmp_config):
+def test_load_tool_registry_syntax_error_reports_message_not_raise(tmp_config, monkeypatch):
+    monkeypatch.setattr(play, "_load_prefab_tools", lambda: {})
     proj = Project.create(tmp_config, "测试项目")
     (proj.path / "tools" / "registry.py").write_text("def get_tools(:\n", encoding="utf-8")
     tools, error = load_tool_registry(proj)
@@ -741,7 +745,8 @@ def test_load_tool_registry_syntax_error_reports_message_not_raise(tmp_config):
     assert error is not None
 
 
-def test_load_tool_registry_non_dict_return_reports_message(tmp_config):
+def test_load_tool_registry_non_dict_return_reports_message(tmp_config, monkeypatch):
+    monkeypatch.setattr(play, "_load_prefab_tools", lambda: {})
     proj = Project.create(tmp_config, "测试项目")
     (proj.path / "tools" / "registry.py").write_text(
         "def get_tools():\n    return ['not', 'a', 'dict']\n", encoding="utf-8"
@@ -752,9 +757,10 @@ def test_load_tool_registry_non_dict_return_reports_message(tmp_config):
     assert "dict" in error
 
 
-def test_load_tool_registry_two_projects_do_not_leak_tools(tmp_config):
+def test_load_tool_registry_two_projects_do_not_leak_tools(tmp_config, monkeypatch):
     """两个不同项目各自的 registry.py 不能互相污染——回归测试固定模块名
     缓存 bug（sys.modules 复用会让后加载的项目读到前一个项目的工具）。"""
+    monkeypatch.setattr(play, "_load_prefab_tools", lambda: {})
     proj_a = Project.create(tmp_config, "项目A")
     proj_b = Project.create(tmp_config, "项目B")
     (proj_a.path / "tools" / "registry.py").write_text(
@@ -767,6 +773,40 @@ def test_load_tool_registry_two_projects_do_not_leak_tools(tmp_config):
     tools_b, _ = load_tool_registry(proj_b)
     assert "only_in_a" in tools_a and "only_in_b" not in tools_a
     assert "only_in_b" in tools_b and "only_in_a" not in tools_b
+
+
+# ── load_tool_registry: prefab layer (Phase 4) ───────────────
+
+
+def test_load_tool_registry_includes_real_prefab_tools(tmp_config):
+    """Phase 4：senza_studio_components 装好了以后，即使项目自己什么工具
+    都没写，也该能用预制件（db_query/lookup_topic/send_email）。"""
+    proj = Project.create(tmp_config, "测试项目")
+    tools, error = load_tool_registry(proj)
+    assert error is None
+    assert {"db_query", "lookup_topic", "send_email"} <= set(tools)
+
+
+def test_load_tool_registry_project_tool_overrides_prefab_of_same_name(tmp_config):
+    """项目自己的同名工具应该覆盖预制件——项目定制优先于通用默认值。"""
+    proj = Project.create(tmp_config, "测试项目")
+    (proj.path / "tools" / "registry.py").write_text(
+        "def db_query(args):\n    return 'this is the PROJECT override, not the prefab'\n"
+        "def get_tools():\n    return {'db_query': db_query}\n",
+        encoding="utf-8",
+    )
+    tools, error = load_tool_registry(proj)
+    assert error is None
+    assert tools["db_query"]({}) == "this is the PROJECT override, not the prefab"
+
+
+def test_load_tool_registry_prefab_available_even_if_project_registry_broken(tmp_config):
+    """项目自己的 registry.py 语法错误——不该连预制件都用不了。"""
+    proj = Project.create(tmp_config, "测试项目")
+    (proj.path / "tools" / "registry.py").write_text("def get_tools(:\n", encoding="utf-8")
+    tools, error = load_tool_registry(proj)
+    assert error is not None
+    assert "db_query" in tools  # 预制件层不受项目 registry.py 加载失败影响
 
 
 # ── make_executor: tool steps ───────────────────────────────
@@ -798,7 +838,7 @@ def test_executor_tool_unknown_ref_is_clean_error():
     assert "ghost_tool" in result["output"]
 
 
-def test_executor_tool_load_error_surfaces_on_every_tool_step():
+def test_executor_tool_load_error_surfaces_when_tool_not_found():
     stage_by_name = {"lookup": {"name": "lookup", "type": "tool", "tool": "whatever"}}
     executor = make_executor(
         stage_by_name,
@@ -813,6 +853,25 @@ def test_executor_tool_load_error_surfaces_on_every_tool_step():
     result = executor({"step_id": "lookup", "context": {}})
     assert result["structured"]["route_key"] == "error"
     assert "bad syntax" in result["output"]
+
+
+def test_executor_tool_load_error_does_not_block_prefab_tool():
+    """项目自己的 tools/registry.py 坏了，不该连预制件工具都用不了——
+    Phase 4：预制件是独立加载的一层，跟项目 registry.py 的加载状态无关。"""
+    stage_by_name = {"lookup": {"name": "lookup", "type": "tool", "tool": "db_query"}}
+    executor = make_executor(
+        stage_by_name,
+        {},
+        "test-model",
+        provider=None,
+        env=None,
+        engine_ref={},
+        tools_by_name={"db_query": lambda args: "ok (this is a prefab, still works)"},
+        tools_load_error="加载 tools/registry.py 失败: bad syntax in project's own file",
+    )
+    result = executor({"step_id": "lookup", "context": {}})
+    assert result["structured"]["route_key"] == "success"
+    assert result["output"] == "ok (this is a prefab, still works)"
 
 
 def test_executor_tool_single_route_calls_with_rendered_args():

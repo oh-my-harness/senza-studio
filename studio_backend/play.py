@@ -278,48 +278,65 @@ def _extract_json_fields(output: str) -> tuple[dict, str]:
     return fields, clean_output
 
 
+def _load_prefab_tools() -> dict[str, Callable]:
+    """senza_studio_components 是本仓库 ./senza-studio-components 子目录里的
+    独立 pip 包（Phase 4）——dev.sh 会 editable install 它，但没装的话降级成
+    没有预制件可用，不影响项目自己的 tools/registry.py。"""
+    try:
+        from senza_studio_components import registry as prefab_registry
+    except ImportError:
+        return {}
+    return dict(prefab_registry.get_tools())
+
+
 def load_tool_registry(project: Project) -> tuple[dict[str, Callable], str | None]:
-    """加载 <project>/tools/registry.py 的 get_tools()。
+    """加载工具：先铺一层 senza_studio_components 的预制件工具（Phase 4），
+    项目自己 <project>/tools/registry.py 里同名的工具覆盖预制件（项目定制
+    优先于通用预制件——跟其它"项目本地覆盖共享默认值"的场景是同一个道理）。
 
-    每次 Play 都重新读一遍（不缓存跨次 Play，也不缓存跨项目）——用
-    spec_from_file_location + 每次换一个新模块名绕开 sys.modules 缓存，
-    这样：(1) 开发者手改 registry.py 后下一次 Play 立刻生效，不用重启
-    Studio 后端；(2) 两个不同项目都可能有一个叫 "registry.py" 的文件，
-    固定用同一个模块名（比如 "tools.registry"）会导致后加载的项目复用
-    前一个项目缓存在 sys.modules 里的模块，读到别的项目的工具。
+    每次 Play 都重新读一遍项目 registry.py（不缓存跨次 Play，也不缓存跨
+    项目）——用 spec_from_file_location + 每次换一个新模块名绕开
+    sys.modules 缓存，这样：(1) 开发者手改 registry.py 后下一次 Play 立刻
+    生效，不用重启 Studio 后端；(2) 两个不同项目都可能有一个叫
+    "registry.py" 的文件，固定用同一个模块名（比如 "tools.registry"）会
+    导致后加载的项目复用前一个项目缓存在 sys.modules 里的模块，读到别的
+    项目的工具。
 
-    没有 registry.py 的项目不算错误——只是没法用 tool step（返回空
-    dict，等真的有 tool step 引用不存在的工具时再报错）。import 失败
-    （语法错误、get_tools 不存在、返回值不是 dict）会被捕获成一条错误
-    消息而不是直接抛出，让 PlaySession.play() 能正常往下走，把这条消息
-    原样透传给每一个用到 tool step 的报错里，而不是让整个 Play 在构建
-    阶段就崩溃。
+    没有 registry.py 的项目不算错误——预制件仍然可用，只是没有项目自定义
+    工具。项目 registry.py import 失败（语法错误、get_tools 不存在、返回
+    值不是 dict）也不会丢掉已经加载好的预制件——只把这条消息带回去，由
+    调用方决定要不要在某个具体 tool step 找不到工具时把它带上，而不是让
+    整个 Play 在构建阶段就崩溃，也不该因为项目自己的 registry.py 坏了就
+    连预制件都用不了。
     """
+    tools = _load_prefab_tools()
+
     registry_path = project.path / "tools" / "registry.py"
     if not registry_path.exists():
-        return {}, None
+        return tools, None
 
     module_name = f"_studio_tool_registry_{uuid.uuid4().hex}"
     try:
         spec = importlib.util.spec_from_file_location(module_name, registry_path)
         if spec is None or spec.loader is None:
-            return {}, "无法加载 tools/registry.py: spec_from_file_location 失败"
+            return tools, "无法加载 tools/registry.py: spec_from_file_location 失败"
         module = importlib.util.module_from_spec(spec)
         sys.modules[module_name] = module
         try:
             spec.loader.exec_module(module)
-            tools = module.get_tools()
+            project_tools = module.get_tools()
         finally:
             sys.modules.pop(module_name, None)
-        if not isinstance(tools, dict):
+        if not isinstance(project_tools, dict):
             return (
-                {},
+                tools,
                 f"tools/registry.py 的 get_tools() 必须返回 dict，"
-                f"实际返回了 {type(tools).__name__}",
+                f"实际返回了 {type(project_tools).__name__}",
             )
+        tools.update(project_tools)
         return tools, None
     except Exception as exc:  # noqa: BLE001
-        return {}, f"加载 tools/registry.py 失败: {exc}"
+        return tools, f"加载 tools/registry.py 失败: {exc}"
 
 
 def _call_tool(callback: Callable, args: dict, ctx: dict) -> Any:
@@ -411,11 +428,11 @@ def make_executor(
             }
 
         if stage_type == "tool":
-            if tools_load_error:
-                return {
-                    "output": f"Error: {tools_load_error}",
-                    "structured": {"route_key": "error"},
-                }
+            # tools_load_error 只说明项目自己的 tools/registry.py 没加载成功
+            # ——不代表完全没有工具可用（预制件那一层是独立加载的，见
+            # load_tool_registry），所以这里不再无条件让每个 tool step 都
+            # 失败，只在真的找不到这个具体工具时才把这条消息带上，帮助
+            # 排查到底是"工具压根不存在"还是"项目 registry.py 坏了"。
             tool_ref = stage.get("tool")
             if not tool_ref:
                 return {
@@ -424,10 +441,10 @@ def make_executor(
                 }
             callback = (tools_by_name or {}).get(tool_ref)
             if callback is None:
-                return {
-                    "output": f"Error: tool '{tool_ref}' not found in tools/registry.py",
-                    "structured": {"route_key": "error"},
-                }
+                reason = f"tool '{tool_ref}' not found (checked prefabs and project tools/registry.py)"
+                if tools_load_error:
+                    reason += f" — 项目 tools/registry.py 加载失败: {tools_load_error}"
+                return {"output": f"Error: {reason}", "structured": {"route_key": "error"}}
 
             args = render_tool_args(stage.get("tool_args") or {}, ctx["context"])
             try:

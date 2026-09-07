@@ -462,6 +462,10 @@ COMPONENT = {
 
 ### senza-studio-components 包
 
+位置：`senza-studio/senza-studio-components/`——senza-studio 仓库里的子目录，
+但自带 pyproject.toml，是个独立可安装的 pip 包（导出的项目直接 pip install
+它，不需要 Studio 仓库）。包独立、仓库不独立是刻意的：见 Phase 4 说明。
+
 ```
 senza-studio-components/
 ├── tools/               # 工具预制件

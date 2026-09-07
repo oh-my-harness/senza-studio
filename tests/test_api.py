@@ -30,6 +30,54 @@ def test_health(app_client):
     assert r.json()["status"] == "ok"
 
 
+# ── Settings ────────────────────────────────────────────
+
+
+def test_get_settings_returns_schema_and_empty_values(app_client):
+    r = app_client.get("/api/settings")
+    assert r.status_code == 200
+    body = r.json()
+    keys = {item["key"] for item in body["schema"]}
+    assert "SENZA_SMTP_HOST" in keys
+    assert "SENZA_SMTP_PASSWORD" in keys
+    assert body["values"] == {}
+
+
+def test_get_settings_returns_sections_matching_field_groups(app_client):
+    """设置面板左侧导航按 group 分区——每个字段的 group 都该有对应说明，
+    否则前端会渲染出一个没有说明的分区。"""
+    body = app_client.get("/api/settings").json()
+    assert "邮件" in body["sections"]
+    field_groups = {item["group"] for item in body["schema"]}
+    assert field_groups <= set(body["sections"]), "every field group needs a section entry"
+
+
+def test_put_settings_saves_and_get_returns_them(app_client):
+    r = app_client.put(
+        "/api/settings",
+        json={"values": {"SENZA_SMTP_HOST": "smtp.example.com"}},
+    )
+    assert r.status_code == 200
+    body = app_client.get("/api/settings").json()
+    assert body["values"]["SENZA_SMTP_HOST"] == "smtp.example.com"
+
+
+def test_get_settings_never_returns_plaintext_secret(app_client):
+    """密钥不该出现在 HTTP 响应里（浏览器 devtools/前端内存）。"""
+    app_client.put(
+        "/api/settings", json={"values": {"SENZA_SMTP_PASSWORD": "hunter2"}}
+    )
+    body = app_client.get("/api/settings").json()
+    assert "hunter2" not in r_text(body)
+    assert body["values"]["SENZA_SMTP_PASSWORD"] != "hunter2"
+
+
+def r_text(obj) -> str:
+    import json as _json
+
+    return _json.dumps(obj)
+
+
 # ── Projects ────────────────────────────────────────────
 
 

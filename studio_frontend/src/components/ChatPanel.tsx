@@ -144,7 +144,14 @@ export default function ChatPanel({ projectId }: { projectId: string }) {
           // 记录（插的假 assistant 气泡本来也不会被真实持久化，刷新就没了）。
           addLog("error", event.message || "发生错误");
         }
-        setStatus("spec_ready");
+        // source: "play" 的 error 不该把 status 打回 spec_ready——Play 中途
+        // 出错要留在 playing，让用户先看完 Game view 里的错误详情，自己点
+        // Stop 才收尾（workflow_done 已经是这么处理的）。不这样做的话，
+        // Play 出错时这条 error 事件会比 workflow_done 先到，用户还没来得
+        // 及看输出就被直接退回编辑态（亲测复现过）。
+        if (event.source !== "play") {
+          setStatus("spec_ready");
+        }
       } else if (event.type === "spec_updated") {
         if (event.spec) setSpec(event.spec);
       } else if (event.type === "session_switched") {

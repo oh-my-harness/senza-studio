@@ -225,8 +225,14 @@ async def run_play_streaming(
     except Exception as exc:
         print(f"Play stream error: {exc}", file=sys.stderr)
         try:
+            # source: "play" ——ChatPanel 的通用 error 处理器（对话/Play 共用）
+            # 看到这个字段就不会把 status 打回 spec_ready：Play 中途出错要
+            # 留在 playing，让用户看完 Game view 里的错误详情再自己点 Stop，
+            # 不能一收到 error 事件就立刻把整个 Play 视图切走（亲测复现过
+            # 这个 bug：没有这个字段时，error 事件比 workflow_done 先到，
+            # 用户还没来得及看输出就被退回编辑态）。
             await websocket.send_json(
-                {"type": "error", "message": f"play stream error: {exc}"}
+                {"type": "error", "message": f"play stream error: {exc}", "source": "play"}
             )
         except Exception:
             pass
@@ -240,7 +246,7 @@ async def run_play_streaming(
         if play_session.run_error is not None:
             try:
                 await websocket.send_json(
-                    {"type": "error", "message": str(play_session.run_error)}
+                    {"type": "error", "message": str(play_session.run_error), "source": "play"}
                 )
             except Exception:
                 pass

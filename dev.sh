@@ -96,6 +96,17 @@ else
   source .venv/bin/activate
 fi
 
+# ── 检查 senza-studio-components ────────────────────────
+# 本仓库的子目录包（不是兄弟仓库）——它有自己的 pyproject.toml，是为了
+# Phase 7 导出：导出的项目 pip install 这个包就能脱离 Studio 独立运行。
+# 纯 Python，没有 Senza 那种 Cargo PLACEHOLDER 问题，直接 editable install
+# 即可；跟上面 .venv 的创建分开检查，这样已有 venv 但还没装过这个包（比如
+# 这个功能刚合并进来）时也能自动补装，不用整个重建 venv。
+if ! python -c "import senza_studio_components" 2>/dev/null; then
+  echo "📦 安装 senza-studio-components（预制件工具库）..."
+  uv pip install -e ./senza-studio-components
+fi
+
 # ── 检查 node_modules ───────────────────────────────────
 if [ ! -d "studio_frontend/node_modules" ]; then
   echo "❌ node_modules 不存在，正在安装..."
