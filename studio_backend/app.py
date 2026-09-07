@@ -2,7 +2,9 @@
 from __future__ import annotations
 
 import asyncio
+from contextlib import asynccontextmanager
 
+import httpx
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
@@ -15,6 +17,7 @@ from .sdk_pin import check_sdk_pin
 from .session import read_session_history
 from .spec import Spec, SpecError
 from .agent import StudioAgent
+from .agent_team import PROXY_TIMEOUT_SECONDS, install_agent_team_proxy
 from .ws import finalize_play, run_play_streaming, run_prompt_streaming
 
 
@@ -52,15 +55,42 @@ def _get_or_load_project(config: StudioConfig, project_id: str) -> dict:
 
 def create_app(config: StudioConfig | None = None) -> FastAPI:
     check_sdk_pin()
-    app = FastAPI(title="Senza Studio")
+    cfg = config or StudioConfig.from_env()
+
+    @asynccontextmanager
+    async def lifespan(app: FastAPI):
+        app.state.agent_team_client = httpx.AsyncClient(
+            timeout=PROXY_TIMEOUT_SECONDS,
+            follow_redirects=False,
+            trust_env=False,
+        )
+        yield
+        await app.state.agent_team_client.aclose()
+
+    app = FastAPI(title="Senza Studio", lifespan=lifespan)
+
+    @app.middleware("http")
+    async def reject_foreign_origin(request, call_next):
+        origin = request.headers.get("origin")
+        if origin is not None and origin not in cfg.allowed_origins:
+            return JSONResponse(
+                status_code=403,
+                content={"detail": "Origin is not allowed"},
+            )
+        return await call_next(request)
+
     app.add_middleware(
         CORSMiddleware,
-        allow_origins=["*"],
+        allow_origins=list(cfg.allowed_origins),
         allow_methods=["*"],
         allow_headers=["*"],
     )
 
-    cfg = config or StudioConfig.from_env()
+    install_agent_team_proxy(
+        app,
+        cfg.agent_team_descriptor,
+        cfg.allowed_origins,
+    )
 
     @app.exception_handler(FileNotFoundError)
     async def not_found_handler(request, exc):

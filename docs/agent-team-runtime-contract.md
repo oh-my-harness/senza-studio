@@ -53,6 +53,12 @@ The proxy must:
 - preserve runtime status codes and JSON error bodies;
 - reject redirects to non-loopback upstreams.
 
+Senza Studio's backend mounts the runtime HTTP API at `/api/team/{path}` and
+the event stream at `/ws/team`. The frontend never receives the runtime token.
+The descriptor path is configured with `SENZA_STUDIO_AGENT_TEAM_DESCRIPTOR`.
+Browser origins are restricted to the local Studio origins by default and can
+be overridden with `SENZA_STUDIO_ALLOWED_ORIGINS`.
+
 ## 3. Common response shape
 
 Successful operation responses are endpoint-specific JSON objects. Mutating
