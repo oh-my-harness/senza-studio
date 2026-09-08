@@ -217,7 +217,19 @@ Phase 7 (Export 打包)
 - 开发者在 `tools/custom/` 手写工具 → Play 能加载
 - 重新生成 `tools/generated/` 不覆盖 `tools/custom/`
 
-**状态**：待实现
+**状态**：已实现
+
+实现上有一处对 roadmap 的**刻意偏离**：注册方式没有做成"往 `tools/registry.py`
+里追加注册"，而是自动发现 `tools/generated/*.py` 和 `tools/custom/*.py`（各自暴露
+一个 `TOOL` dict）。机器去改用户手写的 registry.py 是整个方案里最容易出事的一步，
+不改它，"重新生成不覆盖手写"就从"小心翼翼保证"变成结构性成立；顺带补上了
+`tools/custom/` 以前根本不会被自动加载的缺口。加载优先级：预制件 < generated/ <
+custom/ < registry.py。
+
+未跑通的验收：**元 agent 在真实对话里自主调用 generate_tool** ——LLM 供应商
+（glm 中转）连续多日 `upstream error`/空响应，同 Phase 4 的 add_component 那条。
+工具注册、schema、系统提示词、校验与降级路径均已单独验证，缺的只是"模型会不会
+自己选它"。供应商恢复后补跑。
 
 ---
 

@@ -84,6 +84,44 @@ def get_plugins():
 """
 
 
+# tools/generated 和 tools/custom 的说明文件——两个目录都是自动发现的，
+# 目录空着的话没人知道该按什么形状写。用 .md 不用 .py 示例：这两个目录里的
+# *.py 会被真的当工具加载，放示例等于给每个新项目塞一个假工具。
+_TOOL_DIR_README = """# tools/{dir}/
+
+{who}。
+
+这里的每个 `*.py` 在 Play 时自动加载，不需要在 `tools/registry.py` 里手动
+import。约定：暴露一个 `TOOL` dict。
+
+```python
+def fetch_order(args):
+    # args 来自 spec 里这个 tool step 的 tool_args（已做 {{{{var}}}} 替换）
+    return {{"status": "shipped"}}      # 返回 dict 或字符串
+
+TOOL = {{
+    "name": "fetch_order",              # 必须和文件名一致才好找
+    "description": "按订单号查询订单",   # 给元 agent 看的
+    "parameters": {{                     # JSON Schema
+        "type": "object",
+        "properties": {{"order_id": {{"type": "string"}}}},
+        "required": ["order_id"],
+    }},
+    "callback": fetch_order,
+}}
+```
+
+说明：
+
+- 下划线开头的文件会跳过，可以放公共代码。
+- 每次 Play 重新加载，改完不用重启后端。
+- 单个文件出错只丢它自己，错误会显示在日志面板里。
+- 加载优先级（后者覆盖前者）：预制件 < generated/ < custom/ < registry.py。
+- 真正的工作要放在 callback 里，不要放模块顶层——模块会在校验时被 import。
+- {note}
+"""
+
+
 class Project:
     """单个 Studio 项目。"""
 
@@ -106,6 +144,24 @@ class Project:
         (path / ".studio" / "sessions").mkdir(parents=True, exist_ok=True)
         (path / "tools" / "generated").mkdir(parents=True, exist_ok=True)
         (path / "tools" / "custom").mkdir(parents=True, exist_ok=True)
+        (path / "tools" / "generated" / "README.md").write_text(
+            _TOOL_DIR_README.format(
+                dir="generated",
+                who="元 agent 通过 generate_tool 生成的工具",
+                note="这个目录由元 agent 管理，重新生成会覆盖同名文件——手写的"
+                "工具请放 tools/custom/，那边不会被覆盖，而且同名时优先级更高。",
+            ),
+            encoding="utf-8",
+        )
+        (path / "tools" / "custom" / "README.md").write_text(
+            _TOOL_DIR_README.format(
+                dir="custom",
+                who="开发人员手写的工具",
+                note="这个目录元 agent 不碰。同名工具这里的实现会覆盖 "
+                "tools/generated/ 里的，可以用来接管一个生成得不理想的工具。",
+            ),
+            encoding="utf-8",
+        )
         (path / "tools" / "registry.py").write_text(_TOOL_REGISTRY_STARTER, encoding="utf-8")
         (path / "plugins").mkdir(parents=True, exist_ok=True)
         (path / "plugins" / "README.md").write_text(

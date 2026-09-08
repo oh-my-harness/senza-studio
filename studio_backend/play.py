@@ -23,6 +23,7 @@ import re
 import sys
 import threading
 import uuid
+from pathlib import Path
 from typing import Any, Callable
 
 import senza
@@ -323,23 +324,12 @@ def load_project_plugins(project: Project) -> tuple[list[Any], list[str]]:
     for path in sorted(plugins_dir.glob("*.py")):
         if path.name.startswith("_"):
             continue
-        module_name = f"_studio_project_plugin_{uuid.uuid4().hex}"
         try:
-            spec = importlib.util.spec_from_file_location(module_name, path)
-            if spec is None or spec.loader is None:
-                errors.append(f"plugins/{path.name}: spec_from_file_location 失败")
+            get_plugins = getattr(_exec_module_fresh(path), "get_plugins", None)
+            if get_plugins is None:
+                errors.append(f"plugins/{path.name}: 没有定义 get_plugins()")
                 continue
-            module = importlib.util.module_from_spec(spec)
-            sys.modules[module_name] = module
-            try:
-                spec.loader.exec_module(module)
-                get_plugins = getattr(module, "get_plugins", None)
-                if get_plugins is None:
-                    errors.append(f"plugins/{path.name}: 没有定义 get_plugins()")
-                    continue
-                produced = get_plugins()
-            finally:
-                sys.modules.pop(module_name, None)
+            produced = get_plugins()
         except Exception as exc:  # noqa: BLE001
             errors.append(f"plugins/{path.name}: 加载失败: {exc}")
             continue
@@ -364,6 +354,86 @@ def load_project_plugins(project: Project) -> tuple[list[Any], list[str]]:
     return plugins, errors
 
 
+def _exec_module_fresh(path: Path) -> Any:
+    """按文件路径加载一个模块，且**绕开 .pyc 字节码缓存**。
+
+    为什么不用 spec.loader.exec_module：CPython 的字节码缓存是按
+    (mtime, size) 判断新旧的。同一秒内把文件改成**长度相同**的另一份内容
+    （"v1" → "v2" 这种），两个 key 都没变，import 机制会直接用
+    __pycache__ 里的旧 .pyc——改了代码却完全不生效，还查不出原因。
+
+    Studio 的三处热加载（tools/registry.py、tools/generated|custom/、
+    plugins/）都对外承诺"改完下一次 Play 立刻生效"，所以统一走自己
+    compile+exec，缓存根本不参与。
+
+    模块名每次都换新的，同时绕开 sys.modules 缓存——两个项目里同名的
+    registry.py / plugins/foo.py 不会互相串。
+    """
+    module_name = f"_studio_fresh_{uuid.uuid4().hex}"
+    spec = importlib.util.spec_from_file_location(module_name, path)
+    if spec is None:
+        raise ImportError(f"spec_from_file_location 失败: {path}")
+    module = importlib.util.module_from_spec(spec)
+    source = path.read_text(encoding="utf-8")
+    sys.modules[module_name] = module
+    try:
+        exec(compile(source, str(path), "exec"), module.__dict__)
+    finally:
+        sys.modules.pop(module_name, None)
+    return module
+
+
+def _load_tool_dir(
+    project: Project, subdir: str
+) -> tuple[dict[str, Callable], list[str]]:
+    """自动发现 ``tools/<subdir>/*.py``，每个文件读它的 ``TOOL`` dict。
+
+    形状见 toolgen.py：``{"name","description","parameters","callback"}``，与预制件
+    清单一致。这里运行时只用到 name 和 callback，另外两个是给元 agent 看的。
+
+    为什么是自动发现而不是往 registry.py 里追加注册（roadmap 的原话）：机器去改
+    用户手写的文件是整个方案里最容易出事的一步——用户手动编辑过 registry.py 之
+    后，AST 手术也好标记块也好都会翻车。不改它就没有这个风险，"重新生成
+    generated/ 不覆盖 custom/" 也从"小心翼翼保证"变成结构性成立。顺带把一个现有
+    缺口补上：custom/ 以前根本不会被自动加载，得手动在 registry.py 里 import。
+
+    加载方式跟 load_project_plugins 完全同构：下划线开头的文件跳过，每次换新模块
+    名绕开 sys.modules，单个文件坏掉只丢它自己。
+    """
+    directory = project.path / "tools" / subdir
+    if not directory.is_dir():
+        return {}, []
+
+    tools: dict[str, Callable] = {}
+    errors: list[str] = []
+    for path in sorted(directory.glob("*.py")):
+        if path.name.startswith("_"):
+            continue
+        label = f"tools/{subdir}/{path.name}"
+        try:
+            tool = getattr(_exec_module_fresh(path), "TOOL", None)
+        except Exception as exc:  # noqa: BLE001
+            errors.append(f"{label}: 加载失败: {exc}")
+            continue
+
+        if not isinstance(tool, dict):
+            errors.append(
+                f"{label}: 需要一个 TOOL dict"
+                + ("" if tool is None else f"，实际是 {type(tool).__name__}")
+            )
+            continue
+        name = tool.get("name")
+        callback = tool.get("callback")
+        if not isinstance(name, str) or not name:
+            errors.append(f"{label}: TOOL['name'] 缺失或不是字符串")
+            continue
+        if not callable(callback):
+            errors.append(f"{label}: TOOL['callback'] 不是可调用对象")
+            continue
+        tools[name] = callback
+    return tools, errors
+
+
 def load_tool_registry(project: Project) -> tuple[dict[str, Callable], str | None]:
     """加载工具：先铺一层 senza_studio_components 的预制件工具（Phase 4），
     项目自己 <project>/tools/registry.py 里同名的工具覆盖预制件（项目定制
@@ -386,32 +456,37 @@ def load_tool_registry(project: Project) -> tuple[dict[str, Callable], str | Non
     """
     tools = _load_prefab_tools()
 
+    # 自动发现两个目录，generated 在前、custom 在后——同名时开发者手写的
+    # custom/ 覆盖元 agent 生成的 generated/，这正是"重新生成不覆盖手写"的
+    # 运行时保证。
+    discovery_errors: list[str] = []
+    for subdir in ("generated", "custom"):
+        found, errors = _load_tool_dir(project, subdir)
+        tools.update(found)
+        discovery_errors.extend(errors)
+
+    def _combine(extra: str | None) -> str | None:
+        parts = [*discovery_errors, *( [extra] if extra else [] )]
+        return "；".join(parts) if parts else None
+
     registry_path = project.path / "tools" / "registry.py"
     if not registry_path.exists():
-        return tools, None
+        return tools, _combine(None)
 
-    module_name = f"_studio_tool_registry_{uuid.uuid4().hex}"
     try:
-        spec = importlib.util.spec_from_file_location(module_name, registry_path)
-        if spec is None or spec.loader is None:
-            return tools, "无法加载 tools/registry.py: spec_from_file_location 失败"
-        module = importlib.util.module_from_spec(spec)
-        sys.modules[module_name] = module
-        try:
-            spec.loader.exec_module(module)
-            project_tools = module.get_tools()
-        finally:
-            sys.modules.pop(module_name, None)
+        project_tools = _exec_module_fresh(registry_path).get_tools()
         if not isinstance(project_tools, dict):
             return (
                 tools,
-                f"tools/registry.py 的 get_tools() 必须返回 dict，"
-                f"实际返回了 {type(project_tools).__name__}",
+                _combine(
+                    f"tools/registry.py 的 get_tools() 必须返回 dict，"
+                    f"实际返回了 {type(project_tools).__name__}"
+                ),
             )
         tools.update(project_tools)
-        return tools, None
+        return tools, _combine(None)
     except Exception as exc:  # noqa: BLE001
-        return tools, f"加载 tools/registry.py 失败: {exc}"
+        return tools, _combine(f"加载 tools/registry.py 失败: {exc}")
 
 
 def _call_tool(callback: Callable, args: dict, ctx: dict) -> Any:

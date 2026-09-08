@@ -19,6 +19,7 @@ from .spec import Spec
 from .system_prompt import build_system_prompt
 from .tools.spec_tools import make_spec_tools
 from .tools.doc_tools import make_doc_tools
+from .tools.gen_tools import make_gen_tools
 from .tools.prefab_tools import make_prefab_tools
 
 
@@ -102,6 +103,7 @@ class StudioAgent:
             .tools(make_spec_tools(self._spec))
             .tools(make_doc_tools(self._project))
             .tools(make_prefab_tools())
+            .tools(make_gen_tools(self._project))
             .auto_compact(True)
             .retry(3, 1000)
         )

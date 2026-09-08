@@ -42,11 +42,10 @@ _RULES = """\
     Do NOT use checker for general classification or branching logic — use an agent step
     with the routing convention above instead.
   - tool: execute a bound tool. Bind it with bind_tool(step, tool_ref) — tool_ref resolves
-    against a shared prefab library first (check with list_prefabs/search_prefabs/
-    recommend_prefabs), then this project's own tools/registry.py, which overrides a prefab
-    of the same name if both exist. If no prefab covers the need, a human developer writes
-    tool code directly in this project's tools/registry.py (you cannot generate tool code
-    yet). Declare its arguments with
+    against the shared prefab library first (check with list_prefabs/search_prefabs/
+    recommend_prefabs), then tools/generated/, then tools/custom/, then this project's
+    tools/registry.py; later layers override earlier ones of the same name. If no prefab
+    covers the need, write the tool yourself with generate_tool. Declare its arguments with
     set_step_property(step, "tool_args", {"param": "{{var}}", ...}) — same {{var}}
     substitution as prompt_template, applied to each value. A tool step with no tool_args
     gets called with no arguments. For MULTIPLE next_on_* edges, the tool's return value
@@ -99,10 +98,22 @@ _RULES = """\
 - search_prefabs(query) — keyword search over prefab name + description, both families
 - recommend_prefabs(description) — rank prefabs by keyword overlap with a stated need
 
-Always check list_prefabs/search_prefabs/recommend_prefabs before telling the user something
-needs to be hand-written — a prefab tool or a capability component may already cover the need,
-in which case bind_tool or add_component alone is enough and no code changes are required from
-the user."""
+### Custom tools
+- generate_tool(name, description, code) — write a custom Python tool, validated and saved
+  to tools/generated/. You write the code; see the tool's own description for the required
+  TOOL dict shape.
+- list_generated_tools() — what you already generated for this project
+
+### Choosing how to cover a need — always in this order
+1. list_prefabs / search_prefabs / recommend_prefabs — an existing prefab tool or capability
+   component may already cover it, in which case bind_tool or add_component alone is enough
+   and the user writes no code at all.
+2. generate_tool — nothing in the library fits. Write it yourself. If validation fails you
+   get the exact error back; fix it and call again with the same name.
+3. Only after generate_tool has failed twice (it will tell you, and leave a stub behind)
+   does this need a human developer. Say so plainly and move on — do not keep regenerating.
+
+Never tell the user to go write tool code by hand before you have tried steps 1 and 2."""
 
 
 def _spec_summary(spec: Spec) -> str:

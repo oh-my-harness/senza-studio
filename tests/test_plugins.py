@@ -279,3 +279,22 @@ def test_play_harness_gets_no_studio_plugins(tmp_path, monkeypatch):
     )
     executor({"step_id": "a", "context": {}, "emit": lambda *a, **k: None})
     assert built[0].installed == []
+
+
+def test_plugins_reload_after_a_same_size_edit(tmp_path):
+    """回归：同 test_registry_py_reloads_after_a_same_size_edit —— .pyc 缓存
+    按 (mtime, size) 判新旧，同一秒内等长度的修改会读到旧字节码。"""
+    project = _project(tmp_path)
+    body = (
+        "import senza\n"
+        "def get_plugins():\n"
+        "    return [senza.create_plugin('n{n}', tools=[])]\n"
+    )
+    _write_plugin(project, "p.py", body.format(n=1))
+    assert [p.name for p in load_project_plugins(project)[0]] == ["n1"]
+
+    # 只改一个字符，文件长度分毫不差——正是会踩中 .pyc 缓存的那种改动
+    _write_plugin(project, "p.py", body.format(n=2))
+    plugins, errors = load_project_plugins(project)
+    assert errors == []
+    assert [p.name for p in plugins] == ["n2"]

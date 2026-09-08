@@ -60,3 +60,20 @@ def test_prompt_has_tool_instructions(tmp_project):
     assert "add_step" in prompt
     assert "add_edge" in prompt
     assert "validate_spec" in prompt
+
+
+def test_prompt_no_longer_claims_it_cannot_generate_tools(tmp_project):
+    """用户实测踩过：元 agent 说'我不能帮你写工具代码'。拦着它的不是能力，
+    就是提示词里这一句话（Phase 5 之前是准确的，现在必须删掉）。"""
+    prompt = build_system_prompt(Spec(), tmp_project)
+    assert "cannot generate tool code" not in prompt
+
+
+def test_prompt_describes_the_escalation_ladder(tmp_project):
+    """预制件 → generate_tool → 人工。顺序写清楚，元 agent 才不会一上来就
+    让用户自己去写代码。"""
+    prompt = build_system_prompt(Spec(), tmp_project)
+    assert "generate_tool" in prompt
+    assert "list_generated_tools" in prompt
+    for layer in ("tools/generated/", "tools/custom/", "tools/registry.py"):
+        assert layer in prompt

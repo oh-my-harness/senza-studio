@@ -1299,3 +1299,122 @@ def test_checker_without_message_keeps_the_default_wording():
     )
     result = executor({"step_id": "gate", "context": {}})
     assert result["output"] == "等待人工审批…"
+
+
+# ── tools/generated 与 tools/custom 自动发现（Phase 5） ──────
+
+
+_TOOL_MODULE = '''
+def {fn}(args):
+    return "{ret}"
+
+TOOL = {{
+    "name": "{name}",
+    "description": "d",
+    "parameters": {{"type": "object", "properties": {{}}}},
+    "callback": {fn},
+}}
+'''
+
+
+def _write_tool(proj, subdir, name, ret):
+    path = proj.path / "tools" / subdir / f"{name}.py"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        _TOOL_MODULE.format(fn=name, name=name, ret=ret), encoding="utf-8"
+    )
+
+
+def test_generated_tools_are_auto_discovered(tmp_config):
+    """元 agent 生成的工具落盘即可用，不需要往 registry.py 里追加 import。"""
+    proj = Project.create(tmp_config, "自动发现")
+    _write_tool(proj, "generated", "gen_tool", "from-generated")
+    tools, error = load_tool_registry(proj)
+    assert error is None
+    assert tools["gen_tool"]({}) == "from-generated"
+
+
+def test_custom_tools_are_auto_discovered(tmp_config):
+    """验收标准第 2 条：开发者在 tools/custom/ 手写工具 → Play 能加载。
+    以前必须手动在 registry.py 里 import，这里补上。"""
+    proj = Project.create(tmp_config, "手写工具")
+    _write_tool(proj, "custom", "hand_tool", "from-custom")
+    tools, error = load_tool_registry(proj)
+    assert error is None
+    assert tools["hand_tool"]({}) == "from-custom"
+
+
+def test_custom_overrides_generated_for_the_same_name(tmp_config):
+    """验收标准第 3 条：重新生成 generated/ 不该盖掉手写的实现。两个目录分开
+    存 + custom 后加载，这条就是结构性成立的。"""
+    proj = Project.create(tmp_config, "同名覆盖")
+    _write_tool(proj, "generated", "shared", "from-generated")
+    _write_tool(proj, "custom", "shared", "from-custom")
+    tools, _ = load_tool_registry(proj)
+    assert tools["shared"]({}) == "from-custom"
+
+
+def test_registry_py_still_wins_over_both_directories(tmp_config):
+    """registry.py 是最高优先级的手动出口——自动发现不该夺走它的控制权。"""
+    proj = Project.create(tmp_config, "registry 优先")
+    _write_tool(proj, "generated", "shared", "from-generated")
+    _write_tool(proj, "custom", "shared", "from-custom")
+    (proj.path / "tools" / "registry.py").write_text(
+        'def get_tools():\n    return {"shared": lambda args: "from-registry"}\n',
+        encoding="utf-8",
+    )
+    tools, _ = load_tool_registry(proj)
+    assert tools["shared"]({}) == "from-registry"
+
+
+def test_a_broken_generated_tool_is_reported_without_losing_the_others(tmp_config):
+    proj = Project.create(tmp_config, "坏工具")
+    _write_tool(proj, "generated", "good_tool", "ok")
+    (proj.path / "tools" / "generated" / "bad_tool.py").write_text(
+        "raise RuntimeError('boom')\n", encoding="utf-8"
+    )
+    tools, error = load_tool_registry(proj)
+    assert "good_tool" in tools
+    assert error is not None and "bad_tool.py" in error
+
+
+def test_tool_module_without_TOOL_is_reported(tmp_config):
+    proj = Project.create(tmp_config, "没有 TOOL")
+    (proj.path / "tools" / "generated" / "nope.py").write_text(
+        "X = 1\n", encoding="utf-8"
+    )
+    tools, error = load_tool_registry(proj)
+    assert error is not None and "TOOL" in error
+
+
+def test_readme_in_tool_dirs_is_not_loaded_as_a_tool(tmp_config):
+    """新项目的 generated/ 和 custom/ 里各有一个 README.md，不该被当成工具。"""
+    proj = Project.create(tmp_config, "README 不算工具")
+    tools, error = load_tool_registry(proj)
+    assert error is None
+
+
+def test_generated_tools_reload_each_play(tmp_config):
+    """改完工具代码下一次 Play 立刻生效，不用重启后端。"""
+    proj = Project.create(tmp_config, "热更新")
+    _write_tool(proj, "generated", "t", "v1")
+    assert load_tool_registry(proj)[0]["t"]({}) == "v1"
+    _write_tool(proj, "generated", "t", "v2")
+    assert load_tool_registry(proj)[0]["t"]({}) == "v2"
+
+
+def test_registry_py_reloads_after_a_same_size_edit(tmp_config):
+    """回归：CPython 的 .pyc 缓存按 (mtime, size) 判新旧。同一秒内改成**长度
+    相同**的另一份内容，两个 key 都没变，import 会直接用旧字节码——代码改了
+    却完全不生效。这条以前是真的挂的（自 Phase 2 起），修法见
+    _exec_module_fresh。"""
+    proj = Project.create(tmp_config, "registry 热更新")
+    registry = proj.path / "tools" / "registry.py"
+    registry.write_text(
+        'def get_tools():\n    return {"t": lambda args: "v1"}\n', encoding="utf-8"
+    )
+    assert load_tool_registry(proj)[0]["t"]({}) == "v1"
+    registry.write_text(
+        'def get_tools():\n    return {"t": lambda args: "v2"}\n', encoding="utf-8"
+    )
+    assert load_tool_registry(proj)[0]["t"]({}) == "v2"
