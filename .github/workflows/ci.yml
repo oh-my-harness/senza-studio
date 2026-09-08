@@ -99,6 +99,7 @@ jobs:
             exit 1
           fi
           python -m pip install "${wheels[0]}"
+          python -m pip install -e "./senza-studio-components[dev]"
           python -m pip install -e ".[dev]"
 
       - name: Run Python tests
