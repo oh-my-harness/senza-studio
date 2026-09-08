@@ -189,6 +189,16 @@ async def run_play_streaming(
         except Exception:  # noqa: BLE001
             pass
 
+    # 插件加载失败是非致命的（插件是加法），但必须让用户看见：不报的话
+    # agent 只是莫名其妙少了一批工具，没有任何线索。
+    for message in play_session.plugin_errors:
+        try:
+            await websocket.send_json(
+                {"type": "warning", "message": f"插件未加载 — {message}"}
+            )
+        except Exception:  # noqa: BLE001
+            pass
+
     event_iter = play_session.events(timeout_ms=5000, max_consecutive_timeouts=999)
     play_session.start()
     loop = asyncio.get_event_loop()

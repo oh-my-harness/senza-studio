@@ -294,6 +294,76 @@ def _load_prefab_tools() -> dict[str, Callable]:
     return dict(prefab_registry.get_tools())
 
 
+def load_project_plugins(project: Project) -> tuple[list[Any], list[str]]:
+    """加载 <project>/plugins/ 下的项目插件集，返回 (plugins, 错误列表)。
+
+    约定跟 tools/registry.py 一致：每个 ``plugins/*.py`` 暴露一个
+    ``get_plugins()``，返回 senza Plugin 列表（``senza.create_plugin`` 造
+    的）。下划线开头的文件跳过，方便放公共代码。
+
+    **插件集是隔离的**（设计文档 §7）：这里只加载当前项目的插件，绝不注入
+    Studio 元 agent 自己那套（fs_tools/safety_defaults/injection_filter
+    等）。业务流程该跑什么工具由项目自己决定，不该因为它跑在 Studio 里就
+    莫名其妙多出一堆 Studio 的能力——那样导出之后行为还会变。
+
+    和 load_tool_registry 一样每次 Play 重新 import（不热加载、不跨项目缓
+    存）：换一个新模块名绕开 sys.modules，这样开发者改完插件下一次 Play
+    就生效，也不会让两个项目里同名的 plugins/foo.py 互相串。
+
+    单个插件加载失败不影响其它插件，也不让整个 Play 崩——插件是加法，缺一
+    个只是少一批工具。错误收集起来由调用方显示给用户，否则 agent 会莫名其
+    妙少了工具却没有任何提示。
+    """
+    plugins_dir = project.path / "plugins"
+    if not plugins_dir.is_dir():
+        return [], []
+
+    plugins: list[Any] = []
+    errors: list[str] = []
+    for path in sorted(plugins_dir.glob("*.py")):
+        if path.name.startswith("_"):
+            continue
+        module_name = f"_studio_project_plugin_{uuid.uuid4().hex}"
+        try:
+            spec = importlib.util.spec_from_file_location(module_name, path)
+            if spec is None or spec.loader is None:
+                errors.append(f"plugins/{path.name}: spec_from_file_location 失败")
+                continue
+            module = importlib.util.module_from_spec(spec)
+            sys.modules[module_name] = module
+            try:
+                spec.loader.exec_module(module)
+                get_plugins = getattr(module, "get_plugins", None)
+                if get_plugins is None:
+                    errors.append(f"plugins/{path.name}: 没有定义 get_plugins()")
+                    continue
+                produced = get_plugins()
+            finally:
+                sys.modules.pop(module_name, None)
+        except Exception as exc:  # noqa: BLE001
+            errors.append(f"plugins/{path.name}: 加载失败: {exc}")
+            continue
+
+        if not isinstance(produced, (list, tuple)):
+            errors.append(
+                f"plugins/{path.name}: get_plugins() 必须返回列表，"
+                f"实际返回了 {type(produced).__name__}"
+            )
+            continue
+        for item in produced:
+            if isinstance(item, senza.Plugin):
+                plugins.append(item)
+            else:
+                # 明确报错而不是静默丢掉：最常见的写法错误就是返回了
+                # create_tool 造的 Tool（或一个裸函数），而不是 Plugin。
+                errors.append(
+                    f"plugins/{path.name}: get_plugins() 返回了 "
+                    f"{type(item).__name__}，需要的是 senza.create_plugin() "
+                    f"造出来的 Plugin"
+                )
+    return plugins, errors
+
+
 def load_tool_registry(project: Project) -> tuple[dict[str, Callable], str | None]:
     """加载工具：先铺一层 senza_studio_components 的预制件工具（Phase 4），
     项目自己 <project>/tools/registry.py 里同名的工具覆盖预制件（项目定制
@@ -382,6 +452,7 @@ def make_executor(
     engine_ref: dict[str, Any],
     tools_by_name: dict[str, Callable] | None = None,
     tools_load_error: str | None = None,
+    plugins: list[Any] | None = None,
 ) -> Callable[[dict], dict]:
     """执行回调：支持 type: agent、checker、tool。
 
@@ -494,7 +565,13 @@ def make_executor(
         if len(routes) > 1:
             prompt = _append_routing_instruction(prompt, routes)
 
-        harness = senza.HarnessBuilder(model).provider("*", provider).env(env).build()
+        # 项目插件集（设计文档 §7 的"插件集隔离"）：只装当前项目 plugins/
+        # 里的插件，不注入 Studio 元 agent 那一套。装的是项目自己的东西，
+        # 所以导出之后 agent step 的行为跟在 Studio 里跑是一致的。
+        builder = senza.HarnessBuilder(model).provider("*", provider).env(env)
+        for plugin in plugins or []:
+            builder = builder.plugin(plugin)
+        harness = builder.build()
         try:
             raw_output, tool_calls_count = _run_agent_step(harness, prompt, ctx["emit"])
         except Exception as exc:  # noqa: BLE001
@@ -555,6 +632,8 @@ class PlaySession:
         self._engine: Any = None
         # play() 里填：这次运行真正执行的 spec（组件已展开）
         self.runtime_spec: dict | None = None
+        # play() 里填：plugins/ 里加载失败的插件（非致命，展示给用户）
+        self.plugin_errors: list[str] = []
         self._engine_ref: dict[str, Any] = {}
         self._thread: threading.Thread | None = None
         self.run_error: BaseException | None = None
@@ -600,6 +679,9 @@ class PlaySession:
         # 每次 Play 都重新读一遍项目的 tools/registry.py（见 load_tool_registry
         # 注释）——不是只加载一次缓存住，开发者手改工具代码后不用重启后端。
         tools_by_name, tools_load_error = load_tool_registry(self._project)
+        # 插件加载错误不阻断 Play（插件是加法，缺一个只是少一批工具），但
+        # 要让用户看见——不然 agent 莫名其妙少了工具却没有任何提示。
+        plugins, self.plugin_errors = load_project_plugins(self._project)
 
         executor = make_executor(
             stage_by_name,
@@ -610,6 +692,7 @@ class PlaySession:
             self._engine_ref,
             tools_by_name,
             tools_load_error,
+            plugins,
         )
         judge = make_judge(routes_by_name)
 

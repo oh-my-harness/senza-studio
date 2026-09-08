@@ -184,14 +184,14 @@ Phase 7 (Export 打包)
 - spec 引用能力组件 → 画布显示 group → 展开看内部 step → Play 能运行展开后的 step
 - Scene 视图折叠/展开组件
 
-**状态**：进行中，按切片推进（同 Phase 3 的做法：每片单独验证再进下一片）
+**状态**：已实现（四个切片全部落地，每片单独验证）
 
 | 切片 | 内容 | 状态 |
 |---|---|---|
 | 1. 工具预制件库 | senza-studio-components 包（db_query/lookup_topic/send_email）+ list/search/recommend 返回真实内容 + play.py 合并预制件与项目工具 | 已实现 |
 | 2. 能力组件 + 预处理器 | approval_flow / approval_with_notice 组件定义、preprocess.py 组件展开（参数、端口、`_component` 元数据）、add_component 工具、组件感知的 validate_spec | 已实现 |
 | 3. 画布组件折叠/展开 | 读切片 2 产出的 `_component` 元数据画 ReactFlow group 容器；GET /expanded_spec 让编辑态也能展开 | 已实现 |
-| 4. 项目插件集加载 | `<project>/plugins/` | 待实现 |
+| 4. 项目插件集加载 | `<project>/plugins/*.py` 暴露 `get_plugins()`，Play 时装进 agent step 的 harness；与 Studio 元 agent 的插件集隔离 | 已实现 |
 
 切片 2 未竟事项：元 agent 在**真实对话**里自主选用 add_component 这一条
 验收还没跑通——三次尝试都挡在 LLM 供应商 upstream 故障上（工具注册、schema、

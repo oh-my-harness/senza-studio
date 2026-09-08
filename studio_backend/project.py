@@ -46,6 +46,44 @@ def get_tools():
 '''
 
 
+# plugins/ 的说明文件——目录是空的话没人知道该往里放什么、按什么约定写。
+# 用 .md 而不是 .py 示例：plugins/*.py 会被真的加载，放一个示例文件进去
+# 等于给每个新项目塞一个空插件。
+_PLUGINS_README = """# 项目插件集
+
+放在这里的 `*.py` 会在 Play 时加载，给 agent step 的 harness 添加工具/hook。
+
+约定：每个文件暴露一个 `get_plugins()`，返回 senza Plugin 列表。
+
+```python
+import senza
+
+def _now(args):
+    from datetime import datetime
+    return datetime.now().isoformat()
+
+def get_plugins():
+    clock = senza.create_tool(
+        name="now",
+        description="返回当前时间（ISO 格式）",
+        parameters={"type": "object", "properties": {}},
+        callback=lambda args, ctx: _now(args),
+    )
+    return [senza.create_plugin("clock", tools=[clock])]
+```
+
+说明：
+
+- 下划线开头的文件会被跳过，可以放公共代码。
+- 每次 Play 重新加载，改完不用重启 Studio 后端。
+- 单个文件出错不影响其它插件，错误会显示在日志面板里。
+- 这里的插件**只**作用于本项目的 Play 和导出，跟 Studio 元 agent 自己的
+  插件完全隔离——导出之后行为一致。
+- 只想加几个工具而不需要 hook 的话，写 `tools/registry.py` 更简单；插件
+  适合需要打包一组工具 + hook 的场景。
+"""
+
+
 class Project:
     """单个 Studio 项目。"""
 
@@ -70,6 +108,9 @@ class Project:
         (path / "tools" / "custom").mkdir(parents=True, exist_ok=True)
         (path / "tools" / "registry.py").write_text(_TOOL_REGISTRY_STARTER, encoding="utf-8")
         (path / "plugins").mkdir(parents=True, exist_ok=True)
+        (path / "plugins" / "README.md").write_text(
+            _PLUGINS_README, encoding="utf-8"
+        )
         (path / "exports").mkdir(parents=True, exist_ok=True)
 
         meta = {

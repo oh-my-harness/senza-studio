@@ -153,6 +153,10 @@ export default function ChatPanel({ projectId }: { projectId: string }) {
         if (event.source !== "play") {
           setStatus("spec_ready");
         }
+      } else if (event.type === "warning") {
+        // 非致命提示（比如某个项目插件没加载成功）——记进日志面板即可，
+        // 不改 status，Play 照常继续。
+        addLog("error", event.message || "警告");
       } else if (event.type === "runtime_spec") {
         // Play 开始时后端下发的展开后 spec——审批按钮、ui.display、DAG
         // 高亮都按这份查，因为能力组件生成的 step 名不在编辑态 spec 里。
