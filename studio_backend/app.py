@@ -2,16 +2,23 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import sys
 from contextlib import asynccontextmanager
 
 import httpx
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, File, UploadFile, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
 from .config import StudioConfig
+from .docingest import ingest
+from .docs import (
+    ingest_cache_path,
+    resolve_doc_path,
+    safe_document_name,
+)
 from .play import PlaySession, get_entry_inputs
 from .preprocess import PreprocessError, preprocess_spec
 from .project import Project
@@ -236,6 +243,77 @@ def create_app(config: StudioConfig | None = None) -> FastAPI:
     async def get_spec(project_id: str):
         state = _get_or_load_project(cfg, project_id)
         return state["spec"].get_current_spec()
+
+    # 25MB：够放常见的表格/PDF，又不至于让一份误传的视频把内存和磁盘吃满。
+    MAX_UPLOAD_BYTES = 25 * 1024 * 1024
+
+    @app.post("/api/projects/{project_id}/documents")
+    async def upload_document(project_id: str, file: UploadFile = File(...)):
+        """上传文档：存原文 → 立刻解析 → 缓存摘要 → 重建 harness。
+
+        为什么上传完要 rebuild：system prompt 是在 _build_harness() 时定死的
+        （agent.py），文档清单属于它的动态段。不重建的话新上传的文件要等到下次
+        建 harness 才进得了模型视野，用户传完接着问"照这个建流程"会得到一句
+        "我看不到任何文档"。跟 update_spec 改完 spec 之后 rebuild 是同一个套路。
+        """
+        state = _get_or_load_project(cfg, project_id)
+        project = state["project"]
+
+        name = safe_document_name(file.filename or "")
+        path = resolve_doc_path(project, name or "")
+        if name is None or path is None:
+            return JSONResponse(
+                status_code=400,
+                content={"detail": f"文件名不合法：{file.filename!r}"},
+            )
+
+        # 边读边计数，不先整个读进内存——25MB 的限制要在读的过程中就生效，
+        # 否则一个 2GB 的文件在检查之前就已经把内存吃掉了。
+        size = 0
+        chunks: list[bytes] = []
+        while True:
+            chunk = await file.read(1024 * 1024)
+            if not chunk:
+                break
+            size += len(chunk)
+            if size > MAX_UPLOAD_BYTES:
+                return JSONResponse(
+                    status_code=413,
+                    content={
+                        "detail": f"文件超过 {MAX_UPLOAD_BYTES // (1024 * 1024)}MB 上限"
+                    },
+                )
+            chunks.append(chunk)
+        if size == 0:
+            return JSONResponse(status_code=400, content={"detail": "文件是空的"})
+
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(b"".join(chunks))
+
+        result = ingest(path)
+        cache = ingest_cache_path(project, name)
+        cache.parent.mkdir(parents=True, exist_ok=True)
+        cache.write_text(
+            json.dumps(result, ensure_ascii=False, default=str), encoding="utf-8"
+        )
+
+        agent = state.get("agent")
+        if agent is not None and agent._session_id is not None:
+            try:
+                agent.rebuild()
+            except Exception as exc:  # noqa: BLE001
+                # 文件已经存好了，重建失败不该让上传显示为失败——下次建
+                # harness 时还会再读一遍。
+                print(f"agent rebuild after upload failed: {exc}", file=sys.stderr)
+
+        return {
+            "name": name,
+            "kind": result.get("kind"),
+            "summary": result.get("summary"),
+            # 解析失败也返回 200：文件确实存下来了，失败的是解析。前端据此
+            # 显示一条说明，而不是把上传本身报成错误。
+            "ok": result.get("kind") != "error",
+        }
 
     @app.get("/api/projects/{project_id}/expanded_spec")
     async def get_expanded_spec(project_id: str):

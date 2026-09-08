@@ -12,6 +12,13 @@ dependencies = [
     "uvicorn[standard]",
     "pyyaml",
     "websockets",
+    # 文档理解（Phase 6）。刻意不上 pandas：只需要"把行列读成 JSON"，
+    # pandas+numpy（~50MB）的 dataframe 能力完全用不上。CSV 走标准库 csv，
+    # JSON/YAML 走已有的 json/pyyaml。
+    "openpyxl",
+    "pypdf",
+    # FastAPI 收 UploadFile 必需
+    "python-multipart",
 ]
 
 [project.optional-dependencies]

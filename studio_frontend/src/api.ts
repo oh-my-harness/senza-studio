@@ -45,6 +45,24 @@ export const api = {
     fetchJson<{ fields: string[] }>(`${BASE}/projects/${id}/entry_inputs`),
   deleteProject: (id: string) =>
     fetchJson<{ status: string }>(`${BASE}/projects/${id}`, { method: "DELETE" }),
+  // 上传文档：multipart，不走 fetchJson（它写死了 JSON body）。不设
+  // Content-Type，让浏览器自己带上 multipart 的 boundary。
+  uploadDocument: async (id: string, file: File) => {
+    const form = new FormData();
+    form.append("file", file);
+    const r = await fetch(`${BASE}/projects/${id}/documents`, {
+      method: "POST",
+      body: form,
+    });
+    const body = await r.json().catch(() => ({}));
+    if (!r.ok) throw new Error(body.detail || `${r.status}`);
+    return body as {
+      name: string;
+      kind: string;
+      summary: string;
+      ok: boolean;
+    };
+  },
   getSettings: () =>
     fetchJson<{
       schema: SettingsField[];

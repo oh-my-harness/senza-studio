@@ -10,6 +10,8 @@ const MAX_TEXTAREA_HEIGHT = 160; // px，约 6~7 行，超过就交给滚动条
 
 export default function ChatPanel({ projectId }: { projectId: string }) {
   const [input, setInput] = useState("");
+  const [uploading, setUploading] = useState(false);
+  const fileInputRef = useRef<HTMLInputElement>(null);
   const [streaming, setStreaming] = useState(false);
   const [sessions, setSessions] = useState<string[]>([]);
   const [activeSession, setActiveSession] = useState<string | null>(null);
@@ -216,6 +218,28 @@ export default function ChatPanel({ projectId }: { projectId: string }) {
   const waitingForResponse =
     streaming && (!lastMessage || lastMessage.role !== "assistant" || !lastMessage.content);
 
+  // 上传即解析：后端存原文 → 立刻 ingest → 摘要进 system prompt。这里把摘要
+  // 也作为一条消息显示出来，用户能立刻确认"它读到的是不是我想给的东西"。
+  const upload = async (file: File) => {
+    setUploading(true);
+    try {
+      const result = await api.uploadDocument(projectId, file);
+      addMessage({
+        role: "tool",
+        toolName: result.ok ? "上传文档" : "上传文档（解析失败）",
+        content: `${result.name}\n${result.summary}`,
+        timestamp: Date.now(),
+      });
+      if (!result.ok) addLog("error", `${result.name}: ${result.summary}`);
+    } catch (e) {
+      addLog("error", `上传失败: ${e instanceof Error ? e.message : String(e)}`);
+    } finally {
+      setUploading(false);
+      // 清空 value，否则连续传同一个文件不会触发 change
+      if (fileInputRef.current) fileInputRef.current.value = "";
+    }
+  };
+
   const send = () => {
     if (!input.trim() || !ws || streaming) return;
     addMessage({ role: "user", content: input, timestamp: Date.now() });
@@ -271,10 +295,28 @@ export default function ChatPanel({ projectId }: { projectId: string }) {
             className={`rounded-lg p-3 text-sm ${
               m.role === "user"
                 ? "bg-blue-50 text-blue-900 ml-8"
-                : "bg-gray-50 text-gray-800 mr-8"
+                : m.role === "tool"
+                  ? "bg-amber-50 text-amber-900 border border-amber-200"
+                  : "bg-gray-50 text-gray-800 mr-8"
             }`}
           >
-            {m.role === "assistant" ? <Markdown text={m.content} /> : m.content}
+            {/* tool 气泡是系统提示（比如"上传文档"的解析摘要），不是助手说的话
+                ——不区分样式的话它跟助手回复长得一模一样，用户会以为是模型
+                在讲话。另外这类内容自带换行，要 pre-wrap 才不会挤成一行。 */}
+            {m.role === "tool" ? (
+              <>
+                {m.toolName && (
+                  <div className="text-xs font-medium text-amber-700 mb-1">
+                    {m.toolName}
+                  </div>
+                )}
+                <div className="whitespace-pre-wrap break-words">{m.content}</div>
+              </>
+            ) : m.role === "assistant" ? (
+              <Markdown text={m.content} />
+            ) : (
+              m.content
+            )}
           </div>
         ))}
         {waitingForResponse && (
@@ -316,6 +358,24 @@ export default function ChatPanel({ projectId }: { projectId: string }) {
             className="flex-1 resize-none overflow-y-auto rounded-lg border border-gray-300 px-3 py-2 text-sm focus:outline-none focus:border-blue-400"
             disabled={streaming}
           />
+          <input
+            ref={fileInputRef}
+            type="file"
+            className="hidden"
+            accept=".xlsx,.xlsm,.csv,.pdf,.md,.txt,.json,.yaml,.yml"
+            onChange={(e) => {
+              const file = e.target.files?.[0];
+              if (file) upload(file);
+            }}
+          />
+          <button
+            onClick={() => fileInputRef.current?.click()}
+            disabled={streaming || uploading}
+            title="上传文档（Excel / CSV / PDF / 文本 / JSON / YAML）"
+            className="rounded-lg border border-gray-300 px-3 py-2 text-sm text-gray-600 hover:bg-gray-100 disabled:opacity-50"
+          >
+            {uploading ? "解析中…" : "📎"}
+          </button>
           <button
             onClick={send}
             disabled={streaming || !input.trim()}

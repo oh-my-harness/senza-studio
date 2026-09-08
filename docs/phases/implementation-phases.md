@@ -250,7 +250,25 @@ custom/ < registry.py。
 - 用户上传流程图图片 → vision 模型描述 → 元 agent 据此构建 DAG
 - 元 agent 通过 read_document 按需读取文档内容
 
-**状态**：待实现
+**状态**：已实现（不含图片）
+
+**图片（vision）本阶段未做**，原因是硬的：当前钉住的 SDK 里
+`AgentHarness.prompt(self, text)` 只收文本，runtime 的多模态支持（`1e4b37b`，
+8/29）比钉住的 rev（`1997636`，8/28）晚一天，不在这个构建里。要做得先升 runtime
+pin + 重建 wheel + 重跑 compat，是独立的一件事。上传图片会得到一句明确的"暂不
+支持，等 SDK 升到支持多模态的版本"，而不是一个看不懂的解析错误。
+
+依赖没按 roadmap 用 pandas，改用 openpyxl + 标准库 csv + pypdf：只需要"把行列读成
+JSON"，pandas+numpy（~50MB）的 dataframe 能力完全用不上。
+
+上传即解析：`POST /api/projects/{id}/documents` 存原文到 `.studio/docs/`、立刻
+ingest、摘要缓存到 `.studio/ingest/`、并 `agent.rebuild()`（system prompt 的文档
+清单是动态段，不重建新文档进不了模型视野）。文档清单带一行摘要，元 agent 不必先
+盲调一次工具才知道文件里有什么。
+
+未跑通的验收：**元 agent 拿着文档构建 spec** ——glm 中转连续多日 `upstream error`
+/空响应，同 Phase 4 的 add_component、Phase 5 的 generate_tool。解析、上传、缓存、
+system prompt 注入、read_document 均已单独验证（含真实 xlsx/csv/pdf 和浏览器实测）。
 
 ---
 
