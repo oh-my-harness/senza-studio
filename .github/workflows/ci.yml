@@ -54,6 +54,18 @@ jobs:
       - name: Set up Rust
         uses: dtolnay/rust-toolchain@stable
 
+      - name: Configure private cargo fetch
+        env:
+          GH_PRIVATE_TOKEN: ${{ secrets.PRIVATE_REPO_TOKEN }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ -z "$GH_PRIVATE_TOKEN" ]]; then
+            echo "::error title=Missing PRIVATE_REPO_TOKEN::Senza depends on the private llm-harness-runtime repo; add a PAT with read access as the PRIVATE_REPO_TOKEN secret."
+            exit 1
+          fi
+          git config --global url."https://x-access-token:${GH_PRIVATE_TOKEN}@github.com/".insteadOf "https://github.com/"
+
       - name: Cache Cargo build artifacts
         uses: actions/cache@v4
         with:
