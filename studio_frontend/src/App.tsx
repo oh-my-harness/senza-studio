@@ -203,7 +203,7 @@ export default function App() {
           </>
         )}
         <Panel id="canvas" defaultSize={playing ? "35%" : "50%"} minSize="20%">
-          <Canvas />
+          <Canvas projectId={projectId} />
         </Panel>
         <Separator className="w-1 bg-gray-200 hover:bg-blue-400 transition-colors cursor-col-resize" />
         <Panel id="inspector" defaultSize="20%" minSize="15%">

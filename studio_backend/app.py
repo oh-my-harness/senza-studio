@@ -13,6 +13,7 @@ from pydantic import BaseModel
 
 from .config import StudioConfig
 from .play import PlaySession, get_entry_inputs
+from .preprocess import PreprocessError, preprocess_spec
 from .project import Project
 from .sdk_pin import check_sdk_pin
 from .session import read_session_history
@@ -235,6 +236,26 @@ def create_app(config: StudioConfig | None = None) -> FastAPI:
     async def get_spec(project_id: str):
         state = _get_or_load_project(cfg, project_id)
         return state["spec"].get_current_spec()
+
+    @app.get("/api/projects/{project_id}/expanded_spec")
+    async def get_expanded_spec(project_id: str):
+        """展开能力组件之后的 spec——画布画组件 group 用。
+
+        画布不能只靠 Play 时下发的 runtime_spec：编辑态也要能展开组件看内部
+        step（这正是 Phase 4 的验收标准之一），而编辑的时候根本没在跑。
+
+        展开失败不返回 4xx：spec 写坏是编辑过程中的常态（组件名还没填完、
+        参数写了一半），画布该退回去画未展开的引用形态并把原因显示出来，
+        而不是整块报错。所以错误放在 error 字段里，spec 给 null。
+        """
+        state = _get_or_load_project(cfg, project_id)
+        try:
+            return {
+                "spec": preprocess_spec(state["spec"].get_current_spec()),
+                "error": None,
+            }
+        except PreprocessError as exc:
+            return {"spec": None, "error": str(exc)}
 
     @app.put("/api/projects/{project_id}/spec")
     async def update_spec(project_id: str, req: UpdateSpecReq):

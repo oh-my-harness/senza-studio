@@ -436,3 +436,52 @@ def test_play_runtime_spec_is_sent_for_plain_specs_too(app_client):
         event = ws.receive_json()
         assert event["type"] == "runtime_spec"
         assert {s["name"] for s in event["spec"]["stages"]} == {"gate", "ok"}
+
+
+# ── 画布组件展开 ─────────────────────────────────────────
+
+
+def test_expanded_spec_endpoint_expands_components(app_client):
+    """画布要在编辑态也能展开组件看内部 step（Phase 4 验收标准），而编辑的
+    时候没在跑，拿不到 Play 下发的 runtime_spec。"""
+    pid = app_client.post("/api/projects", json={"name": "展开"}).json()["id"]
+    app_client.put(
+        f"/api/projects/{pid}/spec",
+        json={"spec": {"stages": [
+            {"name": "gate", "component": "approval_flow",
+             "next_on_approve": "ok", "next_on_reject": "ok"},
+            {"name": "ok", "type": "terminal"},
+        ]}},
+    )
+    body = app_client.get(f"/api/projects/{pid}/expanded_spec").json()
+    assert body["error"] is None
+    names = [s["name"] for s in body["spec"]["stages"]]
+    assert names == ["gate_review", "ok"]
+    assert body["spec"]["stages"][0]["_component_instance"] == "gate"
+
+
+def test_expanded_spec_reports_errors_without_failing(app_client):
+    """spec 写坏是编辑过程中的常态——画布该退回去画未展开的引用形态并显示
+    原因，而不是整块报错，所以这里不返回 4xx。"""
+    pid = app_client.post("/api/projects", json={"name": "坏组件"}).json()["id"]
+    app_client.put(
+        f"/api/projects/{pid}/spec",
+        json={"spec": {"stages": [
+            {"name": "gate", "component": "nope", "next_on_approve": "ok"},
+            {"name": "ok", "type": "terminal"},
+        ]}},
+    )
+    r = app_client.get(f"/api/projects/{pid}/expanded_spec")
+    assert r.status_code == 200
+    assert r.json()["spec"] is None
+    assert "nope" in r.json()["error"]
+
+
+def test_expanded_spec_passes_through_specs_without_components(app_client):
+    pid = app_client.post("/api/projects", json={"name": "普通"}).json()["id"]
+    app_client.put(
+        f"/api/projects/{pid}/spec",
+        json={"spec": {"stages": [{"name": "a", "type": "terminal"}]}},
+    )
+    body = app_client.get(f"/api/projects/{pid}/expanded_spec").json()
+    assert body["spec"]["stages"] == [{"name": "a", "type": "terminal"}]

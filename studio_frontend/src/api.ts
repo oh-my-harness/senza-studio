@@ -19,6 +19,12 @@ export const api = {
     }),
   getProject: (id: string) => fetchJson<ProjectMeta>(`${BASE}/projects/${id}`),
   getSpec: (id: string) => fetchJson<Spec>(`${BASE}/projects/${id}/spec`),
+  // 展开能力组件之后的 spec——画布画 group 用。展开失败不是 HTTP 错误，
+  // 原因在 error 字段里（编辑到一半的 spec 展不开是常态）。
+  getExpandedSpec: (id: string) =>
+    fetchJson<{ spec: Spec | null; error: string | null }>(
+      `${BASE}/projects/${id}/expanded_spec`,
+    ),
   getMessages: (id: string) =>
     fetchJson<ChatMessage[]>(`${BASE}/projects/${id}/messages`),
   updateSpec: (id: string, spec: Spec) =>

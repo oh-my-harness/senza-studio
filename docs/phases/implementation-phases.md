@@ -190,7 +190,7 @@ Phase 7 (Export 打包)
 |---|---|---|
 | 1. 工具预制件库 | senza-studio-components 包（db_query/lookup_topic/send_email）+ list/search/recommend 返回真实内容 + play.py 合并预制件与项目工具 | 已实现 |
 | 2. 能力组件 + 预处理器 | approval_flow / approval_with_notice 组件定义、preprocess.py 组件展开（参数、端口、`_component` 元数据）、add_component 工具、组件感知的 validate_spec | 已实现 |
-| 3. 画布组件折叠/展开 | 读切片 2 产出的 `_component` 元数据画 ReactFlow group 容器 | 待实现 |
+| 3. 画布组件折叠/展开 | 读切片 2 产出的 `_component` 元数据画 ReactFlow group 容器；GET /expanded_spec 让编辑态也能展开 | 已实现 |
 | 4. 项目插件集加载 | `<project>/plugins/` | 待实现 |
 
 切片 2 未竟事项：元 agent 在**真实对话**里自主选用 add_component 这一条
