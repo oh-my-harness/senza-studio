@@ -28,6 +28,7 @@ from typing import Any, Callable
 import senza
 
 from .config import StudioConfig
+from .preprocess import preprocess_spec
 from .project import Project
 from .spec import Spec
 
@@ -122,8 +123,12 @@ def get_entry_inputs(spec_dict: dict) -> list[str]:
     用（巧合），也可能像 ui.fields=[route, reasoning] 这种纯输出展示字段
     完全对不上输入，把它当输入需求会问出不存在的字段。prompt_template 里
     实际出现的 {{var}} 才是唯一可靠的输入来源。
+
+    收编辑态 spec，内部自己先 preprocess——spec 第一个 stage 可能是个能力
+    组件引用，它本身没有 prompt_template，展开后的入口 step 才有。调用方
+    （比如 /api/projects/{id}/entry-inputs）因此不用关心组件语义。
     """
-    stages = spec_dict.get("stages", [])
+    stages = preprocess_spec(spec_dict).get("stages", [])
     if not stages:
         return []
     template = stages[0].get("prompt_template", "")
@@ -418,8 +423,12 @@ def make_executor(
             # 决定。没有就让 judge pause；有就直接按决定路由。
             decision = ctx["context"].get(decision_context_key(step_id))
             if decision is None:
+                # stage.message 是 spec 作者给这道审批门写的说明（能力组件的
+                # title 参数也落在这里），有就显示它——审批人看到"退货审批：
+                # 金额超过 500 需人工确认"比看到一句通用的"等待人工审批"
+                # 有用得多。
                 return {
-                    "output": "等待人工审批…",
+                    "output": stage.get("message") or "等待人工审批…",
                     "structured": {"route_key": PENDING_APPROVAL},
                 }
             return {
@@ -544,6 +553,8 @@ class PlaySession:
         self._project = project
         self._spec = spec
         self._engine: Any = None
+        # play() 里填：这次运行真正执行的 spec（组件已展开）
+        self.runtime_spec: dict | None = None
         self._engine_ref: dict[str, Any] = {}
         self._thread: threading.Thread | None = None
         self.run_error: BaseException | None = None
@@ -575,7 +586,14 @@ class PlaySession:
         through multiple steps if flow is fast enough"）。这次 pause 之后
         的 Step/Resume 走的是已有的 step()/resume_run()，不需要额外改动。
         """
-        spec_dict = self._spec.get_current_spec()
+        # 编辑态 spec → 运行态 spec：把 component 引用展开成真正的 step
+        # （见 preprocess.py）。放在最前面，后面所有环节——路由表、executor、
+        # WorkflowEngine——看到的都是展开后的 step，不需要各自懂组件语义。
+        spec_dict = preprocess_spec(self._spec.get_current_spec())
+        # 前端要按"实际在跑的 step"来查路由和 ui 配置——能力组件展开后的
+        # step 名（gate_review）在编辑态 spec 里根本不存在，前端拿编辑态
+        # spec 查会一无所获（审批按钮渲染不出来，Play 直接卡死）。
+        self.runtime_spec = spec_dict
         stage_by_name, routes_by_name = build_route_maps(spec_dict)
         provider = _create_provider(self._config)
         env = senza.create_os_env(str(self._project.path))

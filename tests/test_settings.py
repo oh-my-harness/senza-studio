@@ -7,6 +7,9 @@ import pytest
 
 from studio_backend.config import StudioConfig
 from studio_backend.settings import (
+    env_override_values,
+    env_overridden_keys,
+    snapshot_env_overrides,
     SECRET_PLACEHOLDER,
     apply_to_environ,
     load_settings,
@@ -121,23 +124,55 @@ def test_masked_values_leaves_empty_secret_empty():
 
 def test_apply_to_environ_sets_values(monkeypatch):
     monkeypatch.delenv("SENZA_SMTP_HOST", raising=False)
+    snapshot_env_overrides()
     apply_to_environ({"SENZA_SMTP_HOST": "smtp.example.com"})
     assert os.environ["SENZA_SMTP_HOST"] == "smtp.example.com"
 
 
-def test_apply_to_environ_does_not_override_explicit_env_by_default(monkeypatch):
+def test_env_var_always_beats_settings_file(monkeypatch):
     """显式 export 的环境变量优先——CI/脚本里的配置不该被 GUI 写的文件
     悄悄覆盖。"""
     monkeypatch.setenv("SENZA_SMTP_HOST", "from-shell")
+    snapshot_env_overrides()
     apply_to_environ({"SENZA_SMTP_HOST": "from-settings-file"})
     assert os.environ["SENZA_SMTP_HOST"] == "from-shell"
 
 
-def test_apply_to_environ_override_wins_after_explicit_save(monkeypatch):
-    """用户刚在设置面板点了保存，就该立刻生效。"""
+def test_env_var_still_wins_after_an_explicit_save(monkeypatch):
+    """保存也不能盖过环境变量——环境变量是唯一的优先级最高来源，不因为
+    "用户刚点了保存"就破例。面板会把这类字段置灰并显示环境变量的值，
+    所以用户不会以为自己改生效了（见 /api/settings 的 env_overrides）。"""
     monkeypatch.setenv("SENZA_SMTP_HOST", "from-shell")
-    apply_to_environ({"SENZA_SMTP_HOST": "just-saved"}, override=True)
-    assert os.environ["SENZA_SMTP_HOST"] == "just-saved"
+    snapshot_env_overrides()
+    apply_to_environ({"SENZA_SMTP_HOST": "just-saved"})
+    assert os.environ["SENZA_SMTP_HOST"] == "from-shell"
+
+
+def test_saving_twice_still_takes_effect_when_no_env_var(monkeypatch):
+    """回归：判断"是不是环境变量"必须用启动快照，不能用"当前 environ 里
+    有没有"。用后者的话，第一次保存把值写进 environ 之后，第二次保存就会
+    被自己上一次的注入挡住，用户改了永远不生效。"""
+    monkeypatch.delenv("SENZA_SMTP_HOST", raising=False)
+    snapshot_env_overrides()
+    apply_to_environ({"SENZA_SMTP_HOST": "first"})
+    apply_to_environ({"SENZA_SMTP_HOST": "second"})
+    assert os.environ["SENZA_SMTP_HOST"] == "second"
+
+
+def test_env_overridden_keys_reports_what_the_panel_must_grey_out(monkeypatch):
+    monkeypatch.setenv("SENZA_STUDIO_MODEL", "from-shell-model")
+    monkeypatch.delenv("SENZA_STUDIO_API_BASE", raising=False)
+    snapshot_env_overrides()
+    assert "SENZA_STUDIO_MODEL" in env_overridden_keys()
+    assert "SENZA_STUDIO_API_BASE" not in env_overridden_keys()
+    assert env_override_values()["SENZA_STUDIO_MODEL"] == "from-shell-model"
+
+
+def test_env_override_values_masks_secrets(monkeypatch):
+    """环境变量里的 API key 也不能明文回给前端。"""
+    monkeypatch.setenv("SENZA_STUDIO_API_KEY", "sk-real-secret")
+    snapshot_env_overrides()
+    assert env_override_values()["SENZA_STUDIO_API_KEY"] == SECRET_PLACEHOLDER
 
 
 def test_apply_to_environ_skips_empty_values(monkeypatch):

@@ -44,9 +44,15 @@ export const api = {
       schema: SettingsField[];
       sections: Record<string, string>;
       values: Record<string, string>;
+      // 被环境变量接管的项——面板据此置灰。密钥字段的值是哨兵。
+      env_overrides: Record<string, string>;
     }>(`${BASE}/settings`),
   updateSettings: (values: Record<string, string>) =>
-    fetchJson<{ status: string; values: Record<string, string> }>(`${BASE}/settings`, {
+    fetchJson<{
+      status: string;
+      values: Record<string, string>;
+      env_overrides: Record<string, string>;
+    }>(`${BASE}/settings`, {
       method: "PUT",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ values }),

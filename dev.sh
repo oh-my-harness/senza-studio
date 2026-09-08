@@ -6,7 +6,15 @@ set -euo pipefail
 cd "$(dirname "$0")"
 
 # ── 配置 ────────────────────────────────────────────────
-MODEL="${SENZA_STUDIO_MODEL:-glm-5.2}"
+# 故意不给 SENZA_STUDIO_MODEL 兜一个默认值往下传：这个变量的语义是"显式
+# 指定模型"，后端会据此把设置面板里的模型字段置灰（环境变量优先级最高）。
+# 以前这里硬塞一个 glm-5.2，结果谁都改不了模型——面板显示"环境变量已接管"，
+# 而那个"环境变量"其实是启动脚本自己设的，用户从没设过。
+#
+# 现在：用户 export 了才透传（面板置灰，符合"环境变量优先"）；没 export
+# 就交给设置面板 / settings.json 决定（见 StudioConfig.from_env 的回落链：
+# SENZA_STUDIO_MODEL → settings.json → OPENAI_MODEL → deepseek-chat）。
+MODEL="${SENZA_STUDIO_MODEL:-}"
 BACKEND_PORT=7878
 FRONTEND_PORT=5173
 
@@ -114,9 +122,14 @@ if [ ! -d "studio_frontend/node_modules" ]; then
 fi
 
 # ── 启动后端 ────────────────────────────────────────────
-echo "🚀 启动后端 (model=$MODEL, port=$BACKEND_PORT)..."
-SENZA_STUDIO_MODEL="$MODEL" PYTHONPATH=studio_backend \
-  python -m studio_backend.server &
+if [ -n "$MODEL" ]; then
+  echo "🚀 启动后端 (model=$MODEL 来自环境变量, port=$BACKEND_PORT)..."
+  SENZA_STUDIO_MODEL="$MODEL" PYTHONPATH=studio_backend \
+    python -m studio_backend.server &
+else
+  echo "🚀 启动后端 (model 由设置面板决定, port=$BACKEND_PORT)..."
+  PYTHONPATH=studio_backend python -m studio_backend.server &
+fi
 BACKEND_PID=$!
 
 # ── 等待后端就绪 ────────────────────────────────────────
@@ -154,7 +167,11 @@ echo "════════════════════════�
 echo "  Senza Studio 已启动"
 echo "  前端: http://localhost:$FRONTEND_PORT"
 echo "  后端: http://127.0.0.1:$BACKEND_PORT"
-echo "  模型: $MODEL"
+if [ -n "$MODEL" ]; then
+  echo "  模型: $MODEL（环境变量指定，设置面板中不可改）"
+else
+  echo "  模型: 由设置面板决定（未 export SENZA_STUDIO_MODEL）"
+fi
 echo "  按 Ctrl+C 停止"
 echo "════════════════════════════════════════════"
 echo ""

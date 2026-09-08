@@ -147,7 +147,11 @@ function ChartCard({ card, fields }: { card: GameCard; fields: string[] }) {
 
 export default function GameView() {
   const gameCards = useStudioStore((s) => s.gameCards);
-  const spec = useStudioStore((s) => s.spec);
+  const editingSpec = useStudioStore((s) => s.spec);
+  // 运行中优先用后端下发的展开后 spec：能力组件生成的 step（gate_review）
+  // 在编辑态 spec 里不存在，用编辑态查会查不到路由，审批按钮渲染不出来。
+  const runtimeSpec = useStudioStore((s) => s.runtimeSpec);
+  const spec = runtimeSpec ?? editingSpec;
   const ws = useStudioStore((s) => s.ws);
   const pausedStepId = useStudioStore((s) => s.pausedStepId);
   const bottomRef = useRef<HTMLDivElement>(null);

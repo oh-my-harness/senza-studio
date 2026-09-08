@@ -18,6 +18,7 @@ export default function ChatPanel({ projectId }: { projectId: string }) {
   const setMessages = useStudioStore((s) => s.setMessages);
   const appendToLastAssistant = useStudioStore((s) => s.appendToLastAssistant);
   const setSpec = useStudioStore((s) => s.setSpec);
+  const setRuntimeSpec = useStudioStore((s) => s.setRuntimeSpec);
   const setStatus = useStudioStore((s) => s.setStatus);
   const ws = useStudioStore((s) => s.ws);
   const setWs = useStudioStore((s) => s.setWs);
@@ -152,6 +153,10 @@ export default function ChatPanel({ projectId }: { projectId: string }) {
         if (event.source !== "play") {
           setStatus("spec_ready");
         }
+      } else if (event.type === "runtime_spec") {
+        // Play 开始时后端下发的展开后 spec——审批按钮、ui.display、DAG
+        // 高亮都按这份查，因为能力组件生成的 step 名不在编辑态 spec 里。
+        if (event.spec) setRuntimeSpec(event.spec);
       } else if (event.type === "spec_updated") {
         if (event.spec) setSpec(event.spec);
       } else if (event.type === "session_switched") {

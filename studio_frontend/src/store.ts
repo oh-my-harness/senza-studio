@@ -15,6 +15,10 @@ import type {
 interface StudioStore {
   project: ProjectMeta | null;
   spec: Spec;
+  // Play 期间后端下发的"实际在跑的 spec"（能力组件已展开）。编辑态 spec
+  // 里没有组件生成的 step（gate_review 之类），审批按钮/ui.display/DAG
+  // 高亮都得按这份查。不在运行中时为 null，查询处回落到编辑态 spec。
+  runtimeSpec: Spec | null;
   status: StudioStatus;
   messages: ChatMessage[];
   // 只存 name，不存整个 Step 对象——存对象快照会在 spec 更新后过期
@@ -40,6 +44,7 @@ interface StudioStore {
 
   setProject: (p: ProjectMeta | null) => void;
   setSpec: (s: Spec) => void;
+  setRuntimeSpec: (s: Spec | null) => void;
   setStatus: (s: StudioStatus) => void;
   addMessage: (m: ChatMessage) => void;
   setMessages: (msgs: ChatMessage[]) => void;
@@ -72,6 +77,7 @@ interface StudioStore {
 export const useStudioStore = create<StudioStore>((set) => ({
   project: null,
   spec: { stages: [] },
+  runtimeSpec: null,
   status: "idle",
   messages: [],
   selectedStepName: null,
@@ -86,6 +92,7 @@ export const useStudioStore = create<StudioStore>((set) => ({
 
   setProject: (project) => set({ project }),
   setSpec: (spec) => set({ spec }),
+  setRuntimeSpec: (runtimeSpec) => set({ runtimeSpec }),
   setStatus: (status) => set({ status }),
   addMessage: (m) => set((s) => ({ messages: [...s.messages, m] })),
   setMessages: (messages) => set({ messages }),
@@ -119,6 +126,9 @@ export const useStudioStore = create<StudioStore>((set) => ({
       logs: [],
       pausedStepId: null,
       enginePaused: false,
+      // 上一次运行的展开结果不能留到下一次——spec 改了组件参数/换了组件，
+      // 留着会让审批按钮和 ui 配置停在旧的展开上。
+      runtimeSpec: null,
     }),
 
   setPausedStep: (pausedStepId) => set({ pausedStepId }),

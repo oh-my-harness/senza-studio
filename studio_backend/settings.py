@@ -26,11 +26,33 @@ from .config import StudioConfig
 # 设置面板左侧导航的分区说明（key 对应字段的 group）。加新分区时在这里
 # 加一条说明、在 SETTINGS_SCHEMA 里加对应 group 的字段即可，前端不用改。
 SETTINGS_SECTIONS: dict[str, str] = {
+    "模型": "元 agent 和 Play 使用的 LLM。改完保存即时生效，不用重启后端。",
     "邮件": "供 send_email 预制件使用的 SMTP 配置。",
 }
 
 # 前端据此渲染表单；secret=True 的字段用密码框，且不回传明文。
 SETTINGS_SCHEMA: list[dict] = [
+    {
+        "group": "模型",
+        "key": "SENZA_STUDIO_MODEL",
+        "label": "模型",
+        "placeholder": "deepseek-chat",
+        "secret": False,
+    },
+    {
+        "group": "模型",
+        "key": "SENZA_STUDIO_API_BASE",
+        "label": "API Base URL",
+        "placeholder": "留空用官方地址；兼容 OpenAI 协议的中转填这里",
+        "secret": False,
+    },
+    {
+        "group": "模型",
+        "key": "SENZA_STUDIO_API_KEY",
+        "label": "API Key",
+        "placeholder": "sk-...",
+        "secret": True,
+    },
     {
         "group": "邮件",
         "key": "SENZA_SMTP_HOST",
@@ -74,6 +96,9 @@ SETTINGS_SCHEMA: list[dict] = [
         "secret": False,
     },
 ]
+
+# 改了这三项要重建元 agent 的 harness（provider/model 是 build 时定死的）
+MODEL_KEYS = ("SENZA_STUDIO_MODEL", "SENZA_STUDIO_API_BASE", "SENZA_STUDIO_API_KEY")
 
 _KEYS = [item["key"] for item in SETTINGS_SCHEMA]
 _SECRET_KEYS = {item["key"] for item in SETTINGS_SCHEMA if item["secret"]}
@@ -132,16 +157,42 @@ def masked_values(values: dict[str, str]) -> dict[str, str]:
     }
 
 
-def apply_to_environ(values: dict[str, str], override: bool = False) -> None:
-    """把设置注入 os.environ，供预制件工具读取。
+# 进程启动时就已经在环境里的设置项——这些是"用户显式 export 的"，永远
+# 优先于 settings.json。必须先快照再注入：apply_to_environ 会把设置写进
+# os.environ，写完之后就再也分不清一个值是用户 export 的还是我们自己塞
+# 进去的了（不快照的话，保存设置会因为"这个 key 已经在 environ 里"而被
+# 自己上一次的注入挡住，改了永远不生效）。
+_env_overrides: frozenset[str] = frozenset()
 
-    override=False（启动时）：已经显式 export 过的环境变量优先，不被
-    settings.json 覆盖——CI/脚本里的显式配置不该被一个 GUI 写的文件悄悄
-    改掉。override=True（用户刚在设置面板点了保存）：以刚保存的为准，
-    否则用户改了没反应，还得重启后端才生效。
+
+def snapshot_env_overrides() -> frozenset[str]:
+    """记录当前哪些设置项来自真正的环境变量。create_app 在注入任何设置
+    之前调用一次。返回快照，方便测试断言。"""
+    global _env_overrides
+    _env_overrides = frozenset(k for k in _KEYS if os.environ.get(k))
+    return _env_overrides
+
+
+def env_overridden_keys() -> frozenset[str]:
+    """被环境变量接管的设置项——面板里这些字段只读，值以环境变量为准。"""
+    return _env_overrides
+
+
+def env_override_values() -> dict[str, str]:
+    """环境变量里那些设置项的当前值，密钥字段照样打掩码。"""
+    return masked_values({k: os.environ.get(k, "") for k in _env_overrides})
+
+
+def apply_to_environ(values: dict[str, str]) -> None:
+    """把设置注入 os.environ，供预制件工具和 config 读取。
+
+    环境变量优先：显式 export 过的项不会被 settings.json 覆盖——CI/脚本里
+    的配置不该被一个 GUI 写的文件悄悄改掉。判断依据是启动时的快照而不是
+    "当前 os.environ 里有没有"，原因见 _env_overrides 的注释。
+
+    其余项每次保存都会覆盖式写入，用户在面板里改完立刻生效，不用重启。
     """
     for key, value in values.items():
-        if not value:
+        if not value or key in _env_overrides:
             continue
-        if override or key not in os.environ:
-            os.environ[key] = value
+        os.environ[key] = value

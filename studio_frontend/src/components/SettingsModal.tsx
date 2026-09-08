@@ -8,6 +8,8 @@ export default function SettingsModal({ onClose }: { onClose: () => void }) {
   const [schema, setSchema] = useState<SettingsField[]>([]);
   const [sections, setSections] = useState<Record<string, string>>({});
   const [values, setValues] = useState<Record<string, string>>({});
+  // 被环境变量接管的项：{key: 环境变量里的值（密钥打掩码）}
+  const [envOverrides, setEnvOverrides] = useState<Record<string, string>>({});
   const [activeSection, setActiveSection] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
@@ -17,10 +19,11 @@ export default function SettingsModal({ onClose }: { onClose: () => void }) {
   useEffect(() => {
     api
       .getSettings()
-      .then(({ schema, sections, values }) => {
+      .then(({ schema, sections, values, env_overrides }) => {
         setSchema(schema);
         setSections(sections || {});
         setValues(values);
+        setEnvOverrides(env_overrides || {});
         // 默认选中第一个分区，避免右侧空着
         if (schema.length > 0) setActiveSection(schema[0].group);
       })
@@ -32,8 +35,9 @@ export default function SettingsModal({ onClose }: { onClose: () => void }) {
     setSaving(true);
     setError(null);
     try {
-      const { values: updated } = await api.updateSettings(values);
+      const { values: updated, env_overrides } = await api.updateSettings(values);
       setValues(updated);
+      setEnvOverrides(env_overrides || {});
       setSaved(true);
       setTimeout(() => setSaved(false), 2000);
     } catch (e) {
@@ -101,35 +105,66 @@ export default function SettingsModal({ onClose }: { onClose: () => void }) {
                 {sections[activeSection] && (
                   <p className="text-xs text-gray-500 pb-1">{sections[activeSection]}</p>
                 )}
-                {activeFields.map((field) => (
-                  <div key={field.key}>
-                    <label className="block text-xs text-gray-600 mb-1">
-                      {field.label}
-                      {field.secret && values[field.key] === SECRET_PLACEHOLDER && (
-                        <span className="ml-2 text-green-600">已设置</span>
+                {activeFields.map((field) => {
+                  // 环境变量优先——这一项在面板里改了也不会生效，所以直接
+                  // 置灰只读并显示环境变量的实际值，而不是给一个能输入、
+                  // 存了却没反应的框（那样只会让人以为是 bug）。
+                  const envValue = envOverrides[field.key];
+                  const fromEnv = envValue !== undefined;
+                  return (
+                    <div key={field.key}>
+                      <label className="block text-xs text-gray-600 mb-1">
+                        {field.label}
+                        {fromEnv && (
+                          <span className="ml-2 text-amber-600">环境变量已接管</span>
+                        )}
+                        {!fromEnv &&
+                          field.secret &&
+                          values[field.key] === SECRET_PLACEHOLDER && (
+                            <span className="ml-2 text-green-600">已设置</span>
+                          )}
+                      </label>
+                      <input
+                        type={field.secret ? "password" : "text"}
+                        disabled={fromEnv}
+                        value={
+                          fromEnv
+                            ? field.secret && envValue === SECRET_PLACEHOLDER
+                              ? ""
+                              : envValue
+                            : // 密钥的哨兵值不该显示出来——留空并用 placeholder
+                              // 提示已设置；用户不输入就保持原值不变。
+                              values[field.key] === SECRET_PLACEHOLDER
+                              ? ""
+                              : values[field.key] || ""
+                        }
+                        onChange={(e) =>
+                          setValues((v) => ({ ...v, [field.key]: e.target.value }))
+                        }
+                        placeholder={
+                          fromEnv
+                            ? field.secret
+                              ? "已由环境变量设置"
+                              : ""
+                            : field.secret && values[field.key] === SECRET_PLACEHOLDER
+                              ? "留空则保持现有密码不变"
+                              : field.placeholder || ""
+                        }
+                        className={`w-full rounded border px-2 py-1.5 text-sm focus:outline-none ${
+                          fromEnv
+                            ? "border-gray-200 bg-gray-100 text-gray-500 cursor-not-allowed"
+                            : "border-gray-300 focus:border-blue-400"
+                        }`}
+                      />
+                      {fromEnv && (
+                        <p className="mt-1 text-xs text-gray-400">
+                          由环境变量 {field.key} 提供，优先级高于此处设置。
+                          取消 export 并重启后端后，这里的值才会生效。
+                        </p>
                       )}
-                    </label>
-                    <input
-                      type={field.secret ? "password" : "text"}
-                      value={
-                        // 密钥的哨兵值不该显示出来——留空并用 placeholder
-                        // 提示已设置；用户不输入就保持原值不变。
-                        values[field.key] === SECRET_PLACEHOLDER
-                          ? ""
-                          : values[field.key] || ""
-                      }
-                      onChange={(e) =>
-                        setValues((v) => ({ ...v, [field.key]: e.target.value }))
-                      }
-                      placeholder={
-                        field.secret && values[field.key] === SECRET_PLACEHOLDER
-                          ? "留空则保持现有密码不变"
-                          : field.placeholder || ""
-                      }
-                      className="w-full rounded border border-gray-300 px-2 py-1.5 text-sm focus:outline-none focus:border-blue-400"
-                    />
-                  </div>
-                ))}
+                    </div>
+                  );
+                })}
               </>
             )}
           </div>

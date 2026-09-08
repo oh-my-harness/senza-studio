@@ -1,4 +1,6 @@
 """REST API + WebSocket 端点测试。"""
+import json
+
 import pytest
 from fastapi.testclient import TestClient
 
@@ -246,3 +248,191 @@ def test_ws_switch_session(app_client):
         msg = ws.receive_json()
         assert msg["type"] == "session_switched"
         assert msg["session_id"] == sid
+
+
+def test_play_with_a_broken_component_reports_an_error_instead_of_killing_the_ws(app_client):
+    """能力组件展开失败（引用了不存在的组件）不该把 WebSocket 打死。
+
+    亲测过没有这层保护时的表现：异常穿出 WS handler，连接直接断开，而前端
+    点 Play 时已经乐观地切到了 playing 状态——用户看到的是界面卡在"运行中"
+    加一个莫名其妙断掉的连接，完全看不出是 spec 里组件名写错了。
+    """
+    client = app_client
+    pid = client.post("/api/projects", json={"name": "组件报错"}).json()["id"]
+    client.put(
+        f"/api/projects/{pid}/spec",
+        json={"spec": {"stages": [
+            {"name": "gate", "component": "no_such_component",
+             "next_on_approve": "done"},
+            {"name": "done", "type": "terminal"},
+        ]}},
+    )
+    with client.websocket_connect(f"/ws/projects/{pid}") as ws:
+        ws.send_json({"type": "play", "inputs": {}})
+        event = ws.receive_json()
+        assert event["type"] == "error"
+        assert "no_such_component" in event["message"]
+        # 没有 source: "play" —— run 压根没开始，前端该退回编辑态
+        assert "source" not in event
+        # 连接还活着，用户可以直接改 spec 重试
+        ws.send_json({"type": "play", "inputs": {}})
+        assert ws.receive_json()["type"] == "error"
+
+
+def test_play_with_a_bad_component_port_reports_the_available_ports(app_client):
+    client = app_client
+    pid = client.post("/api/projects", json={"name": "端口写错"}).json()["id"]
+    client.put(
+        f"/api/projects/{pid}/spec",
+        json={"spec": {"stages": [
+            {"name": "gate", "component": "approval_flow", "next_on_maybe": "done"},
+            {"name": "done", "type": "terminal"},
+        ]}},
+    )
+    with client.websocket_connect(f"/ws/projects/{pid}") as ws:
+        ws.send_json({"type": "play", "inputs": {}})
+        event = ws.receive_json()
+        assert event["type"] == "error"
+        assert "maybe" in event["message"]
+        assert "approve" in event["message"]  # 告诉用户有哪些出口可用
+
+
+# ── 模型设置 ─────────────────────────────────────────────
+
+
+def test_settings_schema_exposes_a_model_section(app_client):
+    body = app_client.get("/api/settings").json()
+    assert "模型" in body["sections"]
+    model_keys = {f["key"] for f in body["schema"] if f["group"] == "模型"}
+    assert model_keys == {
+        "SENZA_STUDIO_MODEL",
+        "SENZA_STUDIO_API_BASE",
+        "SENZA_STUDIO_API_KEY",
+    }
+    # API key 必须是密码框且不回传明文
+    key_field = next(f for f in body["schema"] if f["key"] == "SENZA_STUDIO_API_KEY")
+    assert key_field["secret"] is True
+
+
+def test_saving_the_model_changes_the_live_config(tmp_path, monkeypatch):
+    """核心：面板里改模型必须真的改到 cfg。
+
+    元 agent 和 Play 读的是 cfg.model，不是 os.environ——只把值注入环境
+    变量的话，"模型"分区看着能存能读，实际完全不起作用。
+    """
+    monkeypatch.delenv("SENZA_STUDIO_MODEL", raising=False)
+    monkeypatch.delenv("SENZA_STUDIO_API_BASE", raising=False)
+    _reset_state()
+    config = StudioConfig(
+        home_dir=str(tmp_path / ".senza-studio"),
+        model="old-model",
+        api_key="old-key",
+        api_base="",
+    )
+    with TestClient(create_app(config)) as client:
+        r = client.put(
+            "/api/settings",
+            json={"values": {
+                "SENZA_STUDIO_MODEL": "new-model",
+                "SENZA_STUDIO_API_BASE": "https://api.example.com",
+            }},
+        )
+        assert r.status_code == 200
+        assert config.model == "new-model"
+        assert config.api_base == "https://api.example.com"
+    _reset_state()
+
+
+def test_env_var_overrides_the_panel_and_is_reported_as_such(tmp_path, monkeypatch):
+    """环境变量优先：面板存了也不生效，而且要明确告诉前端这一项被接管了
+    ——否则用户面对一个能编辑、存了却没反应的输入框，只会以为是 bug。"""
+    monkeypatch.setenv("SENZA_STUDIO_MODEL", "model-from-shell")
+    _reset_state()
+    config = StudioConfig(
+        home_dir=str(tmp_path / ".senza-studio"),
+        model="model-from-shell",
+        api_key="k",
+        api_base="",
+    )
+    with TestClient(create_app(config)) as client:
+        body = client.get("/api/settings").json()
+        assert body["env_overrides"]["SENZA_STUDIO_MODEL"] == "model-from-shell"
+
+        client.put("/api/settings", json={"values": {"SENZA_STUDIO_MODEL": "ignored"}})
+        # cfg 没被改动，环境变量仍然说了算
+        assert config.model == "model-from-shell"
+        # 但值确实写进了 settings.json，取消 export 之后重启就会生效
+        assert client.get("/api/settings").json()["values"][
+            "SENZA_STUDIO_MODEL"
+        ] == "ignored"
+    _reset_state()
+
+
+def test_settings_file_model_is_applied_at_startup(tmp_path, monkeypatch):
+    """启动顺序回归：cfg 先于 settings.json 构造，不显式回写的话
+    settings.json 里的模型永远不会生效。"""
+    monkeypatch.delenv("SENZA_STUDIO_MODEL", raising=False)
+    _reset_state()
+    home = tmp_path / ".senza-studio"
+    home.mkdir(parents=True)
+    (home / "settings.json").write_text(
+        json.dumps({"SENZA_STUDIO_MODEL": "model-from-file"}), encoding="utf-8"
+    )
+    config = StudioConfig(
+        home_dir=str(home), model="default-model", api_key="k", api_base=""
+    )
+    with TestClient(create_app(config)):
+        assert config.model == "model-from-file"
+    _reset_state()
+
+
+def test_play_sends_the_expanded_runtime_spec_first(app_client):
+    """Play 一开始就要把展开后的 spec 发给前端。
+
+    前端的审批按钮是按 step 名去 spec 里查 next_on_* 得来的，而能力组件
+    展开出的 step 名（gate_review）在编辑态 spec 里根本不存在——不发这个
+    事件的话，跑到组件生成的 checker 上前端只能显示"这个 checker step 没有
+    配置 next_on_* 路由，无法提交决定"，用户点不了批准，Play 直接卡死
+    （用户实测踩到过）。
+    """
+    pid = app_client.post("/api/projects", json={"name": "组件审批"}).json()["id"]
+    app_client.put(
+        f"/api/projects/{pid}/spec",
+        json={"spec": {"stages": [
+            {"name": "gate", "component": "approval_flow",
+             "params": {"title": "请审批"},
+             "next_on_approve": "ok", "next_on_reject": "no"},
+            {"name": "ok", "type": "terminal", "message": "通过"},
+            {"name": "no", "type": "terminal", "message": "驳回"},
+        ]}},
+    )
+    with app_client.websocket_connect(f"/ws/projects/{pid}") as ws:
+        ws.send_json({"type": "play", "inputs": {}})
+        event = ws.receive_json()
+        assert event["type"] == "runtime_spec"
+        stages = {s["name"]: s for s in event["spec"]["stages"]}
+        # 展开后的 checker 带着路由和 ui 配置，前端据此渲染审批按钮
+        assert "gate_review" in stages
+        assert stages["gate_review"]["next_on_approve"] == "ok"
+        assert stages["gate_review"]["next_on_reject"] == "no"
+        assert stages["gate_review"]["ui"]["display"] == "approval_form"
+        # 组件归属信息在，画布据此把状态折回组件节点
+        assert stages["gate_review"]["_component_instance"] == "gate"
+
+
+def test_play_runtime_spec_is_sent_for_plain_specs_too(app_client):
+    """没有组件的 spec 也照发——前端一律用这份查，少一条分支。"""
+    pid = app_client.post("/api/projects", json={"name": "普通"}).json()["id"]
+    app_client.put(
+        f"/api/projects/{pid}/spec",
+        json={"spec": {"stages": [
+            {"name": "gate", "type": "checker",
+             "next_on_approve": "ok", "next_on_reject": "ok"},
+            {"name": "ok", "type": "terminal"},
+        ]}},
+    )
+    with app_client.websocket_connect(f"/ws/projects/{pid}") as ws:
+        ws.send_json({"type": "play", "inputs": {}})
+        event = ws.receive_json()
+        assert event["type"] == "runtime_spec"
+        assert {s["name"] for s in event["spec"]["stages"]} == {"gate", "ok"}

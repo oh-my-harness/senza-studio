@@ -79,6 +79,38 @@ class Spec:
 
         self._data.setdefault("stages", []).append(step)
 
+    def add_component(
+        self,
+        name: str,
+        component: str,
+        params: dict[str, Any] | None = None,
+        description: str | None = None,
+    ) -> None:
+        """加一个能力组件引用 step。
+
+        跟 add_step 并列而不是复用它：组件 step 没有 type（它展开后才产生
+        带 type 的真实 step），而 add_step 强制 type 必须是四种之一。spec
+        里保留引用形态，Play 时由 preprocess.py 展开——这样画布能画出组件
+        边界，组件定义改了所有引用它的 spec 也跟着变。
+
+        这里不校验组件是否存在、参数对不对：spec 模块是纯数据层，不该依赖
+        senza-studio-components 包。真正的校验在 preprocess.py，validate_spec
+        工具会调它，元 agent 因此还是能在构建阶段就拿到错误反馈。
+        """
+        if not name or not name.strip():
+            raise SpecError("step name cannot be empty")
+        if not component or not component.strip():
+            raise SpecError("component name cannot be empty")
+        if self._find_step(name):
+            raise SpecError(f"step '{name}' already exists")
+
+        step: dict[str, Any] = {"name": name, "component": component}
+        if params:
+            step["params"] = params
+        if description:
+            step["description"] = description
+        self._data.setdefault("stages", []).append(step)
+
     def remove_step(self, name: str) -> None:
         step = self._find_step(name)
         if step is None:
@@ -145,6 +177,19 @@ class Spec:
                         raise SpecError(
                             f"edge from '{s['name']}' points to unknown step '{val}'"
                         )
+
+        # 每个 step 要么是四种 type 之一，要么是个能力组件引用。漏掉这条
+        # 的话，一个既没 type 也没 component 的 step 会一路活到 Play，才在
+        # executor 里报 "unknown step type 'None'"——那时候已经跑掉几步了。
+        for s in stages:
+            if s.get("component"):
+                continue
+            if s.get("type") not in _VALID_TYPES:
+                raise SpecError(
+                    f"step '{s.get('name')}' has no valid type "
+                    f"(expected one of {sorted(_VALID_TYPES)}) and is not a "
+                    f"component reference"
+                )
 
         # 至少有一个 terminal step
         has_terminal = any(s.get("type") == "terminal" for s in stages)

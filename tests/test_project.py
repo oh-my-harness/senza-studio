@@ -153,3 +153,31 @@ def test_config_rejects_wildcard_origin(monkeypatch):
 
     with pytest.raises(ValueError, match="Invalid Senza Studio browser origin"):
         StudioConfig.from_env()
+
+
+def test_model_falls_back_to_openai_model(monkeypatch):
+    """OPENAI_MODEL 是通用兜底，跟 api_key/api_base 的回落一致。
+
+    没有这条回落的话，dev.sh 不再硬塞 SENZA_STUDIO_MODEL 之后，谁都会悄悄
+    掉回 deepseek-chat——对着一个只服务 glm 的中转地址，报错还很难看懂。
+    """
+    monkeypatch.delenv("SENZA_STUDIO_MODEL", raising=False)
+    monkeypatch.setenv("OPENAI_MODEL", "glm-5.2-fp8")
+    assert StudioConfig.from_env().model == "glm-5.2-fp8"
+
+
+def test_senza_studio_model_beats_openai_model(monkeypatch):
+    monkeypatch.setenv("SENZA_STUDIO_MODEL", "explicit")
+    monkeypatch.setenv("OPENAI_MODEL", "fallback")
+    assert StudioConfig.from_env().model == "explicit"
+
+
+def test_openai_model_does_not_lock_the_settings_panel(monkeypatch):
+    """OPENAI_MODEL 只是兜底，不是"显式指定 Studio 用哪个模型"——不能因为
+    它存在就把设置面板的模型字段置灰，否则任何配了 OpenAI 环境的人都改不了。"""
+    from studio_backend.settings import env_overridden_keys, snapshot_env_overrides
+
+    monkeypatch.delenv("SENZA_STUDIO_MODEL", raising=False)
+    monkeypatch.setenv("OPENAI_MODEL", "glm-5.2-fp8")
+    snapshot_env_overrides()
+    assert "SENZA_STUDIO_MODEL" not in env_overridden_keys()

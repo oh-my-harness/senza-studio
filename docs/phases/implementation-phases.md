@@ -160,7 +160,8 @@ Phase 7 (Export 打包)
 - Inspector 运行态显示 step 的输入/输出/工具调用
 - Pause/Step 控制条工作
 
-**状态**：待实现
+**状态**：已实现（checker + 审批、tool step 执行、Inspector 运行态、
+按 ui.display 分类型渲染卡片、Pause/Step/Play Paused 全部落地）
 
 ---
 
@@ -183,7 +184,18 @@ Phase 7 (Export 打包)
 - spec 引用能力组件 → 画布显示 group → 展开看内部 step → Play 能运行展开后的 step
 - Scene 视图折叠/展开组件
 
-**状态**：待实现
+**状态**：进行中，按切片推进（同 Phase 3 的做法：每片单独验证再进下一片）
+
+| 切片 | 内容 | 状态 |
+|---|---|---|
+| 1. 工具预制件库 | senza-studio-components 包（db_query/lookup_topic/send_email）+ list/search/recommend 返回真实内容 + play.py 合并预制件与项目工具 | 已实现 |
+| 2. 能力组件 + 预处理器 | approval_flow / approval_with_notice 组件定义、preprocess.py 组件展开（参数、端口、`_component` 元数据）、add_component 工具、组件感知的 validate_spec | 已实现 |
+| 3. 画布组件折叠/展开 | 读切片 2 产出的 `_component` 元数据画 ReactFlow group 容器 | 待实现 |
+| 4. 项目插件集加载 | `<project>/plugins/` | 待实现 |
+
+切片 2 未竟事项：元 agent 在**真实对话**里自主选用 add_component 这一条
+验收还没跑通——三次尝试都挡在 LLM 供应商 upstream 故障上（工具注册、schema、
+系统提示词、中英文检索都已单独验证）。供应商恢复后补跑。
 
 ---
 

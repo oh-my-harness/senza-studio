@@ -1239,3 +1239,63 @@ def test_play_without_start_paused_does_not_call_pause(monkeypatch, tmp_config):
     session.play(inputs={})
 
     assert fake_engine.calls == []
+
+
+# ── 能力组件 → Play 集成 ─────────────────────────────────
+
+
+def test_get_entry_inputs_expands_components_first():
+    """spec 第一个 stage 是组件引用时，入口输入要从展开后的入口 step 上扫。
+    不展开就扫的话，组件 step 本身没有 prompt_template，会漏报所有种子输入。"""
+    spec_dict = {"stages": [
+        {"name": "gate", "component": "approval_flow", "next_on_approve": "done"},
+        {"name": "done", "type": "terminal"},
+    ]}
+    # approval_flow 展开出的 checker 没有 prompt_template => 空列表，
+    # 关键是不崩、也不误报
+    assert get_entry_inputs(spec_dict) == []
+
+
+def test_build_route_maps_over_an_expanded_component_spec():
+    """展开之后 build_route_maps 看到的就是普通 step，不需要懂组件语义。"""
+    from studio_backend.preprocess import preprocess_spec
+
+    spec_dict = preprocess_spec({"stages": [
+        {"name": "gate", "component": "approval_flow",
+         "params": {"title": "退货审批"},
+         "next_on_approve": "ok", "next_on_reject": "no"},
+        {"name": "ok", "type": "terminal"},
+        {"name": "no", "type": "terminal"},
+    ]})
+    stage_by_name, routes_by_name = build_route_maps(spec_dict)
+    assert stage_by_name["gate_review"]["type"] == "checker"
+    assert routes_by_name["gate_review"] == {"approve": "ok", "reject": "no"}
+
+
+def test_checker_executor_surfaces_the_stage_message():
+    """能力组件的 title 参数落在 step 的 message 上——审批人该看到"退货审批"
+    而不是通用的"等待人工审批"。"""
+    from studio_backend.preprocess import preprocess_spec
+
+    spec_dict = preprocess_spec({"stages": [
+        {"name": "gate", "component": "approval_flow",
+         "params": {"title": "退货审批：金额超过 500"},
+         "next_on_approve": "ok", "next_on_reject": "ok"},
+        {"name": "ok", "type": "terminal"},
+    ]})
+    stage_by_name, routes_by_name = build_route_maps(spec_dict)
+    executor = make_executor(
+        stage_by_name, routes_by_name, "test-model", None, None, {}, {}, None
+    )
+    result = executor({"step_id": "gate_review", "context": {}})
+    assert result["output"] == "退货审批：金额超过 500"
+    assert result["structured"]["route_key"] == PENDING_APPROVAL
+
+
+def test_checker_without_message_keeps_the_default_wording():
+    stage_by_name = {"gate": {"name": "gate", "type": "checker"}}
+    executor = make_executor(
+        stage_by_name, {"gate": {}}, "test-model", None, None, {}, {}, None
+    )
+    result = executor({"step_id": "gate", "context": {}})
+    assert result["output"] == "等待人工审批…"

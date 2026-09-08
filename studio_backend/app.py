@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import sys
 from contextlib import asynccontextmanager
 
 import httpx
@@ -16,12 +17,16 @@ from .project import Project
 from .sdk_pin import check_sdk_pin
 from .session import read_session_history
 from .settings import (
+    MODEL_KEYS,
     SETTINGS_SCHEMA,
     SETTINGS_SECTIONS,
     apply_to_environ,
+    env_override_values,
+    env_overridden_keys,
     load_settings,
     masked_values,
     save_settings,
+    snapshot_env_overrides,
 )
 from .spec import Spec, SpecError
 from .agent import StudioAgent
@@ -104,9 +109,41 @@ def create_app(config: StudioConfig | None = None) -> FastAPI:
         cfg.allowed_origins,
     )
 
-    # 启动时把 settings.json 注入环境变量，供预制件工具（send_email 等）
-    # 读取。override=False——显式 export 的环境变量优先，见 settings.py。
-    apply_to_environ(load_settings(cfg))
+    # 先快照"哪些设置项来自真正的环境变量"，再注入 settings.json——顺序不
+    # 能反，否则注入完就分不清值的来源了（见 settings.snapshot_env_overrides）。
+    snapshot_env_overrides()
+    _stored_settings = load_settings(cfg)
+    apply_to_environ(_stored_settings)
+
+    def _apply_model_settings(stored: dict) -> bool:
+        """把 settings.json 里的模型配置写进 cfg，返回是否真的变了。
+
+        必须显式写 cfg 而不是指望 StudioConfig.from_env()：cfg 是在这之前
+        就构造好的（要先有 home_dir 才能找到 settings.json），此时再重新
+        from_env() 会把测试显式传进来的 config 也一起冲掉。所以只把
+        settings.json 的值往 cfg 上盖，且跳过被环境变量接管的项——那些项
+        cfg 里已经是环境变量的值了。
+
+        不做这一步的话，"模型"分区看着能存能读，实际完全不起作用：元 agent
+        和 Play 读的是 cfg.model / cfg.api_key / cfg.api_base，不是 os.environ。
+        """
+        overridden = env_overridden_keys()
+        field_by_key = {
+            "SENZA_STUDIO_MODEL": "model",
+            "SENZA_STUDIO_API_BASE": "api_base",
+            "SENZA_STUDIO_API_KEY": "api_key",
+        }
+        changed = False
+        for key, field in field_by_key.items():
+            if key in overridden:
+                continue
+            value = stored.get(key)
+            if value and getattr(cfg, field) != value:
+                setattr(cfg, field, value)
+                changed = True
+        return changed
+
+    _apply_model_settings(_stored_settings)
 
     @app.exception_handler(FileNotFoundError)
     async def not_found_handler(request, exc):
@@ -130,14 +167,36 @@ def create_app(config: StudioConfig | None = None) -> FastAPI:
             "schema": SETTINGS_SCHEMA,
             "sections": SETTINGS_SECTIONS,
             "values": masked_values(load_settings(cfg)),
+            # 被环境变量接管的项：面板里置灰只读，并显示环境变量的实际值。
+            # 不告诉前端的话，用户会看到一个能编辑、存了却不生效的输入框
+            # ——这正是"环境变量优先"最容易让人困惑的地方。
+            "env_overrides": env_override_values(),
         }
 
     @app.put("/api/settings")
     async def update_settings(req: UpdateSettingsReq):
         saved = save_settings(cfg, req.values)
-        # override=True：用户刚点了保存，就该立刻生效，不用重启后端。
-        apply_to_environ(saved, override=True)
-        return {"status": "ok", "values": masked_values(saved)}
+        apply_to_environ(saved)
+        # 模型配置变了要重建已经建好的 harness：provider 和 model 是
+        # HarnessBuilder build 时定死的，只改 cfg 不重建的话，当前打开的
+        # 项目还会继续用旧模型，直到用户重启后端或切项目——跟改 spec 之后
+        # 调 agent.rebuild() 是同一个道理（见 update_spec）。
+        if _apply_model_settings(saved):
+            for state in _studio_state.values():
+                agent = state.get("agent")
+                if agent is not None and agent._session_id is not None:
+                    try:
+                        agent.rebuild()
+                    except Exception as exc:  # noqa: BLE001
+                        # 重建失败（比如 key 填错了）不该让保存这个动作失败
+                        # ——设置已经写盘了，下次用到时还会再试一次。
+                        print(f"agent rebuild after settings change failed: {exc}",
+                              file=sys.stderr)
+        return {
+            "status": "ok",
+            "values": masked_values(saved),
+            "env_overrides": env_override_values(),
+        }
 
     # ── Projects ─────────────────────────────────────────
     @app.get("/api/projects")
@@ -250,10 +309,26 @@ def create_app(config: StudioConfig | None = None) -> FastAPI:
                         continue  # 已经在跑，忽略重复 play
                     play_session = PlaySession(cfg, project, state["spec"])
                     state["play_session"] = play_session
-                    play_session.play(
-                        inputs=msg.get("inputs"),
-                        start_paused=bool(msg.get("start_paused")),
-                    )
+                    try:
+                        play_session.play(
+                            inputs=msg.get("inputs"),
+                            start_paused=bool(msg.get("start_paused")),
+                        )
+                    except Exception as exc:  # noqa: BLE001
+                        # 构建阶段就失败了（最常见的是能力组件展开出错：引用
+                        # 了不存在的组件、参数写错、出口名写错）。不接住的话
+                        # 异常会一路穿出 WS handler 把连接打死——前端点了 Play
+                        # 已经乐观地切到 playing 状态，看到的就是"界面卡在运行
+                        # 中 + 连接莫名断开"，完全看不出哪里错了（亲测）。
+                        #
+                        # 这条 error 故意不带 source: "play"：run 压根没开始，
+                        # 前端就该退回 spec_ready 去改 spec，而不是留在 Play
+                        # 视图里等一个永远不会来的结果。
+                        state["play_session"] = None
+                        await websocket.send_json(
+                            {"type": "error", "message": f"无法启动 Play: {exc}"}
+                        )
+                        continue
                     play_task = asyncio.create_task(
                         run_play_streaming(websocket, play_session, project)
                     )

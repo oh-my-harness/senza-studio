@@ -60,7 +60,14 @@ class StudioConfig:
         )
         return cls(
             home_dir=home,
-            model=os.environ.get("SENZA_STUDIO_MODEL", "deepseek-chat"),
+            # 跟 api_key/api_base 一样支持 OPENAI_* 回落：SENZA_STUDIO_MODEL
+            # 是"显式指定 Studio 用哪个模型"（设置面板里会因此置灰），
+            # OPENAI_MODEL 只是通用兜底，不该锁死面板——不然任何 export 过
+            # OPENAI_MODEL 的人都改不了模型了。
+            model=os.environ.get(
+                "SENZA_STUDIO_MODEL",
+                os.environ.get("OPENAI_MODEL", "deepseek-chat"),
+            ),
             api_key=os.environ.get(
                 "SENZA_STUDIO_API_KEY", os.environ.get("OPENAI_API_KEY", "")
             ),

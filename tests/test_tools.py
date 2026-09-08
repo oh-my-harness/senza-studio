@@ -163,6 +163,7 @@ def test_spec_tools_factory_returns_tools_with_names():
     names = {t.name for t in tools}
     assert names == {
         "add_step",
+        "add_component",
         "add_edge",
         "remove_step",
         "remove_edge",
@@ -242,7 +243,10 @@ def test_prefab_tools_list_returns_real_prefabs():
     result = json.loads(_cb(cbs, "list_prefabs")({}, None))
     names = {t["name"] for t in result["tools"]}
     assert {"db_query", "lookup_topic", "send_email"} <= names
-    assert result["components"] == []  # 能力组件是 Phase 4 之后的切片
+    # 能力组件从 Phase 4 切片二起也是真实内容
+    assert {"approval_flow", "approval_with_notice"} <= {
+        c["name"] for c in result["components"]
+    }
 
 
 def test_prefab_search_matches_real_prefab():
@@ -275,3 +279,66 @@ def test_prefab_tools_factory_returns_three_tools():
     assert len(tools) == 3
     names = {t.name for t in tools}
     assert names == {"list_prefabs", "search_prefabs", "recommend_prefabs"}
+
+
+# ── add_component / 组件感知的 validate_spec ──────────────
+
+
+def test_add_component_tool_adds_a_reference_step():
+    spec = Spec()
+    cbs = make_spec_callbacks(spec)
+    result = _cb(cbs, "add_component")(
+        {"name": "gate", "component": "approval_flow", "params": {"title": "退货审批"}},
+        None,
+    )
+    assert "error" not in result.lower()
+    step = spec.get_current_spec()["stages"][0]
+    assert step["component"] == "approval_flow"
+    assert step["params"] == {"title": "退货审批"}
+    # 组件引用 step 没有 type——展开后才产生带 type 的真实 step
+    assert "type" not in step
+
+
+def test_add_component_rejects_duplicate_name():
+    spec = Spec()
+    cbs = make_spec_callbacks(spec)
+    _cb(cbs, "add_component")({"name": "gate", "component": "approval_flow"}, None)
+    result = _cb(cbs, "add_component")(
+        {"name": "gate", "component": "approval_flow"}, None
+    )
+    assert "error" in result.lower()
+
+
+def test_validate_spec_reports_unknown_component():
+    """spec 结构本身没毛病，问题只有展开时才看得见——validate_spec 不试展开
+    的话，元 agent 会以为 spec 没问题，等到 Play 才炸。"""
+    spec = Spec()
+    cbs = make_spec_callbacks(spec)
+    _cb(cbs, "add_component")({"name": "gate", "component": "no_such_thing"}, None)
+    _cb(cbs, "add_step")({"name": "done", "description": "d", "type": "terminal"}, None)
+    _cb(cbs, "add_edge")({"from": "gate", "to": "done", "condition": "approve"}, None)
+    result = _cb(cbs, "validate_spec")({}, None)
+    assert "component error" in result.lower()
+    assert "no_such_thing" in result
+
+
+def test_validate_spec_reports_bad_component_port():
+    spec = Spec()
+    cbs = make_spec_callbacks(spec)
+    _cb(cbs, "add_component")({"name": "gate", "component": "approval_flow"}, None)
+    _cb(cbs, "add_step")({"name": "done", "description": "d", "type": "terminal"}, None)
+    _cb(cbs, "add_edge")({"from": "gate", "to": "done", "condition": "maybe"}, None)
+    result = _cb(cbs, "validate_spec")({}, None)
+    assert "component error" in result.lower()
+
+
+def test_validate_spec_passes_for_a_correct_component_spec():
+    spec = Spec()
+    cbs = make_spec_callbacks(spec)
+    _cb(cbs, "add_component")(
+        {"name": "gate", "component": "approval_flow"}, None
+    )
+    _cb(cbs, "add_step")({"name": "done", "description": "d", "type": "terminal"}, None)
+    _cb(cbs, "add_edge")({"from": "gate", "to": "done", "condition": "approve"}, None)
+    _cb(cbs, "add_edge")({"from": "gate", "to": "done", "condition": "reject"}, None)
+    assert _cb(cbs, "validate_spec")({}, None) == "Spec is valid."

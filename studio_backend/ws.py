@@ -176,6 +176,19 @@ async def run_play_streaming(
     ——tokio broadcast 不缓冲订阅前发出的事件，晚订阅会丢掉跑得很快的
     step（没有真实 LLM 调用、立刻 fail）产生的早期事件。
     """
+    # 先把这次运行真正执行的 spec 发给前端（能力组件已展开）。前端的审批
+    # 按钮、ui.display 分派、DAG 高亮都是按 step 名去 spec 里查的，而组件
+    # 展开出来的 step 名在编辑态 spec 里不存在——不发这个的话，跑到组件生成
+    # 的 checker 上会显示"没有配置 next_on_* 路由"，用户点不了批准，整个
+    # Play 卡死（用户实测踩到过）。
+    if play_session.runtime_spec is not None:
+        try:
+            await websocket.send_json(
+                {"type": "runtime_spec", "spec": play_session.runtime_spec}
+            )
+        except Exception:  # noqa: BLE001
+            pass
+
     event_iter = play_session.events(timeout_ms=5000, max_consecutive_timeouts=999)
     play_session.start()
     loop = asyncio.get_event_loop()

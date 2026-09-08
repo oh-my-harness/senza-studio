@@ -14,6 +14,7 @@ from typing import Any, Callable
 
 import senza
 
+from ..preprocess import PreprocessError, preprocess_spec
 from ..spec import Spec, SpecError
 
 
@@ -38,6 +39,24 @@ def make_spec_callbacks(spec: Spec) -> dict[str, Callable[[dict, Any], str]]:
             return f"Error: {e}"
 
     callbacks["add_step"] = _add_step
+
+    def _add_component(args, ctx):
+        try:
+            spec.add_component(
+                name=args["name"],
+                component=args["component"],
+                params=args.get("params"),
+                description=args.get("description"),
+            )
+            return (
+                f"Component step '{args['name']}' added "
+                f"(component: {args['component']}). "
+                f"Wire its exits with add_edge."
+            )
+        except SpecError as e:
+            return f"Error: {e}"
+
+    callbacks["add_component"] = _add_component
 
     def _add_edge(args, ctx):
         try:
@@ -116,9 +135,16 @@ def make_spec_callbacks(spec: Spec) -> dict[str, Callable[[dict, Any], str]]:
     def _validate_spec(args, ctx):
         try:
             spec.validate()
-            return "Spec is valid."
         except SpecError as e:
             return f"Validation error: {e}"
+        try:
+            # 组件展开也要试一遍：未知组件、参数写错、出口名写错这些问题，
+            # 光看 spec 结构是发现不了的（spec 层刻意不认识组件语义），不在
+            # 这里试展开的话，元 agent 会以为 spec 没问题，等到 Play 才炸。
+            preprocess_spec(spec.get_current_spec())
+        except PreprocessError as e:
+            return f"Component error: {e}"
+        return "Spec is valid."
 
     callbacks["validate_spec"] = _validate_spec
 
@@ -251,6 +277,38 @@ _SCHEMAS: dict[str, dict] = {
             "before making changes."
         ),
         "parameters": {"type": "object", "properties": {}},
+    },
+    "add_component": {
+        "description": (
+            "Add a capability component reference as a step. A component "
+            "expands into several real steps at run time, so you do NOT add "
+            "its internal steps yourself. Use list_prefabs/recommend_prefabs "
+            "to discover components and their params and exit ports, then "
+            "wire the exits with add_edge (condition = the component's port "
+            "name, e.g. approve/reject)."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "name": {
+                    "type": "string",
+                    "description": "Name for this component instance (used as a step name)",
+                },
+                "component": {
+                    "type": "string",
+                    "description": "Component name, e.g. approval_flow",
+                },
+                "params": {
+                    "type": "object",
+                    "description": "Component parameters; omit to use defaults",
+                },
+                "description": {
+                    "type": "string",
+                    "description": "Optional note about what this instance is for",
+                },
+            },
+            "required": ["name", "component"],
+        },
     },
     "validate_spec": {
         "description": (

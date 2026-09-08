@@ -146,3 +146,59 @@ def test_get_current_spec_returns_deep_copy():
     data["stages"][0]["name"] = "modified"
     data2 = spec.get_current_spec()
     assert data2["stages"][0]["name"] == "a"
+
+
+# ── 能力组件引用 ─────────────────────────────────────────
+
+
+def test_add_component_creates_a_reference_step():
+    spec = Spec()
+    spec.add_component("gate", "approval_flow", params={"title": "退货审批"})
+    step = spec.get_current_spec()["stages"][0]
+    assert step == {
+        "name": "gate",
+        "component": "approval_flow",
+        "params": {"title": "退货审批"},
+    }
+
+
+def test_add_component_without_params_omits_the_key():
+    spec = Spec()
+    spec.add_component("gate", "approval_flow")
+    assert "params" not in spec.get_current_spec()["stages"][0]
+
+
+def test_add_component_rejects_empty_names():
+    spec = Spec()
+    with pytest.raises(SpecError):
+        spec.add_component("", "approval_flow")
+    with pytest.raises(SpecError):
+        spec.add_component("gate", "")
+
+
+def test_add_component_rejects_duplicate_step_name():
+    spec = Spec()
+    spec.add_step("gate", "d", "agent")
+    with pytest.raises(SpecError, match="already exists"):
+        spec.add_component("gate", "approval_flow")
+
+
+def test_edges_can_point_at_and_from_a_component_step():
+    spec = Spec()
+    spec.add_step("start", "d", "agent")
+    spec.add_component("gate", "approval_flow")
+    spec.add_step("done", "d", "terminal")
+    spec.add_edge("start", "gate", "success")
+    spec.add_edge("gate", "done", "approve")
+    spec.validate()  # 不该因为 gate 没有 type 就报错
+
+
+def test_validate_rejects_step_with_neither_type_nor_component():
+    """既没 type 也没 component 的 step 要在校验阶段就拦下——放过去的话，
+    Play 到这一步才在 executor 里报 unknown step type，那时已经跑掉几步了。"""
+    spec = Spec({"stages": [
+        {"name": "broken", "next_on_success": "done"},
+        {"name": "done", "type": "terminal"},
+    ]})
+    with pytest.raises(SpecError, match="no valid type"):
+        spec.validate()

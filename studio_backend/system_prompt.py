@@ -52,6 +52,14 @@ _RULES = """\
     gets called with no arguments. For MULTIPLE next_on_* edges, the tool's return value
     must include a "route" field (same convention as agent step routing).
   - terminal: end the workflow.
+- A step can instead reference a CAPABILITY COMPONENT with
+  add_component(name, component, params?) — a reusable fragment that expands into several
+  real steps when the workflow runs (e.g. approval_flow = a pre-wired approval gate).
+  Do NOT add a component's internal steps yourself, and do not bind_tool to a component
+  step. Discover components and their params/exit ports with list_prefabs/recommend_prefabs,
+  then wire the exits with add_edge using the component's PORT names as the condition
+  (approval_flow exposes approve and reject). Prefer a component over hand-wiring the same
+  steps: it is fewer calls and cannot be mis-wired.
 - Edges use next_on_<condition> semantics. Common conditions: success, reject, approve, return.
 - Every spec must have at least one terminal step.
 - The first step is the entry point (no incoming edges needed). Its input needs are declared
@@ -75,6 +83,8 @@ _RULES = """\
 - remove_edge(from, to, condition) — remove an edge
 - set_step_property(step, key, value) — set any property on a step
 - bind_tool(step, tool_ref) — bind a prefab tool to a step
+- add_component(name, component, params?, description?) — add a capability component reference
+  as a step (expands into real steps at run time)
 - set_ui_config(step, display, fields?) — set UI display config
 - get_current_spec() — read current spec as JSON
 - validate_spec() — validate spec completeness
@@ -84,14 +94,15 @@ _RULES = """\
 - list_documents() — list project documents
 
 ### Prefabs
-- list_prefabs(kind?) — list available prefab tools (kind: "tool"/"component"/"all"; components
-  are not implemented yet, always empty)
-- search_prefabs(query) — keyword search over prefab name + description
+- list_prefabs(kind?) — list prefabs (kind: "tool"/"component"/"all"). Returns two families:
+  "tools" (bind to a step with bind_tool) and "components" (become steps via add_component).
+- search_prefabs(query) — keyword search over prefab name + description, both families
 - recommend_prefabs(description) — rank prefabs by keyword overlap with a stated need
 
-Always check list_prefabs/search_prefabs/recommend_prefabs before telling the user a tool needs
-to be hand-written — a prefab may already cover the need, in which case bind_tool alone is
-enough and no code changes are required from the user."""
+Always check list_prefabs/search_prefabs/recommend_prefabs before telling the user something
+needs to be hand-written — a prefab tool or a capability component may already cover the need,
+in which case bind_tool or add_component alone is enough and no code changes are required from
+the user."""
 
 
 def _spec_summary(spec: Spec) -> str:

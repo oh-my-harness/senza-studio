@@ -104,6 +104,28 @@ export default function Canvas() {
   const selectStep = useStudioStore((s) => s.selectStep);
   const selectedStepName = useStudioStore((s) => s.selectedStepName);
   const stepStatus = useStudioStore((s) => s.stepStatus);
+  const runtimeSpec = useStudioStore((s) => s.runtimeSpec);
+
+  // 画布画的是编辑态 spec（能力组件保持引用形态，一个 step 一个节点），但
+  // 运行时跑的是展开后的 step（gate_review/gate_notify）。把展开出来的
+  // step 状态折回它所属的组件节点，否则 Play 到组件里时画布上那个节点
+  // 一直不高亮，看着像卡住了。组件内部的展开视图是后续切片的事。
+  const effectiveStatus = useMemo(() => {
+    if (!runtimeSpec) return stepStatus;
+    const owner: Record<string, string> = {};
+    for (const stage of runtimeSpec.stages) {
+      const instance = stage["_component_instance"];
+      if (typeof instance === "string") owner[stage.name] = instance;
+    }
+    const folded: typeof stepStatus = { ...stepStatus };
+    for (const [name, status] of Object.entries(stepStatus)) {
+      const instance = owner[name];
+      // running 优先于 done：组件里前一步 done、当前步 running 时，
+      // 组件节点该显示 running。
+      if (instance && folded[instance] !== "running") folded[instance] = status;
+    }
+    return folded;
+  }, [stepStatus, runtimeSpec]);
 
   const { nodes, edges } = useMemo(() => {
     const stages = spec.stages || [];
@@ -131,7 +153,7 @@ export default function Canvas() {
         whiteSpace: "normal",
         wordBreak: "break-word",
         background:
-          RUN_STATUS_BG[stepStatus[step.name]] ??
+          RUN_STATUS_BG[effectiveStatus[step.name]] ??
           (selectedStepName === step.name ? "#eff6ff" : "#fff"),
       },
       sourcePosition: Position.Bottom,
@@ -157,7 +179,7 @@ export default function Canvas() {
     }
 
     return { nodes, edges };
-  }, [spec, selectedStepName, stepStatus]);
+  }, [spec, selectedStepName, effectiveStatus]);
 
   return (
     <div className="flex flex-col h-full w-full">
