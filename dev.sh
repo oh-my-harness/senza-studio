@@ -115,6 +115,14 @@ if ! python -c "import senza_studio_components" 2>/dev/null; then
   uv pip install -e ./senza-studio-components
 fi
 
+# ── 检查 senza-studio-runtime ───────────────────────────
+# 同上，也是本仓库的子目录包。executor/judge/预处理器的实现在这里，Studio 自己
+# 也 import 它——不装的话后端起不来。
+if ! python -c "import senza_studio_runtime" 2>/dev/null; then
+  echo "📦 安装 senza-studio-runtime（运行时）..."
+  uv pip install -e ./senza-studio-runtime
+fi
+
 # ── 检查 node_modules ───────────────────────────────────
 if [ ! -d "studio_frontend/node_modules" ]; then
   echo "❌ node_modules 不存在，正在安装..."

@@ -6,8 +6,8 @@ Usage:
 
 Studio's meta-agent and Play executor depend on a specific set of senza
 symbols (functions, plugins, HarnessBuilder methods, WorkflowEngine). That
-surface is described in studio_backend/agent.py, studio_backend/play.py, and
-studio_backend/tools/*.py, hand-written against whatever senza-sdk version
+surface is described in studio_backend/agent.py, studio_backend/tools/*.py and
+senza-studio-runtime/senza_studio_runtime/*.py, hand-written against whatever senza-sdk version
 happened to be installed at the time. Nothing previously checked that those
 calls still match the ACTUAL installed SDK — which is exactly how a
 stale/mismatched SDK build can silently "look broken" (or silently look fine
@@ -39,6 +39,10 @@ SCANNED_FILES = [
     REPO_ROOT / "studio_backend" / "agent.py",
     REPO_ROOT / "studio_backend" / "play.py",
     *sorted((REPO_ROOT / "studio_backend" / "tools").glob("*.py")),
+    # Phase 7 之后 executor/judge/PlaySession 的实现搬到了这个包，用到的 senza
+    # 符号大头都在这里。不把它加进来的话，这个检查会安静地少扫三分之一的符号
+    # ——重构当天就从 22 掉到了 19，而"少扫了"和"没有 drift"看起来一模一样。
+    *sorted((REPO_ROOT / "senza-studio-runtime" / "senza_studio_runtime").glob("*.py")),
 ]
 
 # HarnessBuilder methods return the builder itself (fluent chain), so calls

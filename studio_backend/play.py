@@ -1,908 +1,103 @@
-"""Play 模式：直接用 senza 的 WorkflowEngine 跑 spec。
+"""Play 模式——实现已搬到 senza_studio_runtime（Phase 7）。
 
-`stages_to_workflow`（senza SDK 内置）已经把 `{"stages": [...]}` 编译成
-Workflow：每个非 terminal stage 变成一个 executor step（统一分派到
-"eda_executor"），terminal stage 被引擎直接短路成原生 Step::Terminal——
-永远不会调用这里的 executor 回调。所以 Studio 自己不需要写 spec 预处理器，
-只需要一个 executor 回调（支持 type: agent/checker/tool）和一个 judge
-回调（把 executor 返回的 route_key 翻成 "to:<step>"）。
+这一层只做两件事：
 
-`stages_to_workflow` 不会把 stage 的原始字段（type/prompt_template/...）
-透传进 executor_config，所以这里自己维护 step_name -> stage dict 和
-step_name -> {route_label: target} 两张表。
+1. **转发**运行时那些本来就与 Studio 无关的函数（executor/judge/模板渲染/
+   工具与插件加载），保留 ``studio_backend.play`` 这个导入路径；
+2. **翻译** Studio 的类型：运行时只认根目录 + spec dict + 模型名 + provider，
+   Project/StudioConfig → 这四个参数的转换发生在这里。
 
-回调工厂（make_judge/make_executor）与 spec_tools.make_spec_callbacks 同一
-模式：与 senza.create_judge/create_executor 的包装分离，方便直接单测。
+为什么实现要搬走：Phase 7 的验收标准是"导出项目行为和 Studio 里一致"。做到这
+一点唯一可靠的办法是两边跑**同一份**代码——各留一份拷贝的话漂移只是时间问题，
+而且这种漂移很隐蔽（Play 一个样、导出后另一个样，要跑起来才看得见）。
 """
 from __future__ import annotations
 
-import importlib.util
-import inspect
-import json
-import re
-import sys
-import threading
-import uuid
 from pathlib import Path
 from typing import Any, Callable
 
-import senza
+from senza_studio_runtime import play as _runtime
+
+# ── 与 Studio 无关，直接转发 ────────────────────────────
+from senza_studio_runtime.play import (  # noqa: F401
+    PENDING_APPROVAL,
+    build_route_maps,
+    decision_context_key,
+    get_entry_inputs,
+    make_executor,
+    make_judge,
+    render_prompt_template,
+    render_tool_args,
+    # 下面这几个是内部helper，转发出来是为了让现有单测继续按原路径 import
+    # ——它们本来就在直接测这些小函数（模板渲染的边界、工具返回值归一化
+    # 之类），换个 import 路径没有任何收益。
+    _append_routing_instruction,
+    _call_tool,
+    _extract_json_fields,
+    _normalize_tool_result,
+)
 
 from .config import StudioConfig
-from .preprocess import preprocess_spec
 from .project import Project
 from .spec import Spec
 
-_TERMINAL_TYPES = frozenset({"settled", "aborted", "error", "agent_end"})
-_SKIP_TYPES = frozenset({"timeout"})
+__all__ = [
+    "PENDING_APPROVAL",
+    "PlaySession",
+    "build_route_maps",
+    "decision_context_key",
+    "get_entry_inputs",
+    "load_project_plugins",
+    "load_tool_registry",
+    "make_executor",
+    "make_judge",
+    "render_prompt_template",
+    "render_tool_args",
+]
 
 
 def _create_provider(config: StudioConfig) -> Any:
-    api_key = config.api_key
-    api_base = config.api_base if config.api_base else None
-    return senza.providers.openai(api_key=api_key, base_url=api_base)
-
-
-def build_route_maps(
-    spec_dict: dict,
-) -> tuple[dict[str, dict], dict[str, dict[str, str]]]:
-    """从 spec dict 构建 step_name -> stage dict 和 step_name -> {label: target}。"""
-    stage_by_name: dict[str, dict] = {}
-    routes_by_name: dict[str, dict[str, str]] = {}
-    for stage in spec_dict.get("stages", []):
-        name = stage["name"]
-        stage_by_name[name] = stage
-        routes: dict[str, str] = {}
-        for key, val in stage.items():
-            if key.startswith("next_on_") and isinstance(val, str):
-                routes[key[len("next_on_") :]] = val
-        routes_by_name[name] = routes
-    return stage_by_name, routes_by_name
-
-
-_TEMPLATE_VAR_RE = re.compile(r"\{\{(\w+)\}\}")
-
-
-def render_prompt_template(template: str, context: dict) -> str:
-    """替换 prompt_template 里的 {{var}} 占位符。
-
-    故意不用 str.format()：real prompt_template 经常自带单花括号 JSON 例子
-    （比如 '{"classification": "complaint" | "question"}'），.format() 会把
-    它们当成格式字段解析，多半直接 KeyError，导致整个模板一次替换都不做，
-    连正常的 {{var}} 也不替换。这里只认双花括号，其它内容完全不碰；缺失的
-    变量保留原样（而不是报错/清空模板），方便一眼看出漏填了什么。
-    """
-
-    def _sub(m: re.Match) -> str:
-        key = m.group(1)
-        return str(context[key]) if key in context else m.group(0)
-
-    return _TEMPLATE_VAR_RE.sub(_sub, template)
-
-
-def render_tool_args(tool_args: Any, context: dict) -> dict:
-    """渲染 tool step 的 tool_args——跟 prompt_template 一样用 {{var}} 从
-    context 取值，但作用对象是一个 dict（每个字符串 value 各自替换一次），
-    不是一整段模板。非字符串 value（作者直接写死的数字/布尔等）原样传递。
-    没声明 tool_args 的 step 得到空 dict——工具需要的参数必须显式声明，
-    不能隐式拿整个 context（跟 agent step 只能通过 prompt_template 里的
-    {{var}} 声明输入是同一个原则）。
-
-    tool_args 来自 spec（可能是元 agent 通过 set_step_property 写进去的，
-    也可能是人手改 pipeline.yaml）——不是 Studio 自己生成的可信数据，是个
-    真实的输入边界。实测元 agent 的 LLM 调用 set_step_property 时会偶尔把
-    这个本该是 dict 的 value 参数吐成一段 JSON 字符串（比如
-    '{"city": "{{city}}"}'）而不是真正的嵌套对象——大概率是模型在处理一个
-    schema 里没标注具体 type（"any JSON type"）的参数时的常见毛病。不做
-    防御的话，这里会直接 AttributeError（字符串没有 .items()），而且是在
-    调用方 try/except 包裹的范围之外抛出，会把整个 executor 回调打崩，而
-    不是干净地失败成这一个 step 的 error。所以这里既接受字符串（尝试当
-    JSON 解析一遍），也接受任何解析不出 dict 的情况——一律退化成空 dict，
-    而不是让整个 workflow 崩掉。
-    """
-    if isinstance(tool_args, str):
-        try:
-            tool_args = json.loads(tool_args)
-        except (json.JSONDecodeError, ValueError):
-            tool_args = {}
-    if not isinstance(tool_args, dict):
-        return {}
-    return {
-        key: render_prompt_template(value, context) if isinstance(value, str) else value
-        for key, value in tool_args.items()
-    }
-
-
-def get_entry_inputs(spec_dict: dict) -> list[str]:
-    """入口 step（第一个 stage，与 stages_to_workflow 的 entry_step 规则一致）
-    prompt_template 里引用的 {{var}} 占位符——Play 前需要真人手动填的种子
-    输入（比如 customer_message），因为 Studio 不接真实生产流量。
-
-    故意扫 prompt_template 本身，而不是 ui.fields：ui.fields 是展示配置
-    （这个 step 结果要在 Game view 用哪些字段渲染 chart/table 卡片），跟
-    "这个 step 需要哪些输入" 是完全不同的两件事——同一个字段名可能两边都
-    用（巧合），也可能像 ui.fields=[route, reasoning] 这种纯输出展示字段
-    完全对不上输入，把它当输入需求会问出不存在的字段。prompt_template 里
-    实际出现的 {{var}} 才是唯一可靠的输入来源。
-
-    收编辑态 spec，内部自己先 preprocess——spec 第一个 stage 可能是个能力
-    组件引用，它本身没有 prompt_template，展开后的入口 step 才有。调用方
-    （比如 /api/projects/{id}/entry-inputs）因此不用关心组件语义。
-    """
-    stages = preprocess_spec(spec_dict).get("stages", [])
-    if not stages:
-        return []
-    template = stages[0].get("prompt_template", "")
-    seen: list[str] = []
-    for match in _TEMPLATE_VAR_RE.finditer(template):
-        key = match.group(1)
-        if key not in seen:
-            seen.append(key)
-    return seen
-
-
-# checker step 在等人工审批时，executor 返回这个 route_key——judge 认出
-# 它就转成 "pause:..."，而不是当成一个查不到边的路由错误。
-PENDING_APPROVAL = "__pending_approval__"
-
-
-def decision_context_key(step_id: str) -> str:
-    """人工审批结果存在 context 里的 key——完全是 Studio 内部记账，spec
-    作者不需要（也不能）声明它。checker executor 检查它决定要不要 pause，
-    submit_decision() 写它然后 resume。"""
-    return f"__decision_{step_id}__"
-
-
-def make_judge(routes_by_name: dict[str, dict[str, str]]) -> Callable[[dict], str]:
-    """路由回调：把 executor 返回的 route_key 翻成 senza judge 的 transition 字符串。"""
-
-    def play_judge(ctx: dict) -> str:
-        structured = ctx.get("structured") or {}
-        route_key = structured.get("route_key")
-        if route_key == PENDING_APPROVAL:
-            return f"pause:waiting for approval on '{ctx['step_id']}'"
-        routes = routes_by_name.get(ctx["step_id"], {})
-        target = routes.get(route_key)
-        if target is None:
-            reason = f"no route for '{route_key}' from '{ctx['step_id']}'"
-            # ctx["output"] 是 executor 真正返回的错误详情（比如 "step type
-            # 'checker' not supported until Phase 3"）——不带上的话，日志面板
-            # 只会看到一句不知道为什么的路由失败，得跑去 Game view 才看得到
-            # 真正原因。
-            output = ctx.get("output")
-            if output:
-                reason += f" — {output}"
-            return f"fail:{reason}"
-        return f"to:{target}"
-
-    return play_judge
-
-
-def _run_agent_step(harness: Any, prompt: str, emit: Any) -> tuple[str, int]:
-    """驱动一个短生命周期 harness 跑一轮 prompt，streaming 转发到 emit。
-
-    与 ws.py 的 run_prompt_streaming 同一模式：prompt() 阻塞到整轮结束，
-    必须放到独立线程，当前线程负责同步迭代 events() 拿 streaming token。
-
-    顺带数一遍这一轮里 LLM 发起了几次工具调用（tool_call_start）——
-    WorkflowEvent::StepFinished 自带的 tool_calls_count 字段对 Studio 的
-    executor-驱动 step 永远是硬编码的 0（Rust 侧看不到 Python 回调内部
-    发生了什么），这是唯一能拿到真实数字的地方，因为 harness.events()
-    是一次性消费的迭代器，事后没法回头再数。返回 (输出文本, 工具调用次数)。
-    """
-    errors: list[BaseException] = []
-    done = threading.Event()
-
-    def _do_prompt() -> None:
-        try:
-            harness.prompt(prompt)
-        except BaseException as exc:  # noqa: BLE001
-            errors.append(exc)
-            print(f"Play prompt error: {exc}", file=sys.stderr)
-        finally:
-            done.set()
-
-    prompt_thread = threading.Thread(target=_do_prompt, daemon=True)
-    prompt_thread.start()
-
-    text_parts: list[str] = []
-    tool_calls_count = 0
-    for event in harness.events(timeout_ms=5000, max_consecutive_timeouts=999):
-        if event is None:
-            if not prompt_thread.is_alive():
-                break
-            continue
-        if not isinstance(event, dict):
-            try:
-                event = dict(event)
-            except Exception:
-                continue
-        etype = event.get("type")
-        if etype in _SKIP_TYPES:
-            continue
-        if etype == "text_delta":
-            text = event.get("text", "")
-            text_parts.append(text)
-            emit.text_delta(text)
-        elif etype == "tool_call_start":
-            tool_calls_count += 1
-        elif etype in _TERMINAL_TYPES:
-            break
-
-    prompt_thread.join(timeout=125)
-    if errors:
-        raise errors[0]
-    return "".join(text_parts), tool_calls_count
-
-
-# 匹配回答里的扁平 JSON 对象（不支持嵌套花括号）——LLM 按我们的指示只会
-# 在末尾吐一个简单对象，比如 {"route": "complaint", "summary": "..."}。
-# 用来既提取路由标记，也提取其它想传给下游 step 的结构化字段。
-_JSON_BLOB_RE = re.compile(r"\{[^{}]*\}")
-
-
-def _append_routing_instruction(prompt: str, routes: list[str]) -> str:
-    """多路由时，要求 LLM 在回答末尾用一行 JSON 声明选中的路由。
-
-    如果 prompt_template 本身已经要求了别的 JSON 字段（比如给 output_key
-    用的 summary），这条指令必须显式提醒"保留原有字段"——否则模型会把
-    这条指令当成最后、最具体的要求，只吐一个只有 route 的 JSON，
-    _extract_json_fields 取最后一个 JSON blob 时就会把 summary 等字段
-    丢掉（实测触发过一次：多路由 + output_key 同时出现时 summary 消失）。
-    """
-    options = ", ".join(f'"{r}"' for r in routes)
-    return (
-        f"{prompt}\n\n---\n"
-        f"After your response, end with exactly one line containing a single JSON "
-        f"object with a \"route\" field, choosing whichever option best applies: "
-        f'{{"route": "<one of: {options}>"}}. '
-        f"If your instructions above already asked for other JSON fields (e.g. a "
-        f"summary), keep them in this same JSON object alongside \"route\" — "
-        f"do not drop them."
-    )
-
-
-def _extract_json_fields(output: str) -> tuple[dict, str]:
-    """找输出里最后一个扁平 JSON 对象，解析出字段，并从展示文本里去掉这段。
-
-    找不到、解析失败、或解析出来不是 dict，都原样返回（fields={}）——不是
-    每个 agent step 都会吐 JSON，纯文字回复（比如草拟的客服回信）应该
-    完全不受影响。
-    """
-    last_match = None
-    for m in _JSON_BLOB_RE.finditer(output):
-        last_match = m
-    if last_match is None:
-        return {}, output
-    try:
-        fields = json.loads(last_match.group(0))
-    except (json.JSONDecodeError, ValueError):
-        return {}, output
-    if not isinstance(fields, dict):
-        return {}, output
-    clean_output = (output[: last_match.start()] + output[last_match.end() :]).strip()
-    return fields, clean_output
-
-
-def _load_prefab_tools() -> dict[str, Callable]:
-    """senza_studio_components 是本仓库 ./senza-studio-components 子目录里的
-    独立 pip 包（Phase 4）——dev.sh 会 editable install 它，但没装的话降级成
-    没有预制件可用，不影响项目自己的 tools/registry.py。"""
-    try:
-        from senza_studio_components import registry as prefab_registry
-    except ImportError:
-        return {}
-    return dict(prefab_registry.get_tools())
-
-
-def load_project_plugins(project: Project) -> tuple[list[Any], list[str]]:
-    """加载 <project>/plugins/ 下的项目插件集，返回 (plugins, 错误列表)。
-
-    约定跟 tools/registry.py 一致：每个 ``plugins/*.py`` 暴露一个
-    ``get_plugins()``，返回 senza Plugin 列表（``senza.create_plugin`` 造
-    的）。下划线开头的文件跳过，方便放公共代码。
-
-    **插件集是隔离的**（设计文档 §7）：这里只加载当前项目的插件，绝不注入
-    Studio 元 agent 自己那套（fs_tools/safety_defaults/injection_filter
-    等）。业务流程该跑什么工具由项目自己决定，不该因为它跑在 Studio 里就
-    莫名其妙多出一堆 Studio 的能力——那样导出之后行为还会变。
-
-    和 load_tool_registry 一样每次 Play 重新 import（不热加载、不跨项目缓
-    存）：换一个新模块名绕开 sys.modules，这样开发者改完插件下一次 Play
-    就生效，也不会让两个项目里同名的 plugins/foo.py 互相串。
-
-    单个插件加载失败不影响其它插件，也不让整个 Play 崩——插件是加法，缺一
-    个只是少一批工具。错误收集起来由调用方显示给用户，否则 agent 会莫名其
-    妙少了工具却没有任何提示。
-    """
-    plugins_dir = project.path / "plugins"
-    if not plugins_dir.is_dir():
-        return [], []
-
-    plugins: list[Any] = []
-    errors: list[str] = []
-    for path in sorted(plugins_dir.glob("*.py")):
-        if path.name.startswith("_"):
-            continue
-        try:
-            get_plugins = getattr(_exec_module_fresh(path), "get_plugins", None)
-            if get_plugins is None:
-                errors.append(f"plugins/{path.name}: 没有定义 get_plugins()")
-                continue
-            produced = get_plugins()
-        except Exception as exc:  # noqa: BLE001
-            errors.append(f"plugins/{path.name}: 加载失败: {exc}")
-            continue
-
-        if not isinstance(produced, (list, tuple)):
-            errors.append(
-                f"plugins/{path.name}: get_plugins() 必须返回列表，"
-                f"实际返回了 {type(produced).__name__}"
-            )
-            continue
-        for item in produced:
-            if isinstance(item, senza.Plugin):
-                plugins.append(item)
-            else:
-                # 明确报错而不是静默丢掉：最常见的写法错误就是返回了
-                # create_tool 造的 Tool（或一个裸函数），而不是 Plugin。
-                errors.append(
-                    f"plugins/{path.name}: get_plugins() 返回了 "
-                    f"{type(item).__name__}，需要的是 senza.create_plugin() "
-                    f"造出来的 Plugin"
-                )
-    return plugins, errors
-
-
-def _exec_module_fresh(path: Path) -> Any:
-    """按文件路径加载一个模块，且**绕开 .pyc 字节码缓存**。
-
-    为什么不用 spec.loader.exec_module：CPython 的字节码缓存是按
-    (mtime, size) 判断新旧的。同一秒内把文件改成**长度相同**的另一份内容
-    （"v1" → "v2" 这种），两个 key 都没变，import 机制会直接用
-    __pycache__ 里的旧 .pyc——改了代码却完全不生效，还查不出原因。
-
-    Studio 的三处热加载（tools/registry.py、tools/generated|custom/、
-    plugins/）都对外承诺"改完下一次 Play 立刻生效"，所以统一走自己
-    compile+exec，缓存根本不参与。
-
-    模块名每次都换新的，同时绕开 sys.modules 缓存——两个项目里同名的
-    registry.py / plugins/foo.py 不会互相串。
-    """
-    module_name = f"_studio_fresh_{uuid.uuid4().hex}"
-    spec = importlib.util.spec_from_file_location(module_name, path)
-    if spec is None:
-        raise ImportError(f"spec_from_file_location 失败: {path}")
-    module = importlib.util.module_from_spec(spec)
-    source = path.read_text(encoding="utf-8")
-    sys.modules[module_name] = module
-    try:
-        exec(compile(source, str(path), "exec"), module.__dict__)
-    finally:
-        sys.modules.pop(module_name, None)
-    return module
-
-
-def _load_tool_dir(
-    project: Project, subdir: str
-) -> tuple[dict[str, Callable], list[str]]:
-    """自动发现 ``tools/<subdir>/*.py``，每个文件读它的 ``TOOL`` dict。
-
-    形状见 toolgen.py：``{"name","description","parameters","callback"}``，与预制件
-    清单一致。这里运行时只用到 name 和 callback，另外两个是给元 agent 看的。
-
-    为什么是自动发现而不是往 registry.py 里追加注册（roadmap 的原话）：机器去改
-    用户手写的文件是整个方案里最容易出事的一步——用户手动编辑过 registry.py 之
-    后，AST 手术也好标记块也好都会翻车。不改它就没有这个风险，"重新生成
-    generated/ 不覆盖 custom/" 也从"小心翼翼保证"变成结构性成立。顺带把一个现有
-    缺口补上：custom/ 以前根本不会被自动加载，得手动在 registry.py 里 import。
-
-    加载方式跟 load_project_plugins 完全同构：下划线开头的文件跳过，每次换新模块
-    名绕开 sys.modules，单个文件坏掉只丢它自己。
-    """
-    directory = project.path / "tools" / subdir
-    if not directory.is_dir():
-        return {}, []
-
-    tools: dict[str, Callable] = {}
-    errors: list[str] = []
-    for path in sorted(directory.glob("*.py")):
-        if path.name.startswith("_"):
-            continue
-        label = f"tools/{subdir}/{path.name}"
-        try:
-            tool = getattr(_exec_module_fresh(path), "TOOL", None)
-        except Exception as exc:  # noqa: BLE001
-            errors.append(f"{label}: 加载失败: {exc}")
-            continue
-
-        if not isinstance(tool, dict):
-            errors.append(
-                f"{label}: 需要一个 TOOL dict"
-                + ("" if tool is None else f"，实际是 {type(tool).__name__}")
-            )
-            continue
-        name = tool.get("name")
-        callback = tool.get("callback")
-        if not isinstance(name, str) or not name:
-            errors.append(f"{label}: TOOL['name'] 缺失或不是字符串")
-            continue
-        if not callable(callback):
-            errors.append(f"{label}: TOOL['callback'] 不是可调用对象")
-            continue
-        tools[name] = callback
-    return tools, errors
+    """保留这个名字：Studio 里已有调用点（agent.py 另有一份自己的）。"""
+    return _runtime.create_provider(config.api_key, config.api_base)
 
 
 def load_tool_registry(project: Project) -> tuple[dict[str, Callable], str | None]:
-    """加载工具：先铺一层 senza_studio_components 的预制件工具（Phase 4），
-    项目自己 <project>/tools/registry.py 里同名的工具覆盖预制件（项目定制
-    优先于通用预制件——跟其它"项目本地覆盖共享默认值"的场景是同一个道理）。
-
-    每次 Play 都重新读一遍项目 registry.py（不缓存跨次 Play，也不缓存跨
-    项目）——用 spec_from_file_location + 每次换一个新模块名绕开
-    sys.modules 缓存，这样：(1) 开发者手改 registry.py 后下一次 Play 立刻
-    生效，不用重启 Studio 后端；(2) 两个不同项目都可能有一个叫
-    "registry.py" 的文件，固定用同一个模块名（比如 "tools.registry"）会
-    导致后加载的项目复用前一个项目缓存在 sys.modules 里的模块，读到别的
-    项目的工具。
-
-    没有 registry.py 的项目不算错误——预制件仍然可用，只是没有项目自定义
-    工具。项目 registry.py import 失败（语法错误、get_tools 不存在、返回
-    值不是 dict）也不会丢掉已经加载好的预制件——只把这条消息带回去，由
-    调用方决定要不要在某个具体 tool step 找不到工具时把它带上，而不是让
-    整个 Play 在构建阶段就崩溃，也不该因为项目自己的 registry.py 坏了就
-    连预制件都用不了。
-    """
-    tools = _load_prefab_tools()
-
-    # 自动发现两个目录，generated 在前、custom 在后——同名时开发者手写的
-    # custom/ 覆盖元 agent 生成的 generated/，这正是"重新生成不覆盖手写"的
-    # 运行时保证。
-    discovery_errors: list[str] = []
-    for subdir in ("generated", "custom"):
-        found, errors = _load_tool_dir(project, subdir)
-        tools.update(found)
-        discovery_errors.extend(errors)
-
-    def _combine(extra: str | None) -> str | None:
-        parts = [*discovery_errors, *( [extra] if extra else [] )]
-        return "；".join(parts) if parts else None
-
-    registry_path = project.path / "tools" / "registry.py"
-    if not registry_path.exists():
-        return tools, _combine(None)
-
-    try:
-        project_tools = _exec_module_fresh(registry_path).get_tools()
-        if not isinstance(project_tools, dict):
-            return (
-                tools,
-                _combine(
-                    f"tools/registry.py 的 get_tools() 必须返回 dict，"
-                    f"实际返回了 {type(project_tools).__name__}"
-                ),
-            )
-        tools.update(project_tools)
-        return tools, _combine(None)
-    except Exception as exc:  # noqa: BLE001
-        return tools, _combine(f"加载 tools/registry.py 失败: {exc}")
+    """按 Project 加载工具。实现见 senza_studio_runtime.play.load_tool_registry
+    ——运行时收的是根目录，这里只负责把 Project 翻成路径。"""
+    return _runtime.load_tool_registry(project.path)
 
 
-def _call_tool(callback: Callable, args: dict, ctx: dict) -> Any:
-    """按回调实际接收几个位置参数决定传 (args) 还是 (args, ctx)——跟 senza
-    自己的 create_tool 回调归一化是同一个思路，方便同一个函数以后不改
-    签名就能直接被 senza.create_tool(callback=fn) 包装复用。"""
-    try:
-        n_params = len(inspect.signature(callback).parameters)
-    except (TypeError, ValueError):
-        n_params = 2
-    if n_params <= 1:
-        return callback(args)
-    return callback(args, ctx)
+def load_project_plugins(project: Project) -> tuple[list[Any], list[str]]:
+    """按 Project 加载插件集。实现见 senza_studio_runtime.play。"""
+    return _runtime.load_project_plugins(project.path)
 
 
-def _normalize_tool_result(result: Any) -> tuple[dict, str, str | None]:
-    """把 tool 回调的返回值统一成 (fields, output, route)，跟 agent step
-    的 _extract_json_fields 是同一个模型：dict 返回值里非 "route" 的字段
-    写进 context 供下游引用，"route" 字段（如果有）用来选边；纯文本返回
-    值直接当展示输出，没有可写进 context 的字段。
-    """
-    if isinstance(result, dict):
-        fields = {k: v for k, v in result.items() if k != "route"}
-        route = result.get("route")
-        output = result.get("output")
-        if output is None:
-            output = json.dumps(fields, ensure_ascii=False, default=str) if fields else ""
-        return fields, output, route
-    return {}, "" if result is None else str(result), None
+class PlaySession(_runtime.PlaySession):
+    """Studio 侧的 PlaySession：把 Project/StudioConfig 翻成运行时的入参，
+    并额外做 Studio 自己的记账（项目 meta 里的 status）。
 
-
-def make_executor(
-    stage_by_name: dict[str, dict],
-    routes_by_name: dict[str, dict[str, str]],
-    model: str,
-    provider: Any,
-    env: Any,
-    engine_ref: dict[str, Any],
-    tools_by_name: dict[str, Callable] | None = None,
-    tools_load_error: str | None = None,
-    plugins: list[Any] | None = None,
-) -> Callable[[dict], dict]:
-    """执行回调：支持 type: agent、checker、tool。
-
-    engine_ref 是个可变的"晚绑定"容器——PlaySession.play() 构造 executor
-    时 WorkflowEngine 还不存在（executor 得先造好才能传给 WorkflowEngine
-    构造函数），engine 建好之后才把它塞进 engine_ref["engine"]。这样
-    executor 自己才能在 agent step 算完结果后调用
-    engine.set_context_variable(...) 往共享 context 写数据（ctx 参数本身
-    只有 context 的只读快照，没有写入口）——实测同一个 engine 在自己的
-    executor 回调里反过来调用它自己的 set_context_variable 不会死锁。
-
-    短生命周期 harness——不带元 agent 的 spec/doc/prefab 工具或 strategy
-    插件栈，那些是 Studio 自己的 meta agent 专属（agent.py）。这里跑的是
-    spec 里被作者定义出来的 agent，项目自己的 plugins/（Phase 4）暂未接入。
-    """
-
-    def _write_context(output_key: str | None, fields: dict) -> None:
-        engine = engine_ref.get("engine")
-        if engine is None:
-            return
-        if output_key:
-            engine.set_context_variable(output_key, fields.get("_output", ""))
-        for key, value in fields.items():
-            if key not in ("route", "_output"):
-                engine.set_context_variable(key, value)
-
-    def play_executor(ctx: dict) -> dict:
-        step_id = ctx["step_id"]
-        stage = stage_by_name.get(step_id)
-        if stage is None:
-            return {
-                "output": f"Error: unknown step '{step_id}'",
-                "structured": {"route_key": "error"},
-            }
-        stage_type = stage.get("type")
-
-        if stage_type == "checker":
-            # 人工审批门——不调用 LLM，只看 submit_decision() 有没有写过
-            # 决定。没有就让 judge pause；有就直接按决定路由。
-            decision = ctx["context"].get(decision_context_key(step_id))
-            if decision is None:
-                # stage.message 是 spec 作者给这道审批门写的说明（能力组件的
-                # title 参数也落在这里），有就显示它——审批人看到"退货审批：
-                # 金额超过 500 需人工确认"比看到一句通用的"等待人工审批"
-                # 有用得多。
-                return {
-                    "output": stage.get("message") or "等待人工审批…",
-                    "structured": {"route_key": PENDING_APPROVAL},
-                }
-            return {
-                "output": f"人工审批结果: {decision}",
-                "structured": {"route_key": decision},
-            }
-
-        if stage_type == "tool":
-            # tools_load_error 只说明项目自己的 tools/registry.py 没加载成功
-            # ——不代表完全没有工具可用（预制件那一层是独立加载的，见
-            # load_tool_registry），所以这里不再无条件让每个 tool step 都
-            # 失败，只在真的找不到这个具体工具时才把这条消息带上，帮助
-            # 排查到底是"工具压根不存在"还是"项目 registry.py 坏了"。
-            tool_ref = stage.get("tool")
-            if not tool_ref:
-                return {
-                    "output": "Error: step has no bound tool (use bind_tool)",
-                    "structured": {"route_key": "error"},
-                }
-            callback = (tools_by_name or {}).get(tool_ref)
-            if callback is None:
-                reason = f"tool '{tool_ref}' not found (checked prefabs and project tools/registry.py)"
-                if tools_load_error:
-                    reason += f" — 项目 tools/registry.py 加载失败: {tools_load_error}"
-                return {"output": f"Error: {reason}", "structured": {"route_key": "error"}}
-
-            args = render_tool_args(stage.get("tool_args") or {}, ctx["context"])
-            try:
-                raw_result = _call_tool(callback, args, {"step_id": step_id})
-            except Exception as exc:  # noqa: BLE001
-                return {"output": f"Error: {exc}", "structured": {"route_key": "error"}}
-
-            fields, output, route = _normalize_tool_result(raw_result)
-            routes = sorted(routes_by_name.get(step_id, {}).keys())
-            if len(routes) > 1:
-                route_key = route if route in routes else "error"
-            else:
-                route_key = routes[0] if routes else "success"
-
-            _write_context(stage.get("output_key"), {**fields, "_output": output})
-
-            return {
-                "output": output,
-                "structured": {
-                    "route_key": route_key,
-                    "fields": fields,
-                    "_debug": {"tool": tool_ref, "args": args},
-                },
-            }
-
-        if stage_type != "agent":
-            return {
-                "output": f"Error: unknown step type '{stage_type}'",
-                "structured": {"route_key": "error"},
-            }
-
-        prompt_template = stage.get("prompt_template", "")
-        prompt = render_prompt_template(prompt_template, ctx["context"])
-
-        # 单一路由（或没声明路由，比如直接接 terminal）不用 LLM 决策，
-        # 直接走那条边；多路由才要求 LLM 在回答末尾声明选中哪条。
-        routes = sorted(routes_by_name.get(step_id, {}).keys())
-        if len(routes) > 1:
-            prompt = _append_routing_instruction(prompt, routes)
-
-        # 项目插件集（设计文档 §7 的"插件集隔离"）：只装当前项目 plugins/
-        # 里的插件，不注入 Studio 元 agent 那一套。装的是项目自己的东西，
-        # 所以导出之后 agent step 的行为跟在 Studio 里跑是一致的。
-        builder = senza.HarnessBuilder(model).provider("*", provider).env(env)
-        for plugin in plugins or []:
-            builder = builder.plugin(plugin)
-        harness = builder.build()
-        try:
-            raw_output, tool_calls_count = _run_agent_step(harness, prompt, ctx["emit"])
-        except Exception as exc:  # noqa: BLE001
-            return {"output": f"Error: {exc}", "structured": {"route_key": "error"}}
-
-        # usage() 是 harness 累计值，但这是个一次性、单轮 prompt 用完就扔的
-        # harness（每个 agent step 一个新的），累计值就是这一轮的值。
-        try:
-            usage = harness.usage()
-        except Exception:  # noqa: BLE001
-            usage = None
-
-        # 不管路由数量，都尝试从回答里摘 JSON 字段——分类步骤常常在
-        # {"route": ...} 之外还顺带吐 summary/classification 这类给下游用
-        # 的字段，即使这个 step 本身只有一条路由也一样。
-        fields, output = _extract_json_fields(raw_output)
-
-        if len(routes) > 1:
-            route_key = fields.get("route")
-            if route_key not in routes:
-                route_key = "error"
-        else:
-            route_key = routes[0] if routes else "success"
-
-        _write_context(stage.get("output_key"), {**fields, "_output": output})
-
-        return {
-            "output": output,
-            "structured": {
-                "route_key": route_key,
-                # GameView 的 table/chart 卡片用——spec 作者在 ui.fields 里点名
-                # 要展示哪些字段，这里把这一轮实际算出来的字段值原样带上。
-                "fields": fields,
-                # Inspector 运行态用——prompt 是真正发给模型的完整文本（包含
-                # 多路由时追加的 routing 指令），不是没渲染过的 prompt_template。
-                "_debug": {
-                    "prompt": prompt,
-                    "tool_calls_count": tool_calls_count,
-                    "usage": usage,
-                },
-            },
-        }
-
-    return play_executor
-
-
-class PlaySession:
-    """管理一次 Play 运行的 WorkflowEngine 生命周期。
-
-    与 StudioAgent 对称：__init__ 只存引用，play() 才真正 build engine
-    并在后台线程跑 .run()。
+    记账留在这一层而不是下沉进运行时：导出的项目没有 meta.json，也没有"项目
+    状态"这个概念，那是 Studio 的项目列表要用的东西。
     """
 
     def __init__(self, config: StudioConfig, project: Project, spec: Spec) -> None:
+        # 只存引用，什么都不读——和重构前一致的惰性。构造之后、Play 之前
+        # 改的 spec 也要能生效，所以 spec 的快照必须发生在 play() 那一刻，
+        # 不能在这里。（现有单测也依赖这一点：它们用 PlaySession(None,
+        # None, None) 单独测 pause/resume/step 的状态机。）
+        super().__init__()
         self._config = config
         self._project = project
         self._spec = spec
-        self._engine: Any = None
-        # play() 里填：这次运行真正执行的 spec（组件已展开）
-        self.runtime_spec: dict | None = None
-        # play() 里填：plugins/ 里加载失败的插件（非致命，展示给用户）
-        self.plugin_errors: list[str] = []
-        self._engine_ref: dict[str, Any] = {}
-        self._thread: threading.Thread | None = None
-        self.run_error: BaseException | None = None
-        # 用户是不是在"手动逐步执行"——Step 按钮或 Play Paused 打开它，
-        # Resume 按钮关掉它。submit_decision（checker 审批）需要知道这个：
-        # 不看这个标志的话，用户在单步模式下走到一个 checker、点了
-        # approve，resume() 之后会一路跑到底，而不是像其它 step 一样审批
-        # 完也只跑这一步就重新暂停——审批本质上也是"往前走了一步"，理应
-        # 遵守同一个单步节奏（亲测复现过这个 bug）。
-        self._step_mode = False
 
     def play(self, inputs: dict[str, str] | None = None, start_paused: bool = False) -> None:
-        """构建 WorkflowEngine。不启动 .run()——调用方必须先 events() 订阅，
-        再调用 start()，否则 tokio broadcast 会丢掉 run() 线程里发生太快
-        （比如立刻 fail 的 step，没有真实 LLM 调用）的早期事件：broadcast
-        只推送给"已订阅"的 receiver，订阅前发的消息一律丢弃，不会缓冲。
+        # Studio 类型 → 运行时入参，就在这一刻翻译
+        self._root = Path(self._project.path)
+        self._spec_dict = self._spec.get_current_spec()
+        self._model = self._config.model
+        self._provider = _create_provider(self._config)
 
-        inputs 是入口 step 的种子输入（见 get_entry_inputs），构建完 engine
-        后立刻用 set_context_variable 写入共享上下文，让入口 step 的
-        prompt_template 里的 {{field}} 占位符能被替换。
-
-        start_paused=True 时提前武装 pause（构造完 engine、还没 run() 过
-        就调 engine.pause()）——亲测 run() 的 pause 检查点在"当前 step 的
-        transition 已经 apply 之后"，不存在"一个 step 都不跑就暂停"这种
-        粒度；能做到的最好效果是保证恰好只跑第一个 step 就自动暂停，不管
-        流程本身跑多快，用户都能在第一个 step 后拿到控制权，用 Step 逐步
-        往下走，而不是像纯靠手动点 Pause 那样可能因为跑得太快漏过好几个
-        step 才追上（用户原话："even then the agent would have gone
-        through multiple steps if flow is fast enough"）。这次 pause 之后
-        的 Step/Resume 走的是已有的 step()/resume_run()，不需要额外改动。
-        """
-        # 编辑态 spec → 运行态 spec：把 component 引用展开成真正的 step
-        # （见 preprocess.py）。放在最前面，后面所有环节——路由表、executor、
-        # WorkflowEngine——看到的都是展开后的 step，不需要各自懂组件语义。
-        spec_dict = preprocess_spec(self._spec.get_current_spec())
-        # 前端要按"实际在跑的 step"来查路由和 ui 配置——能力组件展开后的
-        # step 名（gate_review）在编辑态 spec 里根本不存在，前端拿编辑态
-        # spec 查会一无所获（审批按钮渲染不出来，Play 直接卡死）。
-        self.runtime_spec = spec_dict
-        stage_by_name, routes_by_name = build_route_maps(spec_dict)
-        provider = _create_provider(self._config)
-        env = senza.create_os_env(str(self._project.path))
-        # 每次 Play 都重新读一遍项目的 tools/registry.py（见 load_tool_registry
-        # 注释）——不是只加载一次缓存住，开发者手改工具代码后不用重启后端。
-        tools_by_name, tools_load_error = load_tool_registry(self._project)
-        # 插件加载错误不阻断 Play（插件是加法，缺一个只是少一批工具），但
-        # 要让用户看见——不然 agent 莫名其妙少了工具却没有任何提示。
-        plugins, self.plugin_errors = load_project_plugins(self._project)
-
-        executor = make_executor(
-            stage_by_name,
-            routes_by_name,
-            self._config.model,
-            provider,
-            env,
-            self._engine_ref,
-            tools_by_name,
-            tools_load_error,
-            plugins,
-        )
-        judge = make_judge(routes_by_name)
-
-        self._engine = senza.WorkflowEngine(
-            spec_dict, provider, self._config.model, senza.create_judge(judge), env=env
-        )
-        self._engine.with_executor("eda_executor", senza.create_executor(executor))
-        # 晚绑定：executor 闭包在 engine 造好之前就已经创建，这里把真正的
-        # engine 塞进去，让它自己在 agent step 算完后能调用
-        # set_context_variable 往 context 写数据（详见 make_executor 注释）。
-        self._engine_ref["engine"] = self._engine
-
-        for key, value in (inputs or {}).items():
-            self._engine.set_context_variable(key, value)
-
-        self._step_mode = start_paused
-        if start_paused:
-            self._engine.pause("start paused")
+        super().play(inputs=inputs, start_paused=start_paused)
 
         self._project.meta["status"] = "playing"
         self._project._save_meta()
-
-    def _run_once(self) -> None:
-        """跑一次 .run()（初次启动或 pause 后 resume 都调这个）。
-
-        engine.run() 在 workflow 失败时 raise senza.SenzaError（比如
-        judge 返回 "fail:..."）——记到 run_error，让 run_play_streaming
-        能把清晰的 error 消息转发给前端，而不是让线程默认打印一个吓人的
-        未捕获异常 traceback 然后悄悄退出。
-
-        WorkflowPausedError 单独处理：judge 返回 "pause:..." 时 run() 也是
-        靠 raise 这个异常来通知调用方，但这是正常的"等人工审批"状态，不是
-        错误——不该记进 run_error，也不该打印成报错。
-        """
-        try:
-            self._engine.run()
-        except senza.WorkflowPausedError:
-            pass
-        except BaseException as exc:  # noqa: BLE001
-            self.run_error = exc
-            print(f"Play run error: {exc}", file=sys.stderr)
-
-    def start(self) -> None:
-        """在后台线程启动 .run()。必须在 events() 订阅之后调用（见 play()）。"""
-        if self._engine is None:
-            raise RuntimeError("Engine not built. Call play() first.")
-        self._thread = threading.Thread(target=self._run_once, daemon=True)
-        self._thread.start()
-
-    def submit_decision(self, step_id: str, decision: str) -> None:
-        """人工审批提交后调用：把决定写进 context，resume 引擎，再跑一次
-        run()——resume() 本身只翻内部状态，不会真的继续执行，得再调一次
-        run()（亲测行为）；同一个 .subscribe() 迭代器在多次 run() 之间
-        持续有效，不需要重新订阅。checker executor 在下一次被调用时会看到
-        这个 context 变量，不再返回 pending，从而正常路由下去。
-
-        _step_mode 时（用户在用 Play Paused/Step 手动逐步执行）额外重新
-        武装一次 pause——跟 step() 同样的 resume-then-pause 顺序（resume()
-        会清空 pause_requested，必须先 resume 再 pause，不然刚设的标志会
-        被清掉）。不这样做的话，审批完这一步会一路跑到底，把"逐步执行"
-        的节奏在 checker 这里打断（亲测复现过：Play Paused 一路 Step 到
-        审批节点，点 approve 后直接冲到终点）——审批本身也是往前走了一步，
-        应该跟其它 step 一样只跑这一步就再暂停。
-        """
-        if self._engine is None:
-            raise RuntimeError("Engine not built. Call play() first.")
-        self._engine.set_context_variable(decision_context_key(step_id), decision)
-        self._engine.resume()
-        if self._step_mode:
-            self._engine.pause("single-step (after approval)")
-        self.run_error = None
-        self.start()
-
-    def request_pause(self, reason: str = "user pause") -> None:
-        """控制条的 Pause 按钮用——跟 checker 的 pause 是两回事：这个是
-        engine.pause()（亲测：非阻塞，只是设个标志位，run() 在当前 step
-        的 transition 已经 apply 之后、下一个 step 开始之前才检查并消费），
-        不是 judge 返回 "pause:..."。区别很关键——judge 那种 pause 因为
-        路由还没定下来，resume 后会重新调用"当前"这个 step 的 executor；
-        这个 engine.pause() 因为 transition 已经 apply 过了，resume 后
-        会正常执行"下一个" step，不会把刚跑完、可能有副作用（发邮件、
-        真实 LLM 调用）的 step 重跑一遍。只在真的在跑的时候才有意义。
-        """
-        if self._engine is not None and self._engine.state() == "running":
-            self._engine.pause(reason)
-
-    def resume_run(self) -> None:
-        """控制条的 Resume 按钮用——从任意原因的暂停（checker 或手动
-        pause）恢复成正常连续运行，不重新武装暂停标志。关掉 _step_mode——
-        用户明确选择"别再逐步走了，跑到底"，之后再遇到 checker 审批
-        （submit_decision）也不该再帮它重新暂停。"""
-        if self._engine is not None and self._engine.state() == "paused":
-            self._step_mode = False
-            self._engine.resume()
-            self.run_error = None
-            self.start()
-
-    def step(self, reason: str = "single-step") -> None:
-        """控制条的 Step 按钮用——从暂停状态恰好再跑一个 step 就自动
-        重新暂停。必须先 resume() 再 pause()：resume() 会顺带把
-        pause_requested 标志清空（亲测行为），顺序反过来的话这里刚设的
-        标志会被 resume() 自己清掉，run() 就会一路跑到底而不是只跑一步。
-
-        打开 _step_mode——之后如果走到 checker 审批（submit_decision），
-        也会记得再帮它重新暂停一次，而不是让审批打断"逐步执行"的节奏。
-        """
-        if self._engine is not None and self._engine.state() == "paused":
-            self._step_mode = True
-            self._engine.resume()
-            self._engine.pause(reason)
-            self.run_error = None
-            self.start()
-
-    def stop(self, reason: str = "user stop") -> None:
-        """取消运行中的 engine。项目状态收尾（playing -> editing）由调用方
-        （ws.py 的 _finalize_play）负责，不在这里做——Stop 可能是在运行
-        自然结束（succeeded/failed）之后才点的，那种情况下 engine 已经
-        跑完，.cancel() 会把真实结果悄悄改写成 "cancelled"（亲测行为），
-        所以只在还真的在跑的时候才调用它。
-        """
-        if self._engine is not None and self._engine.state() in (
-            "idle",
-            "running",
-            "paused",
-        ):
-            self._engine.cancel(reason)
-
-    def events(self, timeout_ms: int = 5000, max_consecutive_timeouts: int = 999):
-        if self._engine is None:
-            raise RuntimeError("Play not started. Call play() first.")
-        return self._engine.subscribe(
-            timeout_ms=timeout_ms, max_consecutive_timeouts=max_consecutive_timeouts
-        )
-
-    def state(self) -> str:
-        if self._engine is None:
-            return "idle"
-        return self._engine.state()

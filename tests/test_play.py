@@ -5,7 +5,12 @@
 """
 import pytest
 
-import studio_backend.play as play
+# 实现搬到了 senza_studio_runtime（Phase 7）。这个别名只用来 monkeypatch
+# 模块内部符号（senza / _run_agent_step / _load_prefab_tools），所以要指到
+# 实现真正所在的模块——studio_backend.play 现在只是转发层，patch 它不会
+# 影响运行时内部的全局查找。下面 from studio_backend.play import ... 的
+# 公开 API 照旧走 Studio 那一层（PlaySession 在那里翻译 Project/Config）。
+import senza_studio_runtime.play as play
 from studio_backend.config import StudioConfig
 from studio_backend.play import (
     PENDING_APPROVAL,

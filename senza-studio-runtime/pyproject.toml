@@ -1,0 +1,23 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "senza-studio-runtime"
+version = "0.1.0"
+description = "Executor, judge and spec preprocessor for running Senza Studio workflows standalone."
+requires-python = ">=3.12"
+dependencies = [
+    "fastapi",
+    "uvicorn[standard]",
+    "pyyaml",
+]
+
+[project.optional-dependencies]
+dev = ["pytest"]
+
+[project.scripts]
+senza-studio-runtime = "senza_studio_runtime.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["senza_studio_runtime*"]

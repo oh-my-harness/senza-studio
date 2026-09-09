@@ -215,7 +215,11 @@ class _FakeBuilder:
 
 
 def test_project_plugins_are_installed_on_the_agent_step_harness(tmp_path, monkeypatch):
-    from studio_backend import play as play_mod
+    # 实现搬到了 senza_studio_runtime（Phase 7）。这两条是白盒测试，
+    # monkeypatch 的是模块内部符号，所以要指到实现真正所在的模块
+    # ——studio_backend.play 现在只是转发层，patch 它不会影响运行时
+    # 内部的全局查找。
+    from senza_studio_runtime import play as play_mod
 
     built: list[_FakeBuilder] = []
 
@@ -256,7 +260,11 @@ def test_play_harness_gets_no_studio_plugins(tmp_path, monkeypatch):
     漏进去的话，业务流程在 Studio 里跑和导出后跑行为会不一样——agent 在
     Studio 里能读写文件，导出之后突然不能了。
     """
-    from studio_backend import play as play_mod
+    # 实现搬到了 senza_studio_runtime（Phase 7）。这两条是白盒测试，
+    # monkeypatch 的是模块内部符号，所以要指到实现真正所在的模块
+    # ——studio_backend.play 现在只是转发层，patch 它不会影响运行时
+    # 内部的全局查找。
+    from senza_studio_runtime import play as play_mod
 
     built: list[_FakeBuilder] = []
     monkeypatch.setattr(
