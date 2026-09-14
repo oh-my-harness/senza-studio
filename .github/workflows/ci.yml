@@ -144,12 +144,20 @@ jobs:
         working-directory: studio_frontend
         run: npm run build
 
+      - name: Run Electron runtime host tests
+        working-directory: studio_frontend
+        run: npm test -- --run
+
       - name: Audit production frontend dependencies
         working-directory: studio_frontend
         run: npm audit --omit=dev
 
       - name: Check Electron entry syntax
-        run: node --check studio_frontend/electron/main.cjs
+        run: |
+          node --check studio_frontend/electron/main.cjs
+          node --check studio_frontend/electron/desktop-diagnostics.cjs
+          node --check studio_frontend/electron/desktop-process-host.cjs
+          node --check studio_frontend/electron/runtime-host.cjs
 
       - name: Check repository diff hygiene
         run: git diff --check

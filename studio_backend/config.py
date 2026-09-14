@@ -85,6 +85,7 @@ class StudioConfig:
     agent_team_descriptor: str = ""
     allowed_origins: tuple[str, ...] = DEFAULT_ALLOWED_ORIGINS
     api_token: str = ""
+    static_dir: str = ""
 
     @classmethod
     def from_env(cls) -> StudioConfig:
@@ -125,6 +126,7 @@ class StudioConfig:
             ),
             allowed_origins=allowed_origins or DEFAULT_ALLOWED_ORIGINS,
             api_token=token,
+            static_dir=os.environ.get("SENZA_STUDIO_STATIC_DIR", ""),
         )
 
     @property
