@@ -28,6 +28,7 @@ RUNTIME_BIN = Path(
         / "agent-studio",
     )
 )
+STUDIO_TOKEN = "studio-test-token-0123456789abcdef"
 
 
 @contextmanager
@@ -99,8 +100,12 @@ def test_real_runtime_http_and_event_contract(tmp_path):
             api_key="test-key",
             api_base="",
             agent_team_descriptor=str(descriptor_path),
+            api_token=STUDIO_TOKEN,
         )
-        with TestClient(create_app(config)) as client:
+        with TestClient(
+            create_app(config),
+            headers={"Authorization": f"Bearer {STUDIO_TOKEN}"},
+        ) as client:
             startup = client.get("/api/team/startup")
             projects = client.get("/api/team/projects")
             templates = client.get("/api/team/templates")

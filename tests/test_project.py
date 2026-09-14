@@ -1,4 +1,6 @@
 """项目管理测试。"""
+import os
+
 import pytest
 from studio_backend.project import Project
 from studio_backend.config import StudioConfig
@@ -181,3 +183,60 @@ def test_openai_model_does_not_lock_the_settings_panel(monkeypatch):
     monkeypatch.setenv("OPENAI_MODEL", "glm-5.2-fp8")
     snapshot_env_overrides()
     assert "SENZA_STUDIO_MODEL" not in env_overridden_keys()
+
+
+def test_config_reads_api_token_from_env(monkeypatch):
+    monkeypatch.setenv("SENZA_STUDIO_API_TOKEN", "a" * 32)
+    monkeypatch.delenv("SENZA_STUDIO_API_TOKEN_FILE", raising=False)
+
+    assert StudioConfig.from_env().api_token == "a" * 32
+
+
+def test_config_rejects_invalid_api_token(monkeypatch):
+    monkeypatch.setenv("SENZA_STUDIO_API_TOKEN", "short")
+    monkeypatch.delenv("SENZA_STUDIO_API_TOKEN_FILE", raising=False)
+
+    with pytest.raises(ValueError, match="API token is invalid"):
+        StudioConfig.from_env()
+
+
+def test_config_rejects_multiple_api_token_sources(monkeypatch, tmp_path):
+    token_file = tmp_path / "api-token"
+    token_file.write_text("d" * 32, encoding="utf-8")
+    monkeypatch.setenv("SENZA_STUDIO_API_TOKEN", "e" * 32)
+    monkeypatch.setenv("SENZA_STUDIO_API_TOKEN_FILE", str(token_file))
+
+    with pytest.raises(ValueError, match="only one Senza Studio API token source"):
+        StudioConfig.from_env()
+
+
+def test_config_reads_private_api_token_file(monkeypatch, tmp_path):
+    token_file = tmp_path / "api-token"
+    token_file.write_text("b" * 32 + "\n", encoding="utf-8")
+    os.chmod(token_file, 0o600)
+    monkeypatch.delenv("SENZA_STUDIO_API_TOKEN", raising=False)
+    monkeypatch.setenv("SENZA_STUDIO_API_TOKEN_FILE", str(token_file))
+
+    assert StudioConfig.from_env().api_token == "b" * 32
+
+
+def test_config_rejects_public_api_token_file(monkeypatch, tmp_path):
+    token_file = tmp_path / "api-token"
+    token_file.write_text("c" * 32, encoding="utf-8")
+    os.chmod(token_file, 0o644)
+    monkeypatch.delenv("SENZA_STUDIO_API_TOKEN", raising=False)
+    monkeypatch.setenv("SENZA_STUDIO_API_TOKEN_FILE", str(token_file))
+
+    with pytest.raises(ValueError, match="not private"):
+        StudioConfig.from_env()
+
+
+@pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="requires POSIX FIFO")
+def test_config_rejects_fifo_api_token_file_without_blocking(monkeypatch, tmp_path):
+    token_file = tmp_path / "api-token"
+    os.mkfifo(token_file)
+    monkeypatch.delenv("SENZA_STUDIO_API_TOKEN", raising=False)
+    monkeypatch.setenv("SENZA_STUDIO_API_TOKEN_FILE", str(token_file))
+
+    with pytest.raises(ValueError, match="API token file is invalid"):
+        StudioConfig.from_env()

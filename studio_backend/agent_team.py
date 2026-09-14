@@ -17,6 +17,8 @@ import websockets
 from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import JSONResponse, Response
 
+from .auth import websocket_is_authenticated
+
 
 DESCRIPTOR_SCHEMA = "llm-harness.studio.panel-descriptor.v1"
 MAX_DESCRIPTOR_BYTES = 64 * 1024
@@ -56,7 +58,7 @@ def load_agent_team_runtime(descriptor_path: str | Path) -> AgentTeamRuntime:
     try:
         file_descriptor = os.open(
             path,
-            os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0),
+            os.O_RDONLY | os.O_NONBLOCK | getattr(os, "O_NOFOLLOW", 0),
         )
     except OSError:
         raise AgentTeamProxyError(
@@ -226,6 +228,7 @@ def install_agent_team_proxy(
     app: FastAPI,
     descriptor_path: str,
     allowed_origins: tuple[str, ...],
+    api_token: str,
 ) -> None:
     @app.api_route(
         "/api/team/{proxy_path:path}",
@@ -292,6 +295,9 @@ def install_agent_team_proxy(
     async def proxy_agent_team_events(websocket: WebSocket) -> None:
         origin = websocket.headers.get("origin")
         if origin is not None and origin not in allowed_origins:
+            await websocket.close(code=1008)
+            return
+        if not websocket_is_authenticated(websocket, api_token):
             await websocket.close(code=1008)
             return
 

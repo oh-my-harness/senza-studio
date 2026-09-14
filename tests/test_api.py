@@ -3,9 +3,14 @@ import json
 
 import pytest
 from fastapi.testclient import TestClient
+from starlette.websockets import WebSocketDisconnect
 
 from studio_backend.app import create_app, _reset_state
+from studio_backend.auth import API_COOKIE_NAME
 from studio_backend.config import StudioConfig
+
+
+STUDIO_TOKEN = "studio-test-token-0123456789abcdef"
 
 
 @pytest.fixture
@@ -16,9 +21,13 @@ def app_client(tmp_path):
         model="test-model",
         api_key="test-key",
         api_base="",
+        api_token=STUDIO_TOKEN,
     )
     app = create_app(config)
-    with TestClient(app) as client:
+    with TestClient(
+        app,
+        headers={"Authorization": f"Bearer {STUDIO_TOKEN}"},
+    ) as client:
         yield client
     _reset_state()
 
@@ -30,6 +39,146 @@ def test_health(app_client):
     r = app_client.get("/api/health")
     assert r.status_code == 200
     assert r.json()["status"] == "ok"
+
+
+def test_health_is_public_without_authentication(tmp_path):
+    _reset_state()
+    config = StudioConfig(
+        home_dir=str(tmp_path / ".senza-studio"),
+        model="test-model",
+        api_key="test-key",
+        api_base="",
+        api_token=STUDIO_TOKEN,
+    )
+    with TestClient(create_app(config)) as client:
+        response = client.get("/api/health")
+
+    assert response.status_code == 200
+    assert response.json() == {"status": "ok"}
+    _reset_state()
+
+
+def test_api_requires_authentication(tmp_path):
+    _reset_state()
+    config = StudioConfig(
+        home_dir=str(tmp_path / ".senza-studio"),
+        model="test-model",
+        api_key="test-key",
+        api_base="",
+        api_token=STUDIO_TOKEN,
+    )
+    with TestClient(create_app(config)) as client:
+        unauthenticated = client.get("/api/projects")
+        wrong_token = client.get(
+            "/api/projects",
+            headers={"Authorization": "Bearer wrong-token"},
+        )
+
+    assert unauthenticated.status_code == 401
+    assert unauthenticated.headers["WWW-Authenticate"] == "Bearer"
+    assert wrong_token.status_code == 401
+    _reset_state()
+
+
+def test_bootstrap_sets_http_only_strict_cookie(tmp_path):
+    _reset_state()
+    config = StudioConfig(
+        home_dir=str(tmp_path / ".senza-studio"),
+        model="test-model",
+        api_key="test-key",
+        api_base="",
+        api_token=STUDIO_TOKEN,
+    )
+    with TestClient(create_app(config)) as client:
+        wrong = client.post("/auth/bootstrap", json={"token": "wrong-token"})
+        correct = client.post("/auth/bootstrap", json={"token": STUDIO_TOKEN})
+        projects = client.get("/api/projects")
+
+    assert wrong.status_code == 401
+    assert correct.status_code == 200
+    assert correct.headers["cache-control"] == "no-store"
+    assert "HttpOnly" in correct.headers["set-cookie"]
+    assert "SameSite=strict" in correct.headers["set-cookie"]
+    assert projects.status_code == 200
+    _reset_state()
+
+
+def test_bootstrap_rejects_oversized_request_body(tmp_path):
+    _reset_state()
+    config = StudioConfig(
+        home_dir=str(tmp_path / ".senza-studio"),
+        model="test-model",
+        api_key="test-key",
+        api_base="",
+        api_token=STUDIO_TOKEN,
+    )
+    with TestClient(create_app(config)) as client:
+        response = client.post(
+            "/auth/bootstrap",
+            content=b'{"token":"' + b"x" * 2048 + b'"}',
+            headers={"content-type": "application/json"},
+        )
+
+    assert response.status_code == 413
+    assert response.json() == {"detail": "Bootstrap request body is too large"}
+    assert API_COOKIE_NAME not in response.headers.get("set-cookie", "")
+    _reset_state()
+
+
+def test_create_app_requires_api_token(tmp_path):
+    _reset_state()
+    config = StudioConfig(
+        home_dir=str(tmp_path / ".senza-studio"),
+        model="test-model",
+        api_key="test-key",
+        api_base="",
+    )
+
+    with pytest.raises(ValueError, match="API token is required"):
+        create_app(config)
+    _reset_state()
+
+
+def test_websocket_requires_authentication_and_accepts_subprotocol(tmp_path):
+    _reset_state()
+    config = StudioConfig(
+        home_dir=str(tmp_path / ".senza-studio"),
+        model="test-model",
+        api_key="test-key",
+        api_base="",
+        api_token=STUDIO_TOKEN,
+    )
+    with TestClient(create_app(config)) as client:
+        created = client.post(
+            "/api/projects",
+            json={"name": "测试"},
+            headers={"Authorization": f"Bearer {STUDIO_TOKEN}"},
+        )
+        project_id = created.json()["id"]
+
+        with pytest.raises(WebSocketDisconnect):
+            with client.websocket_connect(f"/ws/projects/{project_id}"):
+                pass
+
+        with pytest.raises(WebSocketDisconnect):
+            with client.websocket_connect(
+                f"/ws/projects/{project_id}",
+                subprotocols=["senza-studio-bearer-wrong-token"],
+            ):
+                pass
+
+        with client.websocket_connect(
+            f"/ws/projects/{project_id}",
+            subprotocols=[f"senza-studio-bearer-{STUDIO_TOKEN}"],
+        ):
+            pass
+
+        bootstrap = client.post("/auth/bootstrap", json={"token": STUDIO_TOKEN})
+        assert bootstrap.status_code == 200
+        assert STUDIO_TOKEN not in bootstrap.text
+        with client.websocket_connect(f"/ws/projects/{project_id}"):
+            pass
+    _reset_state()
 
 
 # ── Settings ────────────────────────────────────────────
@@ -328,8 +477,12 @@ def test_saving_the_model_changes_the_live_config(tmp_path, monkeypatch):
         model="old-model",
         api_key="old-key",
         api_base="",
+        api_token=STUDIO_TOKEN,
     )
-    with TestClient(create_app(config)) as client:
+    with TestClient(
+        create_app(config),
+        headers={"Authorization": f"Bearer {STUDIO_TOKEN}"},
+    ) as client:
         r = client.put(
             "/api/settings",
             json={"values": {
@@ -353,8 +506,12 @@ def test_env_var_overrides_the_panel_and_is_reported_as_such(tmp_path, monkeypat
         model="model-from-shell",
         api_key="k",
         api_base="",
+        api_token=STUDIO_TOKEN,
     )
-    with TestClient(create_app(config)) as client:
+    with TestClient(
+        create_app(config),
+        headers={"Authorization": f"Bearer {STUDIO_TOKEN}"},
+    ) as client:
         body = client.get("/api/settings").json()
         assert body["env_overrides"]["SENZA_STUDIO_MODEL"] == "model-from-shell"
 
@@ -379,9 +536,16 @@ def test_settings_file_model_is_applied_at_startup(tmp_path, monkeypatch):
         json.dumps({"SENZA_STUDIO_MODEL": "model-from-file"}), encoding="utf-8"
     )
     config = StudioConfig(
-        home_dir=str(home), model="default-model", api_key="k", api_base=""
+        home_dir=str(home),
+        model="default-model",
+        api_key="k",
+        api_base="",
+        api_token=STUDIO_TOKEN,
     )
-    with TestClient(create_app(config)):
+    with TestClient(
+        create_app(config),
+        headers={"Authorization": f"Bearer {STUDIO_TOKEN}"},
+    ):
         assert config.model == "model-from-file"
     _reset_state()
 
