@@ -13,10 +13,6 @@ concurrency:
   group: ci-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
-env:
-  CARGO_NET_GIT_FETCH_WITH_CLI: "true"
-  CARGO_TERM_COLOR: always
-
 jobs:
   python:
     name: Python validation
@@ -27,78 +23,32 @@ jobs:
       - name: Check out studio
         uses: actions/checkout@v4
 
-      - name: Read pinned Senza commit
-        id: senza
-        shell: bash
-        run: |
-          set -euo pipefail
-          commit="$(jq -r '.senza_commit' senza-sdk.lock)"
-          if [[ ! "$commit" =~ ^[0-9a-f]{40}$ ]]; then
-            echo "::error title=Invalid Senza pin::senza-sdk.lock does not contain a 40-character commit SHA"
-            exit 1
-          fi
-          echo "commit=$commit" >> "$GITHUB_OUTPUT"
-
-      - name: Check out pinned Senza source
-        uses: actions/checkout@v4
-        with:
-          repository: oh-my-harness/Senza
-          ref: ${{ steps.senza.outputs.commit }}
-          path: Senza
-
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.12"
 
-      - name: Set up Rust
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Configure private cargo fetch
-        env:
-          GH_PRIVATE_TOKEN: ${{ secrets.PRIVATE_REPO_TOKEN }}
+      - name: Install pinned Senza SDK
         shell: bash
         run: |
           set -euo pipefail
-          if [[ -z "$GH_PRIVATE_TOKEN" ]]; then
-            echo "::error title=Missing PRIVATE_REPO_TOKEN::Senza depends on the private llm-harness-runtime repo; add a PAT with read access as the PRIVATE_REPO_TOKEN secret."
+          locked_version="$(jq -r '.senza_version' senza-sdk.lock)"
+          if [[ -z "$locked_version" || "$locked_version" == "null" ]]; then
+            echo "::error title=Invalid Senza pin::senza-sdk.lock does not contain senza_version"
             exit 1
           fi
-          git config --global url."https://x-access-token:${GH_PRIVATE_TOKEN}@github.com/".insteadOf "https://github.com/"
+          python -m pip install --only-binary=:all: "senza-sdk==$locked_version"
 
-      - name: Cache Cargo build artifacts
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cargo
-            Senza/target
-          key: senza-cargo-${{ runner.os }}-${{ steps.senza.outputs.commit }}-${{ hashFiles('Senza/Cargo.lock', 'Senza/senza-pkg/runtime.lock') }}
-          restore-keys: |
-            senza-cargo-${{ runner.os }}-${{ steps.senza.outputs.commit }}-
-            senza-cargo-${{ runner.os }}-
-
-      - name: Build pinned Senza wheel
+      - name: Install project
         shell: bash
         run: |
           set -euo pipefail
-          python -m venv "$RUNNER_TEMP/senza-build-venv"
-          "$RUNNER_TEMP/senza-build-venv/bin/python" -m pip install --upgrade pip maturin
-          cd Senza
-          VENV="$RUNNER_TEMP/senza-build-venv" \
-            BASE_PYTHON="$(command -v python)" \
-            ./scripts/build_wheel.sh
-
-      - name: Install project and pinned SDK
-        shell: bash
-        run: |
-          set -euo pipefail
-          mapfile -t wheels < <(find Senza/dist -maxdepth 1 -type f -name 'senza_sdk*.whl' -print)
-          if [[ "${#wheels[@]}" -ne 1 ]]; then
-            echo "::error title=Unexpected wheel set::Expected exactly one senza_sdk wheel, found ${#wheels[@]}"
-            find Senza/dist -maxdepth 1 -type f -print
+          locked_version="$(jq -r '.senza_version' senza-sdk.lock)"
+          installed_version="$(python -c 'import importlib.metadata; print(importlib.metadata.version("senza-sdk"))')"
+          if [[ "$locked_version" != "$installed_version" ]]; then
+            echo "::error title=Senza SDK pin mismatch::locked=$locked_version installed=$installed_version"
             exit 1
           fi
-          python -m pip install "${wheels[0]}"
           # 两个子目录包都要装：studio_backend 直接 import senza_studio_runtime
           # （Phase 7 把 executor/judge/预处理器搬了过去），而且 pyproject 的
           # testpaths 也会去收这两个包自己的测试。
