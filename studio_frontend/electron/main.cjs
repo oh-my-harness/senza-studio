@@ -7,6 +7,10 @@ const path = require("path");
 const { DesktopDiagnosticsLog } = require("./desktop-diagnostics.cjs");
 const { DesktopProcessHost } = require("./desktop-process-host.cjs");
 const {
+  backendUrlFromPort,
+  selectBackendPort,
+} = require("./backend-port.cjs");
+const {
   AgentTeamRuntimeSupervisor,
   sanitizeProcessOutput,
 } = require("./runtime-host.cjs");
@@ -27,7 +31,8 @@ const backendRoot = app.isPackaged
   : projectRoot;
 const apiToken =
   process.env.SENZA_STUDIO_API_TOKEN || crypto.randomBytes(32).toString("hex");
-const backendUrl = "http://127.0.0.1:7878";
+let backendPort = null;
+let backendUrl = null;
 const frontendUrl = "http://localhost:5173";
 
 function pythonCommand() {
@@ -137,6 +142,7 @@ async function startAgentTeamRuntime() {
   runtimeSupervisor = new AgentTeamRuntimeSupervisor({
     program: agentTeamBinaryPath(app.isPackaged),
     dataRoot: path.join(app.getPath("userData"), "agent-team"),
+    useProcessGroup: false,
     onEvent: logRuntimeEvent,
   });
   return runtimeSupervisor.start();
@@ -154,8 +160,10 @@ function startBackend(agentTeamDescriptorPath) {
     environment: {
       ...backendEnvironment,
       PYTHONPATH: backendRoot,
+      PYTHONNOUSERSITE: "1",
       SENZA_STUDIO_API_TOKEN: apiToken,
       SENZA_STUDIO_AGENT_TEAM_DESCRIPTOR: agentTeamDescriptorPath,
+      SENZA_STUDIO_PORT: String(backendPort),
       ...(app.isPackaged
         ? {
             SENZA_STUDIO_STATIC_DIR: path.join(
@@ -166,6 +174,7 @@ function startBackend(agentTeamDescriptorPath) {
           }
         : {}),
     },
+    useProcessGroup: false,
     formatOutput: (output) => sanitizeProcessOutput(output, [apiToken]),
     onEvent: (event) => logProcessEvent("backend", event),
   });
@@ -186,7 +195,12 @@ function startVite() {
     command: process.execPath,
     arguments: [viteEntry],
     cwd: frontendRoot,
-    environment: { ...process.env, ELECTRON_RUN_AS_NODE: "1" },
+    environment: {
+      ...process.env,
+      ELECTRON_RUN_AS_NODE: "1",
+      SENZA_STUDIO_PORT: String(backendPort),
+    },
+    useProcessGroup: false,
     formatOutput: (output) => sanitizeProcessOutput(output, [apiToken]),
     onEvent: (event) => logProcessEvent("vite", event),
   });
@@ -288,6 +302,12 @@ async function createWindow() {
 app.whenReady().then(async () => {
   try {
     await startDiagnostics();
+    backendPort = await selectBackendPort(process.env.SENZA_STUDIO_PORT);
+    backendUrl = backendUrlFromPort(backendPort);
+    recordDiagnostics("host", {
+      type: "backend-port-selected",
+      port: backendPort,
+    });
     const agentTeamDescriptorPath = await startAgentTeamRuntime();
     startBackend(agentTeamDescriptorPath);
     const backendStartupFailure = backendExit.then((exit) => {

@@ -1,0 +1,9 @@
+fastapi
+httpx
+openpyxl
+pypdf
+python-multipart
+pyyaml
+senza-sdk==1.3.0
+uvicorn[standard]
+websockets

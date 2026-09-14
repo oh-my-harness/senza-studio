@@ -287,6 +287,33 @@ ${scriptForDescriptor(descriptor)}`
     await fs.promises.rm(directory, { recursive: true, force: true });
   });
 
+  itUnix("terminates an inherited-process-group runtime directly", async () => {
+    const directory = await fs.promises.mkdtemp(
+      path.join(os.tmpdir(), "senza-runtime-process-group-")
+    );
+    const dataRoot = path.join(directory, "data");
+    await fs.promises.mkdir(dataRoot);
+    const descriptor = path.join(dataRoot, "panel.json");
+    writeDescriptor(descriptor);
+    const program = await makeScript(
+      directory,
+      "runtime.sh",
+      scriptForDescriptor(descriptor)
+    );
+    const host = new AgentTeamRuntimeHost({
+      program,
+      dataRoot,
+      readyTimeoutMs: 2000,
+      useProcessGroup: false,
+    });
+
+    await host.start();
+    const shutdown = await host.stop();
+    expect(shutdown.forced).toBe(false);
+    expect(fs.existsSync(descriptor)).toBe(false);
+    await fs.promises.rm(directory, { recursive: true, force: true });
+  });
+
   itUnix("restarts an unexpectedly exited runtime", async () => {
     const directory = await fs.promises.mkdtemp(
       path.join(os.tmpdir(), "senza-runtime-restart-")

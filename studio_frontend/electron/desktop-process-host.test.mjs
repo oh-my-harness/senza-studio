@@ -44,6 +44,32 @@ describe("Desktop process host", () => {
     await fs.promises.rm(directory, { recursive: true, force: true });
   });
 
+  itUnix("terminates an inherited-process-group child directly", async () => {
+    const directory = await fs.promises.mkdtemp(
+      path.join(os.tmpdir(), "senza-desktop-process-group-")
+    );
+    const host = new DesktopProcessHost({
+      name: "test-process",
+      command: process.execPath,
+      arguments: [
+        "-e",
+        "process.on('SIGTERM', () => process.exit(42)); process.stdout.write('ready'); setInterval(() => {}, 100);",
+      ],
+      cwd: directory,
+      environment: process.env,
+      useProcessGroup: false,
+      shutdownGraceMs: 1000,
+    });
+
+    const childProcess = await host.start();
+    await new Promise((resolve) => {
+      childProcess.stdout.once("data", resolve);
+    });
+    const shutdown = await host.stop();
+    expect(shutdown).toMatchObject({ forced: false, exit: { code: 42 } });
+    await fs.promises.rm(directory, { recursive: true, force: true });
+  });
+
   it("does not start a process after shutdown", async () => {
     const directory = await fs.promises.mkdtemp(
       path.join(os.tmpdir(), "senza-desktop-stop-race-")

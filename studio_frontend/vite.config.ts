@@ -6,8 +6,11 @@ export default defineConfig({
   server: {
     port: 5173,
     proxy: {
-      "/api": "http://127.0.0.1:7878",
-      "/ws": { target: "ws://127.0.0.1:7878", ws: true },
+      "/api": `http://127.0.0.1:${process.env.SENZA_STUDIO_PORT || 7878}`,
+      "/ws": {
+        target: `ws://127.0.0.1:${process.env.SENZA_STUDIO_PORT || 7878}`,
+        ws: true,
+      },
     },
   },
 });

@@ -21,6 +21,7 @@ class DesktopProcessHost {
     cwd,
     environment,
     shutdownGraceMs = DEFAULT_SHUTDOWN_GRACE_MS,
+    useProcessGroup = true,
     onEvent = () => {},
     formatOutput = (output) => String(output),
   }) {
@@ -30,6 +31,7 @@ class DesktopProcessHost {
     this.cwd = cwd;
     this.environment = environment;
     this.shutdownGraceMs = shutdownGraceMs;
+    this.useProcessGroup = useProcessGroup;
     this.onEvent = onEvent;
     this.formatOutput = formatOutput;
     this.process = null;
@@ -47,7 +49,7 @@ class DesktopProcessHost {
       cwd: this.cwd,
       env: this.environment,
       stdio: ["ignore", "pipe", "pipe"],
-      detached: process.platform !== "win32",
+      detached: process.platform !== "win32" && this.useProcessGroup,
     });
     this.exitPromise = new Promise((resolve, reject) => {
       this.resolveExit = resolve;
@@ -140,6 +142,10 @@ class DesktopProcessHost {
       childProcess.kill();
       return;
     }
+    if (!this.useProcessGroup) {
+      childProcess.kill("SIGTERM");
+      return;
+    }
     try {
       process.kill(-childProcess.pid, "SIGTERM");
     } catch (error) {
@@ -156,6 +162,10 @@ class DesktopProcessHost {
         "/T",
         "/F",
       ]);
+      return;
+    }
+    if (!this.useProcessGroup) {
+      childProcess.kill("SIGKILL");
       return;
     }
     try {

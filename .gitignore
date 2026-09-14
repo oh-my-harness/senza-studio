@@ -1,4 +1,7 @@
 /target
+/build
+/dist
+/.cache
 /studio_frontend/node_modules
 /studio_frontend/dist
 /.venv

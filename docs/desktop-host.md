@@ -82,7 +82,8 @@ the resource layout above.
 
 ## Current packaging boundary
 
-The host lifecycle and resource contracts are implemented, but installer
-production work remains: an Electron packaging recipe, bundled Python runtime,
-platform binaries, code signing/notarization, and packaged end-to-end tests.
-These are required before calling the desktop distribution production-ready.
+The host lifecycle and resource contracts are implemented. The Linux packaging
+recipe, bundled Python runtime, and packaged end-to-end test are defined in
+[desktop packaging](desktop-packaging.md). macOS and Windows still require
+native signing credentials, notarization setup, and packaged end-to-end
+validation before those installers are production-ready.

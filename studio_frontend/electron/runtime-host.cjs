@@ -71,6 +71,7 @@ class AgentTeamRuntimeHost {
     readyTimeoutMs = DEFAULT_READY_TIMEOUT_MS,
     shutdownGraceMs = DEFAULT_SHUTDOWN_GRACE_MS,
     environment = process.env,
+    useProcessGroup = true,
     onDiagnostic = () => {},
   }) {
     this.program = program;
@@ -78,6 +79,7 @@ class AgentTeamRuntimeHost {
     this.readyTimeoutMs = readyTimeoutMs;
     this.shutdownGraceMs = shutdownGraceMs;
     this.environment = environment;
+    this.useProcessGroup = useProcessGroup;
     this.onDiagnostic = onDiagnostic;
     this.onUnexpectedExit = null;
     this.process = null;
@@ -111,7 +113,7 @@ class AgentTeamRuntimeHost {
         STUDIO_PORT: "0",
       },
       stdio: ["ignore", "pipe", "pipe"],
-      detached: process.platform !== "win32",
+      detached: process.platform !== "win32" && this.useProcessGroup,
     });
     this.exitPromise = new Promise(
       (resolve) => {
@@ -315,6 +317,10 @@ class AgentTeamRuntimeHost {
       childProcess.kill();
       return;
     }
+    if (!this.useProcessGroup) {
+      childProcess.kill("SIGTERM");
+      return;
+    }
     try {
       process.kill(-childProcess.pid, "SIGTERM");
     } catch (error) {
@@ -331,6 +337,10 @@ class AgentTeamRuntimeHost {
         "/T",
         "/F",
       ]);
+      return;
+    }
+    if (!this.useProcessGroup) {
+      childProcess.kill("SIGKILL");
       return;
     }
     try {
@@ -354,6 +364,7 @@ class AgentTeamRuntimeSupervisor {
     readyTimeoutMs,
     shutdownGraceMs,
     environment = process.env,
+    useProcessGroup,
     restartDelaysMs = DEFAULT_RESTART_DELAYS_MS,
     maxRestartAttempts = 5,
     restartResetIntervalMs = 30000,
@@ -364,6 +375,7 @@ class AgentTeamRuntimeSupervisor {
     this.readyTimeoutMs = readyTimeoutMs;
     this.shutdownGraceMs = shutdownGraceMs;
     this.environment = environment;
+    this.useProcessGroup = useProcessGroup;
     this.restartDelaysMs = restartDelaysMs;
     this.maxRestartAttempts = maxRestartAttempts;
     this.restartResetIntervalMs = restartResetIntervalMs;
@@ -391,6 +403,7 @@ class AgentTeamRuntimeSupervisor {
       readyTimeoutMs: this.readyTimeoutMs,
       shutdownGraceMs: this.shutdownGraceMs,
       environment: this.environment,
+      useProcessGroup: this.useProcessGroup,
       onDiagnostic: (event) => this.emitEvent(event),
     });
     host.onUnexpectedExit = (exit) => this.scheduleRestart(exit);

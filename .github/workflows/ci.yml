@@ -65,6 +65,18 @@ jobs:
       - name: Check installed Python dependencies
         run: python -m pip check
 
+      - name: Validate desktop Python lock
+        run: |
+          PYTHONNOUSERSITE=1 python -m pip install --dry-run \
+            --only-binary=:all: \
+            --require-hashes \
+            -r packaging/desktop-python.lock
+
+      - name: Check packaging scripts
+        run: |
+          bash -n scripts/package-desktop.sh
+          python -m py_compile scripts/test_packaged_desktop.py
+
       - name: Check shell scripts
         run: bash -n dev.sh
 
@@ -105,9 +117,11 @@ jobs:
       - name: Check Electron entry syntax
         run: |
           node --check studio_frontend/electron/main.cjs
+          node --check studio_frontend/electron/backend-port.cjs
           node --check studio_frontend/electron/desktop-diagnostics.cjs
           node --check studio_frontend/electron/desktop-process-host.cjs
           node --check studio_frontend/electron/runtime-host.cjs
+          node --check studio_frontend/electron/verify-pack.cjs
 
       - name: Check repository diff hygiene
         run: git diff --check
