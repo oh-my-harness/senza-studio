@@ -46,7 +46,9 @@ def test_static_files_serve_index_and_immutable_assets(tmp_path):
     assert index.headers["content-type"].startswith("text/html")
     assert index.headers["cache-control"] == "no-store"
     assert asset.status_code == 200
-    assert asset.headers["content-type"].startswith("application/javascript")
+    assert asset.headers["content-type"].startswith(
+        ("application/javascript", "text/javascript")
+    )
     assert asset.headers["cache-control"] == "public, max-age=31536000, immutable"
     assert missing.status_code == 404
 
