@@ -47,7 +47,9 @@ def _read_api_token_file(path_text: str) -> str:
     try:
         file_descriptor = os.open(
             path,
-            os.O_RDONLY | os.O_NONBLOCK | getattr(os, "O_NOFOLLOW", 0),
+            os.O_RDONLY
+            | getattr(os, "O_NONBLOCK", 0)
+            | getattr(os, "O_NOFOLLOW", 0),
         )
     except OSError:
         raise ValueError("Senza Studio API token file is unavailable") from None

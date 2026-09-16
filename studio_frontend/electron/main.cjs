@@ -35,6 +35,13 @@ let backendPort = null;
 let backendUrl = null;
 const frontendUrl = "http://localhost:5173";
 
+process.once("SIGTERM", () => {
+  if (!shutdownPromise && !shuttingDown) app.quit();
+});
+process.once("SIGINT", () => {
+  if (!shutdownPromise && !shuttingDown) app.quit();
+});
+
 function pythonCommand() {
   const configuredPython = process.env.SENZA_STUDIO_PYTHON;
   if (configuredPython) return configuredPython;
@@ -240,6 +247,10 @@ function waitForHttp(url, timeoutMs) {
 
 async function stopProcesses() {
   shuttingDown = true;
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    mainWindow.destroy();
+    mainWindow = null;
+  }
   recordDiagnostics("host", { type: "shutdown-starting" });
   const targets = [
     {
@@ -350,13 +361,13 @@ app.whenReady().then(async () => {
 });
 
 app.on("window-all-closed", () => {
-  if (process.platform !== "darwin") {
+  if (process.platform !== "darwin" && !shuttingDown && !shutdownPromise) {
     app.quit();
   }
 });
 
 app.on("before-quit", (event) => {
-  if (shutdownPromise) return;
+  if (shutdownPromise || shuttingDown) return;
   event.preventDefault();
   recordDiagnostics("host", { type: "shutdown-requested" });
   shutdownPromise = stopProcesses()

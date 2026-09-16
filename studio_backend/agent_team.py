@@ -58,7 +58,9 @@ def load_agent_team_runtime(descriptor_path: str | Path) -> AgentTeamRuntime:
     try:
         file_descriptor = os.open(
             path,
-            os.O_RDONLY | os.O_NONBLOCK | getattr(os, "O_NOFOLLOW", 0),
+            os.O_RDONLY
+            | getattr(os, "O_NONBLOCK", 0)
+            | getattr(os, "O_NOFOLLOW", 0),
         )
     except OSError:
         raise AgentTeamProxyError(
