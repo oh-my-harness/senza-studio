@@ -110,7 +110,7 @@ def _open_static_file(
         file_descriptor = os.open(
             candidate,
             os.O_RDONLY
-            | os.O_NONBLOCK
+            | getattr(os, "O_NONBLOCK", 0)
             | getattr(os, "O_NOFOLLOW", 0),
         )
     except OSError:

@@ -8,13 +8,20 @@ import { createRequire } from "node:module";
 
 const require = createRequire(import.meta.url);
 const verifyPack = require("./verify-pack.cjs");
+const { buildManifest } = require("./resource-manifest.cjs");
 
 async function makePackagedApp(manifest) {
   const root = await mkdtemp(path.join(tmpdir(), "senza-verify-pack-"));
   const resources = path.join(root, "resources");
   const backend = path.join(resources, "senza-studio-backend", "studio_backend");
   const backendRoot = path.join(resources, "senza-studio-backend");
-  const pythonBin = path.join(resources, "python", "bin");
+  const isWindows = process.platform === "win32";
+  const runtimeName = isWindows ? "agent-studio.exe" : "agent-studio";
+  const pythonBin = path.join(
+    resources,
+    "python",
+    ...(isWindows ? [] : ["bin"])
+  );
   const staticRoot = path.join(resources, "studio_frontend", "dist");
   await mkdir(backend, { recursive: true });
   await mkdir(pythonBin, { recursive: true });
@@ -26,13 +33,26 @@ async function makePackagedApp(manifest) {
   const agentRuntimeSha256 = createHash("sha256")
     .update(agentRuntime)
     .digest("hex");
-  await writeFile(path.join(resources, "agent-studio"), agentRuntime);
-  await writeFile(path.join(pythonBin, "python"), "");
-  await chmod(path.join(resources, "agent-studio"), 0o755);
-  await chmod(path.join(pythonBin, "python"), 0o755);
+  const agentRuntimePath = path.join(resources, runtimeName);
+  const pythonPath = isWindows
+    ? path.join(resources, "python", "python.exe")
+    : path.join(resources, "python", "bin", "python");
+  await writeFile(agentRuntimePath, agentRuntime);
+  await writeFile(pythonPath, "");
+  await chmod(agentRuntimePath, 0o755);
+  await chmod(pythonPath, 0o755);
   await writeFile(
     path.join(resources, "desktop-resources.json"),
-    JSON.stringify({ ...manifest, agent_team_sha256: agentRuntimeSha256 })
+    JSON.stringify({
+      ...buildManifest(
+        resources,
+        "b".repeat(64),
+        "1.3.0",
+        agentRuntimePath
+      ),
+      ...manifest,
+      agent_team_sha256: agentRuntimeSha256,
+    })
   );
   await writeFile(
     path.join(resources, "python-runtime.json"),

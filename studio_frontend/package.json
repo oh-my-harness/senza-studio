@@ -63,7 +63,7 @@
       "target": "AppImage",
       "category": "Development",
       "syncDesktopName": true,
-      "artifactName": "${productName}-${version}-${os}-${arch}.${ext}"
+      "artifactName": "senza-studio-${version}-${os}-${arch}.${ext}"
     },
     "mac": {
       "target": "dmg",
@@ -73,12 +73,18 @@
       "forceCodeSigning": true,
       "entitlements": "build/entitlements.mac.plist",
       "entitlementsInherit": "build/entitlements.mac.plist",
-      "artifactName": "${productName}-${version}-${os}-${arch}.${ext}"
+      "artifactName": "senza-studio-${version}-${os}-${arch}.${ext}"
     },
     "win": {
       "target": "nsis",
       "forceCodeSigning": true,
-      "artifactName": "${productName}-${version}-${os}-${arch}.${ext}"
+      "artifactName": "senza-studio-${version}-${os}-${arch}.${ext}",
+      "signtoolOptions": {
+        "signingHashAlgorithms": ["sha256"]
+      }
+    },
+    "nsis": {
+      "runAfterFinish": false
     }
   }
 }

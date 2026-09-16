@@ -82,8 +82,9 @@ the resource layout above.
 
 ## Current packaging boundary
 
-The host lifecycle and resource contracts are implemented. The Linux packaging
-recipe, bundled Python runtime, and packaged end-to-end test are defined in
-[desktop packaging](desktop-packaging.md). macOS and Windows still require
-native signing credentials, notarization setup, and packaged end-to-end
-validation before those installers are production-ready.
+The host lifecycle and resource contracts are implemented. The Linux and
+Windows packaging recipes, bundled Python runtimes, and packaged end-to-end
+tests are defined in [desktop packaging](desktop-packaging.md). Windows is
+validated on a native x86_64 host with Authenticode signing. macOS still
+requires native signing credentials, notarization setup, and packaged
+end-to-end validation before its installer is production-ready.

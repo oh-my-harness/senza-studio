@@ -72,6 +72,30 @@ if [[ "$PYTHON_PLATFORM" != "$HOST_PLATFORM" ]]; then
   echo "Cross-platform desktop packaging is not supported; build on the target platform" >&2
   exit 1
 fi
+if [[ "$TARGET" == "win" ]]; then
+  if [[ -z "${SIGNTOOL_PATH:-}" ]]; then
+    while IFS= read -r candidate; do
+      if [[ -f "$candidate" ]]; then
+        SIGNTOOL_PATH="$(cygpath -w "$candidate")"
+        break
+      fi
+    done < <(find "/c/Program Files (x86)/Windows Kits/10/bin" \
+      -type f -name signtool.exe -path '*/x64/*' 2>/dev/null | sort -rV)
+  fi
+  if [[ -z "${SIGNTOOL_PATH:-}" ]]; then
+    echo "SIGNTOOL_PATH or Windows SDK signtool.exe is required" >&2
+    exit 1
+  fi
+  export SIGNTOOL_PATH
+  if [[ -z "${WIN_CSC_LINK:-}" && -z "${CSC_LINK:-}" ]]; then
+    echo "WIN_CSC_LINK (or CSC_LINK) is required for Windows code signing" >&2
+    exit 1
+  fi
+  if [[ -z "${WIN_CSC_KEY_PASSWORD:-}" && -z "${CSC_KEY_PASSWORD:-}" ]]; then
+    echo "WIN_CSC_KEY_PASSWORD (or CSC_KEY_PASSWORD) is required for Windows code signing" >&2
+    exit 1
+  fi
+fi
 
 RUNTIME_METADATA="$(node -e '
 const fs = require("fs");
@@ -158,21 +182,42 @@ mkdir -p "$RESOURCE_DIR/studio_frontend"
 cp -a "$ROOT/studio_frontend/dist" "$RESOURCE_DIR/studio_frontend/dist"
 find "$RESOURCE_DIR" -depth -type d -name '__pycache__' -exec rm -rf -- {} +
 find "$RESOURCE_DIR" -type f -name '*.pyc' -delete
-AGENT_TEAM_SHA256="$(file_sha256 "$AGENT_TEAM_BIN")"
 SENZA_SDK_VERSION="$(sed -n 's/^senza-sdk==\([^[:space:]]*\).*/\1/p' "$ROOT/packaging/desktop-python.lock" | head -1)"
-cat > "$RESOURCE_DIR/desktop-resources.json" <<JSON
-{
-  "schema": "llm-harness.studio.desktop-resources.v1",
-  "agent_team_sha256": "$AGENT_TEAM_SHA256",
-  "python_archive_sha256": "$ACTUAL_PYTHON_SHA256",
-  "senza_sdk_version": "$SENZA_SDK_VERSION"
-}
-JSON
+node "$ROOT/studio_frontend/electron/resource-manifest.cjs" \
+  "$RESOURCE_DIR" \
+  "$ACTUAL_PYTHON_SHA256" \
+  "$SENZA_SDK_VERSION" \
+  "$AGENT_TEAM_BIN"
 
 cd "$ROOT/studio_frontend"
 ELECTRON_CACHE="${ELECTRON_CACHE:-${XDG_CACHE_HOME:-$HOME/.cache}/electron}"
 export ELECTRON_CACHE
+if [[ "$TARGET" == "win" ]]; then
+  export SENZA_STUDIO_UPDATE_RESOURCE_MANIFEST=1
+fi
 npx electron-builder "${BUILDER_ARGS[@]}"
+
+for artifact in "$ROOT"/dist/desktop/*; do
+  [[ -f "$artifact" ]] || continue
+  case "$(basename "$artifact")" in
+    *.exe|*.AppImage|*.dmg)
+      printf '%s  %s\n' "$(file_sha256 "$artifact")" "$(basename "$artifact")" \
+        > "$artifact.sha256"
+      ;;
+  esac
+done
+
+if [[ "$TARGET" == "win" ]]; then
+  installer="$(find "$ROOT/dist/desktop" -maxdepth 1 -type f -name 'senza-studio-*-win-x64.exe' -print -quit)"
+  if [[ -z "$installer" ]]; then
+    echo "Windows NSIS installer was not created" >&2
+    exit 1
+  fi
+  powershell.exe -NoProfile -ExecutionPolicy Bypass \
+    -File "$ROOT/scripts/verify-windows-artifact.ps1" \
+    -ArtifactPath "$installer" \
+    -ExpectedThumbprint "${SENZA_STUDIO_WINDOWS_CERTIFICATE_THUMBPRINT:-}"
+fi
 
 echo "Desktop artifacts:"
 find "$ROOT/dist/desktop" -maxdepth 1 -type f -print

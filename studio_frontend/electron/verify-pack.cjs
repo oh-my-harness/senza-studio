@@ -1,8 +1,12 @@
 "use strict";
 
 const fs = require("fs");
-const crypto = require("crypto");
 const path = require("path");
+const {
+  sha256File,
+  sha256Tree,
+  updateManifestAfterSigning,
+} = require("./resource-manifest.cjs");
 
 function packagedResourceDirectory(context) {
   if (process.platform === "darwin") {
@@ -34,10 +38,6 @@ function requireRegularFile(filePath, resources) {
 function requireExecutableFile(filePath, resources) {
   requireRegularFile(filePath, resources);
   fs.accessSync(filePath, fs.constants.X_OK);
-}
-
-function sha256File(filePath) {
-  return crypto.createHash("sha256").update(fs.readFileSync(filePath)).digest("hex");
 }
 
 function pythonRuntimePlatform() {
@@ -95,7 +95,10 @@ module.exports = function verifyPack(context) {
   }
 
   const manifestPath = path.join(resources, "desktop-resources.json");
-  const manifest = JSON.parse(fs.readFileSync(manifestPath, "utf8"));
+  let manifest = JSON.parse(fs.readFileSync(manifestPath, "utf8"));
+  if (process.env.SENZA_STUDIO_UPDATE_RESOURCE_MANIFEST === "1") {
+    manifest = updateManifestAfterSigning(resources);
+  }
   const sdkMetadataPath = path.join(
     resources,
     "senza-studio-backend",
@@ -106,13 +109,36 @@ module.exports = function verifyPack(context) {
   if (
     manifest.schema !== "llm-harness.studio.desktop-resources.v1" ||
     !/^[0-9a-f]{64}$/.test(manifest.agent_team_sha256) ||
+    !/^[0-9a-f]{64}$/.test(manifest.agent_team_source_sha256) ||
     !/^[0-9a-f]{64}$/.test(manifest.python_archive_sha256) ||
+    !/^[0-9a-f]{64}$/.test(manifest.python_executable_sha256) ||
+    !/^[0-9a-f]{64}$/.test(manifest.backend_entrypoint_sha256) ||
+    !/^[0-9a-f]{64}$/.test(manifest.frontend_bundle_sha256) ||
     !/^\d+\.\d+\.\d+/.test(manifest.senza_sdk_version)
   ) {
     throw new Error("Packaged resource manifest is invalid");
   }
   if (sha256File(path.join(resources, runtimeName)) !== manifest.agent_team_sha256) {
     throw new Error("Packaged Agent Team runtime checksum mismatch");
+  }
+  if (
+    sha256File(path.join(resources, "python", pythonName)) !==
+    manifest.python_executable_sha256
+  ) {
+    throw new Error("Packaged Python executable checksum mismatch");
+  }
+  if (
+    sha256File(
+      path.join(resources, "senza-studio-backend", "studio_backend", "server.py")
+    ) !== manifest.backend_entrypoint_sha256
+  ) {
+    throw new Error("Packaged backend entrypoint checksum mismatch");
+  }
+  if (
+    sha256Tree(path.join(resources, "studio_frontend", "dist")) !==
+    manifest.frontend_bundle_sha256
+  ) {
+    throw new Error("Packaged frontend bundle checksum mismatch");
   }
   const runtimeMetadata = JSON.parse(
     fs.readFileSync(path.join(resources, "python-runtime.json"), "utf8")

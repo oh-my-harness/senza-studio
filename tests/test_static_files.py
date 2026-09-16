@@ -72,6 +72,23 @@ def test_static_files_require_authentication(tmp_path):
     assert response.status_code == 401
 
 
+def test_static_files_open_when_nonblock_flag_is_unavailable(
+    monkeypatch, tmp_path
+):
+    static_dir = tmp_path / "dist"
+    static_dir.mkdir()
+    (static_dir / "index.html").write_text(
+        "<html>studio</html>", encoding="utf-8"
+    )
+    monkeypatch.delattr(os, "O_NONBLOCK", raising=False)
+
+    with make_client(tmp_path, static_dir) as client:
+        response = client.get("/")
+
+    assert response.status_code == 200
+    assert response.text == "<html>studio</html>"
+
+
 def test_static_files_reject_unsafe_paths_and_non_regular_files(tmp_path):
     static_dir = tmp_path / "dist"
     static_dir.mkdir()

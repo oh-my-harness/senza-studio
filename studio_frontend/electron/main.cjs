@@ -166,6 +166,7 @@ function startBackend(agentTeamDescriptorPath) {
       SENZA_STUDIO_PORT: String(backendPort),
       ...(app.isPackaged
         ? {
+            SENZA_STUDIO_ALLOWED_ORIGINS: backendUrl,
             SENZA_STUDIO_STATIC_DIR: path.join(
               process.resourcesPath,
               "studio_frontend",

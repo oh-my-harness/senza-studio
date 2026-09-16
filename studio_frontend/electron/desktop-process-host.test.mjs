@@ -112,12 +112,13 @@ describe("Desktop process host", () => {
     const directory = await fs.promises.mkdtemp(
       path.join(os.tmpdir(), "senza-desktop-output-")
     );
-    const program = await makeScript(directory, "printf 'secret\\n'");
+    const program = path.join(directory, "print-secret.cjs");
+    await fs.promises.writeFile(program, "console.log('secret')\n", "utf8");
     const events = [];
     const host = new DesktopProcessHost({
       name: "test-process",
-      command: program,
-      arguments: [],
+      command: process.execPath,
+      arguments: [program],
       cwd: directory,
       environment: process.env,
       formatOutput: (output) => String(output).replace("secret", "[redacted]"),

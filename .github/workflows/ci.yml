@@ -3,6 +3,7 @@ name: CI
 on:
   push:
     branches: [main]
+    tags: ["*"]
   pull_request:
   workflow_dispatch:
 
@@ -14,6 +15,132 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  windows:
+    name: Windows packaging and packaged E2E
+    runs-on: windows-latest
+    timeout-minutes: 60
+
+    steps:
+      - name: Check out studio
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: studio_frontend/package-lock.json
+
+      - name: Resolve Agent Team runtime pin
+        id: runtime
+        shell: bash
+        run: |
+          set -euo pipefail
+          commit="$(node -p "require('./packaging/agent-team-runtime.json').commit")"
+          if [[ ! "$commit" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error title=Invalid Agent Team pin::Expected a 40-character commit SHA"
+            exit 1
+          fi
+          echo "commit=$commit" >> "$GITHUB_OUTPUT"
+
+      - name: Check out pinned Agent Team runtime
+        uses: actions/checkout@v4
+        with:
+          repository: oh-my-harness/llm-harness-runtime
+          ref: ${{ steps.runtime.outputs.commit }}
+          path: llm-harness-runtime
+          token: ${{ secrets.PRIVATE_REPO_TOKEN }}
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Authenticate Cargo Git dependencies
+        shell: bash
+        env:
+          PRIVATE_REPO_TOKEN: ${{ secrets.PRIVATE_REPO_TOKEN }}
+        run: |
+          set -euo pipefail
+          git config --global url."https://x-access-token:${PRIVATE_REPO_TOKEN}@github.com/".insteadOf "https://github.com/"
+          echo "CARGO_NET_GIT_FETCH_WITH_CLI=true" >> "$GITHUB_ENV"
+
+      - name: Build Agent Team runtime
+        shell: bash
+        env:
+          CARGO_NET_GIT_FETCH_WITH_CLI: "true"
+        run: cargo build --release --workspace --all-features
+        working-directory: llm-harness-runtime
+
+      - name: Configure Windows code signing
+        shell: powershell
+        env:
+          RELEASE_CSC_LINK: ${{ secrets.WINDOWS_CSC_LINK }}
+          RELEASE_CSC_KEY_PASSWORD: ${{ secrets.WINDOWS_CSC_KEY_PASSWORD }}
+          RELEASE_CERTIFICATE_THUMBPRINT: ${{ secrets.WINDOWS_CERTIFICATE_THUMBPRINT }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          $isRelease = $env:GITHUB_REF -like "refs/tags/*"
+          if ($isRelease) {
+              if ([string]::IsNullOrWhiteSpace($env:RELEASE_CSC_LINK) -or
+                  [string]::IsNullOrWhiteSpace($env:RELEASE_CSC_KEY_PASSWORD) -or
+                  [string]::IsNullOrWhiteSpace($env:RELEASE_CERTIFICATE_THUMBPRINT)) {
+                  throw "Tag builds require WINDOWS_CSC_LINK, WINDOWS_CSC_KEY_PASSWORD, and WINDOWS_CERTIFICATE_THUMBPRINT secrets."
+              }
+              Add-Content $env:GITHUB_ENV "WIN_CSC_LINK=$env:RELEASE_CSC_LINK"
+              Add-Content $env:GITHUB_ENV "WIN_CSC_KEY_PASSWORD=$env:RELEASE_CSC_KEY_PASSWORD"
+              Add-Content $env:GITHUB_ENV "SENZA_STUDIO_WINDOWS_CERTIFICATE_THUMBPRINT=$env:RELEASE_CERTIFICATE_THUMBPRINT"
+          } else {
+              $passwordText = [Guid]::NewGuid().ToString("N")
+              $password = ConvertTo-SecureString $passwordText -AsPlainText -Force
+              $certificate = New-SelfSignedCertificate `
+                  -Type CodeSigningCert `
+                  -Subject "CN=Senza Studio CI" `
+                  -CertStoreLocation "Cert:\CurrentUser\My"
+              $certificatePath = Join-Path $env:RUNNER_TEMP "senza-studio-ci.cer"
+              $pfxPath = Join-Path $env:RUNNER_TEMP "senza-studio-ci.pfx"
+              Export-Certificate -Cert $certificate -FilePath $certificatePath | Out-Null
+              Import-Certificate -FilePath $certificatePath -CertStoreLocation "Cert:\LocalMachine\Root" | Out-Null
+              Export-PfxCertificate -Cert $certificate -FilePath $pfxPath -Password $password | Out-Null
+              Add-Content $env:GITHUB_ENV "WIN_CSC_LINK=$pfxPath"
+              Add-Content $env:GITHUB_ENV "WIN_CSC_KEY_PASSWORD=$passwordText"
+              Add-Content $env:GITHUB_ENV "SENZA_STUDIO_WINDOWS_CERTIFICATE_THUMBPRINT=$($certificate.Thumbprint)"
+          }
+
+      - name: Build Windows NSIS installer
+        shell: bash
+        env:
+          SENZA_STUDIO_AGENT_TEAM_BIN: ${{ github.workspace }}/llm-harness-runtime/target/release/agent-studio.exe
+        run: bash scripts/package-desktop.sh win
+
+      - name: Verify artifact checksum
+        shell: bash
+        run: |
+          set -euo pipefail
+          artifact="$(find dist/desktop -maxdepth 1 -type f -name 'senza-studio-*-win-x64.exe' -print -quit)"
+          if [[ -z "$artifact" ]]; then
+            echo "::error title=Missing Windows artifact::NSIS installer was not created"
+            exit 1
+          fi
+          (cd dist/desktop && sha256sum -c "$(basename "$artifact").sha256")
+
+      - name: Run packaged Windows E2E
+        shell: bash
+        env:
+          PYTHONDONTWRITEBYTECODE: "1"
+          PYTHONNOUSERSITE: "1"
+        run: |
+          set -euo pipefail
+          artifact="$(find dist/desktop -maxdepth 1 -type f -name 'senza-studio-*-win-x64.exe' -print -quit)"
+          build/desktop-resources/python/python.exe scripts/test_packaged_desktop.py "$artifact" --timeout 180
+
+      - name: Upload Windows artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: senza-studio-windows-x64
+          path: |
+            dist/desktop/senza-studio-*-win-x64.exe
+            dist/desktop/senza-studio-*-win-x64.exe.sha256
+          if-no-files-found: error
+
   python:
     name: Python validation
     runs-on: ubuntu-latest
