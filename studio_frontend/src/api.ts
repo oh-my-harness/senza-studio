@@ -1,5 +1,15 @@
 // studio_frontend/src/api.ts
-import type { ChatMessage, ProjectMeta, SettingsField, Spec } from "./types";
+import type {
+  AgentTeamPulse,
+  AgentTeamProject,
+  AgentTeamSettings,
+  AgentTeamStartupRecovery,
+  AgentTeamTemplate,
+  ChatMessage,
+  ProjectMeta,
+  SettingsField,
+  Spec,
+} from "./types";
 
 const BASE = "/api";
 const bootstrapToken = import.meta.env.DEV
@@ -27,6 +37,58 @@ async function fetchJson<T>(url: string, init?: RequestInit): Promise<T> {
 }
 
 export const api = {
+  listAgentTeams: () =>
+    fetchJson<{ projects: AgentTeamProject[] }>(`${BASE}/team/projects`),
+  createAgentTeam: (input: {
+    id: string;
+    name?: string;
+    template_id?: string;
+    repo_path?: string;
+  }) =>
+    fetchJson<{ ok: boolean }>(`${BASE}/team/projects`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(input),
+    }),
+  restartAgentTeam: (id: string) =>
+    fetchJson<{ ok: boolean }>(
+      `${BASE}/team/projects/restart?id=${encodeURIComponent(id)}`,
+      { method: "POST" }
+    ),
+  deleteAgentTeam: (id: string) =>
+    fetchJson<{ ok: boolean }>(
+      `${BASE}/team/projects?id=${encodeURIComponent(id)}`,
+      { method: "DELETE" }
+    ),
+  getAgentTeamPulse: (id: string) =>
+    fetchJson<AgentTeamPulse>(
+      `${BASE}/team/pulse?project=${encodeURIComponent(id)}`
+    ),
+  sendAgentTeamMessage: (project: string, target: string, text: string) =>
+    fetchJson<{ ok: boolean }>(`${BASE}/team/chat`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ project, target, text }),
+    }),
+  listAgentTeamTemplates: () =>
+    fetchJson<{ templates: AgentTeamTemplate[] }>(`${BASE}/team/templates`),
+  getAgentTeamStartup: () =>
+    fetchJson<{ recovery: AgentTeamStartupRecovery }>(`${BASE}/team/startup`),
+  getAgentTeamSettings: () =>
+    fetchJson<AgentTeamSettings>(`${BASE}/team/settings`),
+  updateAgentTeamSettings: (input: {
+    strong: string;
+    main: string;
+    cheap: string;
+    scout_interval_secs: number;
+    base_url: string;
+    api_key?: string;
+  }) =>
+    fetchJson<{ ok: boolean; note: string }>(`${BASE}/team/settings`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(input),
+    }),
   listProjects: () => fetchJson<ProjectMeta[]>(`${BASE}/projects`),
   createProject: (name: string) =>
     fetchJson<{ id: string; name: string }>(`${BASE}/projects`, {

@@ -92,13 +92,18 @@ build\desktop-resources\python\python.exe `
   --timeout 180
 ```
 
-The Linux test starts the real AppImage under `xvfb-run`. The Windows test
-installs the real NSIS artifact silently. Both verify the public health
-endpoint, confirm that the static UI and private API require authentication,
-and confirm that the complete process tree exits. The Linux test also checks
-that the backend receives the Studio API token and that the Agent Team process
-does not receive it; Windows does not expose another process's environment to
-an unprivileged test. The Windows test uses an explicit
+The Linux test starts the real AppImage against a private Xvfb process so the
+Electron process receives shutdown signals directly. It drives the actual UI
+through Chrome DevTools Protocol: it opens Agent Teams, configures runtime
+settings, creates a team, sends a chat message, verifies the event stream and
+operator event, restarts the team, relaunches the app, verifies persistence,
+sends another message, and deletes the team. The Windows test installs the
+real NSIS artifact silently. Both verify the public health endpoint, confirm
+that the static UI and private API require authentication, and confirm that
+the complete process tree exits. The Linux test also checks that the backend
+receives the Studio API token and that the Agent Team process does not receive
+it; Windows does not expose another process's environment to an unprivileged
+test. The Windows test uses an explicit
 `--user-data-dir`, verifies packaged resource checksums, confirms that Python
 does not load user-site packages, kills the Agent Team runtime and waits for
 its supervisor to restart it, verifies graceful shutdown diagnostics, and

@@ -34,6 +34,15 @@ The runtime environment is scrubbed of Studio API tokens, descriptor paths, and
 provider credentials. The runtime persists its own configuration under its data
 root.
 
+## Application shutdown
+
+`SIGTERM` and `SIGINT` request an Electron application quit instead of letting
+the default signal path terminate the host. During shutdown, the host destroys
+the main window first so UI WebSockets close, suppresses the automatic
+window-all-closed quit while cleanup is already in progress, stops the backend,
+development Vite server, and Agent Team runtime, records a final
+`shutdown-stopped` lifecycle event, and then flushes and closes diagnostics.
+
 The Python backend and development Vite server use bounded shutdown: SIGTERM to
 the Unix process group, a 10-second grace period, then process-tree force kill.
 Windows uses `taskkill /T /F` after the grace period. Unexpected backend or Vite

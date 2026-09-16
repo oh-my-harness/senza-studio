@@ -109,6 +109,34 @@ def test_real_runtime_http_and_event_contract(tmp_path):
             startup = client.get("/api/team/startup")
             projects = client.get("/api/team/projects")
             templates = client.get("/api/team/templates")
+            settings_configured = client.post(
+                "/api/team/settings",
+                json={
+                    "strong": "contract-model",
+                    "main": "contract-model",
+                    "cheap": "contract-model",
+                    "scout_interval_secs": 0,
+                    "base_url": "http://127.0.0.1:9",
+                    "api_key": "runtime-contract-key",
+                },
+            )
+            created = client.post(
+                "/api/team/projects",
+                json={"id": "ui-contract", "name": "UI contract"},
+            )
+            team_list = client.get("/api/team/projects")
+            pulse = client.get("/api/team/pulse?project=ui-contract")
+            chat = client.post(
+                "/api/team/chat",
+                json={
+                    "project": "ui-contract",
+                    "target": "planner",
+                    "text": "runtime contract smoke",
+                },
+            )
+            restarted = client.post("/api/team/projects/restart?id=ui-contract")
+            deleted = client.delete("/api/team/projects?id=ui-contract")
+            final_projects = client.get("/api/team/projects")
             with client.websocket_connect("/ws/team"):
                 pass
 
@@ -119,6 +147,24 @@ def test_real_runtime_http_and_event_contract(tmp_path):
         assert templates.status_code == 200
         template_ids = {template["id"] for template in templates.json()["templates"]}
         assert "coding-team" in template_ids
+        assert settings_configured.status_code == 200
+        assert settings_configured.json()["ok"] is True
+        assert created.status_code == 201, created.text
+        assert created.json() == {"ok": True}
+        assert team_list.status_code == 200
+        assert [project["id"] for project in team_list.json()["projects"]] == [
+            "ui-contract"
+        ]
+        assert pulse.status_code == 200
+        pulse_agents = pulse.json()["agents"]
+        assert "planner" in {agent["id"] for agent in pulse_agents}
+        assert chat.status_code == 202
+        assert chat.json() == {"ok": True}
+        assert restarted.status_code == 200
+        assert restarted.json() == {"ok": True}
+        assert deleted.status_code == 200
+        assert deleted.json() == {"ok": True}
+        assert final_projects.json() == {"projects": []}
         assert token not in startup.text
         assert token not in projects.text
         assert token not in templates.text

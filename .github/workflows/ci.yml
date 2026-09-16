@@ -127,6 +127,7 @@ jobs:
         env:
           PYTHONDONTWRITEBYTECODE: "1"
           PYTHONNOUSERSITE: "1"
+          PYTHONPATH: ${{ github.workspace }}/build/desktop-resources/senza-studio-backend
         run: |
           set -euo pipefail
           artifact="$(find dist/desktop -maxdepth 1 -type f -name 'senza-studio-*-win-x64.exe' -print -quit)"
