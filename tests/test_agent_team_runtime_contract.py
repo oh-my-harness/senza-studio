@@ -126,6 +126,22 @@ def test_real_runtime_http_and_event_contract(tmp_path):
             )
             team_list = client.get("/api/team/projects")
             pulse = client.get("/api/team/pulse?project=ui-contract")
+            issues = client.get("/api/team/issues?project=ui-contract")
+            member_config = client.get(
+                "/api/team/agent/config?project=ui-contract&agent=planner"
+            )
+            member_config_update = client.put(
+                "/api/team/agent/config",
+                json={
+                    "project": "ui-contract",
+                    "agent": "planner",
+                    "persona": "runtime contract persona",
+                    "model": "contract-model",
+                },
+            )
+            member_session = client.get(
+                "/api/team/agent/session?project=ui-contract&agent=planner"
+            )
             chat = client.post(
                 "/api/team/chat",
                 json={
@@ -158,6 +174,15 @@ def test_real_runtime_http_and_event_contract(tmp_path):
         assert pulse.status_code == 200
         pulse_agents = pulse.json()["agents"]
         assert "planner" in {agent["id"] for agent in pulse_agents}
+        assert issues.status_code == 200
+        assert issues.json() == {"issues": []}
+        assert member_config.status_code == 200, member_config.text
+        assert member_config.json()["model"] == "contract-model"
+        assert isinstance(member_config.json()["tools"], list)
+        assert member_config_update.status_code == 200, member_config_update.text
+        assert member_config_update.json() == {"ok": True, "rebuilt": True}
+        assert member_session.status_code == 200, member_session.text
+        assert member_session.json() == {"lines": []}
         assert chat.status_code == 202
         assert chat.json() == {"ok": True}
         assert restarted.status_code == 200

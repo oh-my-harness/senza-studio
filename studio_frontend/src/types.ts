@@ -144,6 +144,44 @@ export interface AgentTeamPulse {
   issues: { pending: number; confirmed: number };
 }
 
+export interface AgentTeamIssue {
+  id: string;
+  status: "pending" | "confirmed" | "rejected";
+  source: string;
+  created: string;
+  title: string;
+}
+
+export interface AgentTeamAgentConfig {
+  model: string;
+  system_prompt: string;
+  tools: string[];
+  thinking_level: string;
+  temperature: number;
+  override: {
+    model: string | null;
+    base_url: string | null;
+    api_key_set: boolean;
+  } | null;
+}
+
+export interface AgentTeamAgentConfigUpdate {
+  project: string;
+  agent: string;
+  persona?: string;
+  toolkits?: string[];
+  model?: string;
+  base_url?: string;
+  api_key?: string;
+}
+
+export interface AgentTeamSessionLine {
+  kind: string;
+  text?: string;
+  tools?: string[];
+  is_error?: boolean;
+}
+
 export interface AgentTeamRecoveryFailure {
   team_id: string;
   reason: string;

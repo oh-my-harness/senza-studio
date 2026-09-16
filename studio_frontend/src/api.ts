@@ -1,8 +1,12 @@
 // studio_frontend/src/api.ts
 import type {
+  AgentTeamAgentConfig,
+  AgentTeamAgentConfigUpdate,
+  AgentTeamIssue,
   AgentTeamPulse,
   AgentTeamProject,
   AgentTeamSettings,
+  AgentTeamSessionLine,
   AgentTeamStartupRecovery,
   AgentTeamTemplate,
   ChatMessage,
@@ -63,6 +67,41 @@ export const api = {
   getAgentTeamPulse: (id: string) =>
     fetchJson<AgentTeamPulse>(
       `${BASE}/team/pulse?project=${encodeURIComponent(id)}`
+    ),
+  listAgentTeamIssues: (project: string) =>
+    fetchJson<{ issues: AgentTeamIssue[] }>(
+      `${BASE}/team/issues?project=${encodeURIComponent(project)}`
+    ),
+  confirmAgentTeamIssue: (id: string) =>
+    fetchJson<{ ok: boolean; project: string; id: string; status: string }>(
+      `${BASE}/team/issue/${encodeURIComponent(id)}/confirm`,
+      { method: "POST" }
+    ),
+  rejectAgentTeamIssue: (id: string) =>
+    fetchJson<{ ok: boolean; project: string; id: string; status: string }>(
+      `${BASE}/team/issue/${encodeURIComponent(id)}/reject`,
+      { method: "POST" }
+    ),
+  getAgentTeamAgentConfig: (project: string, agent: string) =>
+    fetchJson<AgentTeamAgentConfig>(
+      `${BASE}/team/agent/config?project=${encodeURIComponent(
+        project
+      )}&agent=${encodeURIComponent(agent)}`
+    ),
+  updateAgentTeamAgentConfig: (input: AgentTeamAgentConfigUpdate) =>
+    fetchJson<{ ok: boolean; rebuilt: boolean }>(
+      `${BASE}/team/agent/config`,
+      {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(input),
+      }
+    ),
+  getAgentTeamAgentSession: (project: string, agent: string) =>
+    fetchJson<{ lines: AgentTeamSessionLine[] }>(
+      `${BASE}/team/agent/session?project=${encodeURIComponent(
+        project
+      )}&agent=${encodeURIComponent(agent)}`
     ),
   sendAgentTeamMessage: (project: string, target: string, text: string) =>
     fetchJson<{ ok: boolean }>(`${BASE}/team/chat`, {

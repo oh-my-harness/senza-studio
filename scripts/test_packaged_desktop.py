@@ -849,6 +849,35 @@ def select_planner_and_send_message(session, message):
         "document.querySelector('#agent-team-message').disabled === false",
         "planner selected and message input enabled",
     )
+    wait_for_ui(
+        session,
+        """
+        document.querySelector('[data-testid="agent-team-member-details"]')
+          ?.textContent.includes('当前模型：packaged-desktop-model') === true
+        """,
+        "planner member configuration loaded",
+        timeout=20.0,
+    )
+    set_input_value(
+        session,
+        "AgentTeam 成员模型",
+        "packaged-desktop-member-model",
+    )
+    click_button(session, "保存成员配置")
+    wait_for_ui(
+        session,
+        """
+        document.querySelector('[data-testid="agent-team-member-model"]')
+          ?.textContent.includes('packaged-desktop-member-model') === true
+        """,
+        "planner member configuration saved",
+        timeout=20.0,
+    )
+    wait_for_ui(
+        session,
+        "!document.querySelector('[data-testid=\"agent-team-action-error\"]')",
+        "member configuration action succeeded",
+    )
     set_input_value(session, "输入任务或消息", message)
     click_button(session, "发送")
     wait_for_ui(
@@ -880,6 +909,34 @@ def select_planner_and_send_message(session, message):
         """,
         "operator chat event visible",
         timeout=20.0,
+    )
+    wait_for_ui(
+        session,
+        f"""
+        (() => {{
+          const text = document.querySelector(
+            '[data-testid="agent-team-member-session"]'
+          ).textContent;
+          return text.includes({json.dumps(message)}) ? true : text;
+        }})()
+        """,
+        "planner session history visible",
+        timeout=20.0,
+    )
+    click_button(session, "Issues")
+    wait_for_ui(
+        session,
+        """
+        document.querySelector('[data-testid="agent-team-issues"]')
+          ?.textContent.includes('暂无 issue') === true
+        """,
+        "issue list loaded",
+        timeout=20.0,
+    )
+    wait_for_ui(
+        session,
+        "!document.querySelector('[data-testid=\"agent-team-action-error\"]')",
+        "Agent Team detail actions succeeded",
     )
 
 
