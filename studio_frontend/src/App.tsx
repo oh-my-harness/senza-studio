@@ -2,6 +2,7 @@
 import { useEffect, useState } from "react";
 import { Group, Panel, Separator } from "react-resizable-panels";
 import { useStudioStore } from "./store";
+import { useProjectSocket } from "./hooks/useProjectSocket";
 import { api } from "./api";
 import ChatPanel from "./components/ChatPanel";
 import Canvas from "./components/Canvas";
@@ -30,11 +31,30 @@ export default function App() {
   const [projects, setProjects] = useState<ProjectMeta[]>([]);
   const [newName, setNewName] = useState("");
   const [showSettings, setShowSettings] = useState(false);
+  // "studio" = 正常的编辑器；"export" = 导出项目跑起来的样子（只跑流程，
+  // 没有对话面板，spec 只读）。靠探测后端有没有 /api/mode 来判断——Studio
+  // 后端没这个路由，404 就当 studio，所以 Studio 侧不用配合改任何东西。
+  const [mode, setMode] = useState<"studio" | "export" | null>(null);
+  const isExport = mode === "export";
+
+  // 连接由 App 统一持有：export 模式不渲染 ChatPanel，但 Play 的事件流照收。
+  useProjectSocket(projectId);
+
+  useEffect(() => {
+    api.getMode().then(setMode).catch(() => setMode("studio"));
+  }, []);
 
   // 加载项目列表
   useEffect(() => {
     api.listProjects().then(setProjects).catch(console.error);
   }, []);
+
+  // 导出项目只有一个流程，没有"选项目"这一步——直接进去。
+  useEffect(() => {
+    if (isExport && !projectId) openProject("default");
+    // openProject 每次 render 都是新函数，放进依赖会无限循环
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isExport, projectId]);
 
   // 打开项目
   const openProject = async (id: string) => {
@@ -233,24 +253,30 @@ export default function App() {
   return (
     <div className="h-full w-full flex flex-col">
       <div className="flex items-center gap-3 px-4 py-2 border-b border-gray-200 bg-white">
-        <button
-          onClick={backToProjects}
-          disabled={playing}
-          title={playing ? "运行中无法切换项目" : "返回项目列表"}
-          className="text-sm text-gray-600 hover:text-gray-900 disabled:opacity-40 disabled:cursor-not-allowed"
-        >
-          ← 返回项目列表
-        </button>
+        {!isExport && (
+          <button
+            onClick={backToProjects}
+            disabled={playing}
+            title={playing ? "运行中无法切换项目" : "返回项目列表"}
+            className="text-sm text-gray-600 hover:text-gray-900 disabled:opacity-40 disabled:cursor-not-allowed"
+          >
+            ← 返回项目列表
+          </button>
+        )}
         {project && (
           <span className="text-sm font-medium text-gray-700">{project.name}</span>
         )}
       </div>
-      <ControlBar projectId={projectId} />
+      <ControlBar projectId={projectId} isExport={isExport} />
       <Group orientation="horizontal" className="flex-1 min-h-0">
-        <Panel id="chat" defaultSize={playing ? "20%" : "25%"} minSize="15%">
-          <ChatPanel projectId={projectId} />
-        </Panel>
-        <Separator className="w-1 bg-gray-200 hover:bg-blue-400 transition-colors cursor-col-resize" />
+        {!isExport && (
+          <>
+            <Panel id="chat" defaultSize={playing ? "20%" : "25%"} minSize="15%">
+              <ChatPanel projectId={projectId} />
+            </Panel>
+            <Separator className="w-1 bg-gray-200 hover:bg-blue-400 transition-colors cursor-col-resize" />
+          </>
+        )}
         {playing && (
           <>
             <Panel id="game" defaultSize="25%" minSize="15%">
@@ -264,7 +290,7 @@ export default function App() {
         </Panel>
         <Separator className="w-1 bg-gray-200 hover:bg-blue-400 transition-colors cursor-col-resize" />
         <Panel id="inspector" defaultSize="20%" minSize="15%">
-          <Inspector projectId={projectId} />
+          <Inspector projectId={projectId} readOnly={isExport} />
         </Panel>
       </Group>
       <BottomPanel />

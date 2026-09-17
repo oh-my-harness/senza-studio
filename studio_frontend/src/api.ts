@@ -142,6 +142,30 @@ export const api = {
       ok: boolean;
     };
   },
+  // 运行模式。Studio 后端没有这个路由（404），导出项目的 runtime 才有——
+  // 所以"探测失败"就等于"这是 Studio"，不需要 Studio 那边配合改任何东西。
+  getMode: async (): Promise<"studio" | "export"> => {
+    try {
+      const r = await fetch(`${BASE}/mode`);
+      if (!r.ok) return "studio";
+      const body = await r.json();
+      return body.mode === "export" ? "export" : "studio";
+    } catch {
+      return "studio";
+    }
+  },
+  // 导出成可独立运行的项目目录。spec 不合法 / 组件展不开时后端返回 400，
+  // detail 里是能直接给用户看的原因。
+  exportProject: (id: string, name?: string) =>
+    fetchJson<{
+      path: string;
+      with_webui: boolean;
+      note: string | null;
+    }>(`${BASE}/projects/${id}/export`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ name: name ?? null }),
+    }),
   getSettings: () =>
     fetchJson<{
       schema: SettingsField[];

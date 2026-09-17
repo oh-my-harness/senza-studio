@@ -91,3 +91,38 @@ def test_preprocess_is_reexported():
     }
     out = runtime.preprocess_spec(spec)
     assert out["stages"][0]["name"] == "gate_review"
+
+
+def test_index_html_is_served_with_no_cache(tmp_path):
+    """回归：index.html 必须每次回源校验。
+
+    Vite 给 JS/CSS 的文件名带内容哈希，所以资源本身随便缓存；但 index.html
+    一被缓存住，它引用的就是上一次构建的哈希，而那个文件在新导出的目录里不
+    存在——浏览器于是反复请求一个 404 的 js，页面白屏，刷新也没用（刷新读的
+    还是缓存里的 html）。用户实测踩到过。
+
+    注意"不设 Cache-Control"不等于"不缓存"：没有这个头时浏览器会按启发式规则
+    自己决定缓存多久，所以必须显式声明。
+    """
+    from fastapi.testclient import TestClient
+
+    from senza_studio_runtime.serve import create_app
+
+    pipeline = tmp_path / "pipeline.yaml"
+    pipeline.write_text("stages:\n  - name: z\n    type: terminal\n", encoding="utf-8")
+    dist = tmp_path / "webui" / "dist"
+    (dist / "assets").mkdir(parents=True)
+    (dist / "index.html").write_text("<html></html>", encoding="utf-8")
+    (dist / "assets" / "index-abc123.js").write_text("//js", encoding="utf-8")
+
+    client = TestClient(create_app(pipeline, dist))
+    for path in ("/", "/some/spa/route"):
+        r = client.get(path)
+        assert r.status_code == 200, path
+        assert "no-cache" in r.headers.get("cache-control", ""), (
+            f"{path} 没有 no-cache，浏览器会缓存住旧的 index.html"
+        )
+    # 带哈希的资源是不可变的，不需要（也不该）加 no-cache
+    asset = client.get("/assets/index-abc123.js")
+    assert asset.status_code == 200
+    assert "no-cache" not in asset.headers.get("cache-control", "")

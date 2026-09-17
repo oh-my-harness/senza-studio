@@ -290,14 +290,19 @@ system prompt 注入、read_document 均已单独验证（含真实 xlsx/csv/pdf
 - Studio 里构建 spec → Play 测试通过 → Export → 导出项目独立运行，行为和 Studio 里一致
 - 导出项目不依赖 Studio
 
-**状态**：进行中，按切片推进（同 Phase 3/4 的做法）
+**状态**：已实现（四个切片全部落地）
+
+切片 2 一开始只做了后端端点，没有任何界面入口——当时按切片描述逐条验证，
+每条都过，但「用户怎么触发导出」在四条切片描述里一条都没写到，于是整个
+Phase 被标成了已实现而实际上点不到。补成 2 + 2b 两行，免得以后再看不出来。
 
 | 切片 | 内容 | 状态 |
 |---|---|---|
 | 1. 抽取 runtime 包 | executor/judge/模板渲染/工具与插件加载/PlaySession/预处理器搬进 `senza-studio-runtime`，接口去 Studio 化（收 root + spec dict + model + provider），**Studio 自己也改成 import 它**，不留第二份实现 | 已实现（`65b716f`） |
-| 2. 导出打包 | `export.py` + `POST /api/projects/{id}/export`，拷贝 tools/plugins、生成 pyproject.toml / .env.example / README.md；导出前先 validate + preprocess，spec 有问题就地拦住 | 已实现 |
-| 3. serve + 前端 export 模式 | CLI、Play 那部分路由（固定 project id）、WS 生命周期从 ChatPanel 提出来、模式开关、把 dist 打进导出包 | 待实现 |
-| 4. 行为一致性验证 | 同一个 spec 在 Studio 和导出项目里各跑一遍，比对 step 序列和每步输出 | 待实现 |
+| 2. 导出打包（后端） | `export.py` + `POST /api/projects/{id}/export`，拷贝 tools/plugins、生成 pyproject.toml / .env.example / README.md；导出前先 validate + preprocess，spec 有问题就地拦住 | 已实现 |
+| 2b. 导出按钮（前端） | 控制条上的「⬇ 导出」，成功显示落盘路径、失败显示后端给的原因（不是一串 JSON）；export 模式下不显示 | 已实现 |
+| 3. serve + 前端 export 模式 | `senza-studio-runtime serve`、Play 那部分路由（project id 固定 `default`）、WS 生命周期提到 App、`/api/mode` 探测、Inspector 只读、dist 打进导出包 | 已实现 |
+| 4. 行为一致性验证 | 同一个 spec 两边各跑一遍，比对 step 序列、route_key、输出、终态（tests/test_export_equivalence.py，approve/reject 两条路径） | 已实现 |
 
 切片 1 之所以对外看不出变化：它是纯重构，原有 411 个测试一个不改地全绿，
 用户可见的 Export 功能在切片 2/3。切片 4 是这一阶段真正的验收，跑通了才算完。

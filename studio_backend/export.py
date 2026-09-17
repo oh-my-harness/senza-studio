@@ -20,8 +20,12 @@ pipeline.yaml 刻意存**编辑态**（`component:` 引用没有展开）：导�
 """
 from __future__ import annotations
 
+import json
+import os
 import re
 import shutil
+import subprocess
+import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -54,7 +58,63 @@ def slugify(name: str, fallback: str = "senza-agent") -> str:
     return slug or fallback
 
 
+
+# senza-studio-runtime 和 senza-studio-components 没有发布到 PyPI，所以把它们
+# 打成 wheel 放进 vendor/：导出目录因此能整个拷给别人，而不是只能在装了
+# Studio 源码的这台机器上跑。
+#
+# senza-sdk **在 PyPI 上**（1.3.0），所以不 vendor 它——照常当普通依赖装就行。
+# 这还顺带避开了平台问题：它是编译产物，交给 pip 去解析能拿到对方平台的
+# wheel，而我们硬拷一份只会是打包这台机器的架构。
+REPO_ROOT = Path(__file__).resolve().parent.parent
+_VENDORED_PACKAGES = ("senza-studio-runtime", "senza-studio-components")
+WHEEL_BUILD_TIMEOUT = 180
+
+
+def build_vendor_wheels(target: Path) -> tuple[list[str], list[str]]:
+    """把未发布的依赖打成 wheel 放进 ``<target>/vendor/``。
+
+    返回 (成功的 wheel 文件名, 没搞定的包名)。**不抛异常**：打包失败不该让整
+    个导出失败——用户照样可以拿到目录，只是得自己解决依赖，由调用方把缺了
+    什么说清楚。
+    """
+    vendor = target / "vendor"
+    vendor.mkdir(parents=True, exist_ok=True)
+    missing: list[str] = []
+
+    for name in _VENDORED_PACKAGES:
+        source = REPO_ROOT / name
+        if not source.is_dir():
+            missing.append(name)
+            continue
+        try:
+            subprocess.run(
+                [sys.executable, "-m", "pip", "wheel", "--no-deps",
+                 "--wheel-dir", str(vendor), str(source)],
+                capture_output=True,
+                timeout=WHEEL_BUILD_TIMEOUT,
+                check=True,
+            )
+        except (subprocess.SubprocessError, OSError):
+            missing.append(name)
+
+    return sorted(p.name for p in vendor.glob("*.whl")), missing
+
+
+def _locked_sdk_version() -> str | None:
+    """Studio 验证过的 senza-sdk 版本（senza-sdk.lock）。导出项目钉同一个版本
+    ——"行为和 Studio 里一致"里也包含引擎版本一致，让对方随便装个最新的
+    并不安全。"""
+    lock = REPO_ROOT / "senza-sdk.lock"
+    try:
+        return json.loads(lock.read_text(encoding="utf-8")).get("senza_version")
+    except (OSError, ValueError):
+        return None
+
+
 def _generate_pyproject(package_name: str, display_name: str) -> str:
+    version = _locked_sdk_version()
+    sdk_requirement = f"senza-sdk=={version}" if version else "senza-sdk"
     return f'''[build-system]
 requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
@@ -65,13 +125,20 @@ version = "0.1.0"
 description = "{display_name} — exported from Senza Studio"
 requires-python = ">=3.12"
 dependencies = [
-    # 工作流引擎本体
-    "senza-sdk",
+    # 工作流引擎本体（PyPI 上有；版本钉成 Studio 验证过的那个）
+    "{sdk_requirement}",
     # executor / judge / spec 预处理器（和 Studio 里跑的是同一份实现）
     "senza-studio-runtime",
     # 预制件工具与能力组件（spec 里按名字引用的那些）
     "senza-studio-components",
 ]
+
+# 导出目录不是一个 Python 包，只是"一份依赖清单 + 一堆数据文件"。不写这一行
+# 的话 setuptools 会去自动发现包，把 plugins/ 和 webui/ 当成两个顶级包，然后
+# 直接报 "Multiple top-level packages discovered in a flat-layout" 装不上。
+# tools/ 和 plugins/ 是运行时按路径加载的，不需要被打包。
+[tool.setuptools]
+packages = []
 '''
 
 
@@ -107,18 +174,47 @@ def _generate_env_example() -> str:
     return "\n".join(lines)
 
 
-def _generate_readme(display_name: str, package_name: str, step_count: int) -> str:
+def _generate_readme(
+    display_name: str,
+    package_name: str,
+    step_count: int,
+    missing_wheels: list[str] | None = None,
+) -> str:
+    version = _locked_sdk_version()
+    sdk_requirement = f"senza-sdk=={version}" if version else "senza-sdk"
+    missing_note = (
+        ""
+        if not missing_wheels
+        else (
+            "\n> ⚠️ 打包时没能把 "
+            + "、".join(missing_wheels)
+            + " 放进 vendor/，"
+            "装的时候需要自己解决这几个依赖。\n"
+        )
+    )
     return f"""# {display_name}
 
 从 Senza Studio 导出的独立 Agent 项目，共 {step_count} 个 step。
 **不需要安装 Senza Studio 就能运行。**
+{missing_note}
 
 ## 安装
 
 ```bash
 python -m venv .venv && source .venv/bin/activate
-pip install -e .
+pip install --find-links vendor \\
+  senza-studio-runtime senza-studio-components {sdk_requirement}
 ```
+
+**不需要安装 Senza Studio，也不需要拿到它的源码**——这个目录拷到哪台机器都能装。
+
+两种来源的区别：
+
+- `senza-studio-runtime` / `senza-studio-components` 还没发布，wheel 直接放在
+  `vendor/` 里，`--find-links` 就是让 pip 从那里找。
+- `senza-sdk` 和 fastapi 之类的公共依赖照常从 PyPI 装，所以**安装时需要联网**
+  （之后运行就不需要了）。senza-sdk 的版本钉成了 Studio 验证过的那个，免得
+  引擎版本不一致导致行为和 Studio 里不一样。
 
 ## 配置
 
@@ -175,8 +271,10 @@ def export_project(
     spec: Spec,
     name: str | None = None,
     webui_dist: Path | None = None,
-) -> tuple[Path, bool]:
-    """导出到 ``<project>/exports/<slug>/``，返回 (目录, 是否带上了 webui)。
+    vendor: bool = True,
+) -> tuple[Path, bool, list[str]]:
+    """导出到 ``<project>/exports/<slug>/``，返回
+    (目录, 是否带上了 webui, 没打进 vendor 的依赖)。
 
     没构建过前端不算错误——照样能导出，只是跑起来没有网页界面，由调用方
     提示用户。
@@ -225,8 +323,17 @@ def export_project(
         _generate_pyproject(package_name, display_name), encoding="utf-8"
     )
     (target / ".env.example").write_text(_generate_env_example(), encoding="utf-8")
+    missing_wheels: list[str] = []
+    if vendor:
+        _, missing_wheels = build_vendor_wheels(target)
+
     (target / "README.md").write_text(
-        _generate_readme(display_name, package_name, len(spec_dict.get("stages", []))),
+        _generate_readme(
+            display_name,
+            package_name,
+            len(spec_dict.get("stages", [])),
+            missing_wheels,
+        ),
         encoding="utf-8",
     )
 
@@ -236,4 +343,4 @@ def export_project(
     )
     project._save_meta()
 
-    return target, copied_webui
+    return target, copied_webui, missing_wheels

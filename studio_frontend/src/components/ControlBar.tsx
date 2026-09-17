@@ -3,7 +3,15 @@ import { useState } from "react";
 import { useStudioStore } from "../store";
 import { api } from "../api";
 
-export default function ControlBar({ projectId }: { projectId: string }) {
+export default function ControlBar({
+  projectId,
+  isExport = false,
+}: {
+  projectId: string;
+  /** 导出的项目里不显示"导出"——它本来就是导出产物，而且 runtime
+   *  那边根本没有这个接口。 */
+  isExport?: boolean;
+}) {
   const ws = useStudioStore((s) => s.ws);
   const status = useStudioStore((s) => s.status);
   const resetPlay = useStudioStore((s) => s.resetPlay);
@@ -16,6 +24,8 @@ export default function ControlBar({ projectId }: { projectId: string }) {
   // 记住这次 Play 是不是"从头单步"发起的——entry-input 对话框跟正常 Play
   // 共用，"开始运行"按钮点下去的时候要知道该不该带上 start_paused。
   const [pendingStartPaused, setPendingStartPaused] = useState(false);
+  const [exporting, setExporting] = useState(false);
+  const addLog = useStudioStore((s) => s.addLog);
 
   const playing = status === "playing";
   // Resume/Step 只在"手动暂停"时露出——checker 审批暂停已经有 GameView
@@ -24,6 +34,37 @@ export default function ControlBar({ projectId }: { projectId: string }) {
   // 决定而重新暂停，纯属多余，索性藏起来）。
   const showResumeStep = playing && enginePaused && !pausedStepId;
   const showPause = playing && !enginePaused && !runFinishedState;
+
+  const runExport = async () => {
+    setExporting(true);
+    try {
+      const result = await api.exportProject(projectId);
+      addLog("info", `已导出到 ${result.path}`);
+      if (result.note) addLog("error", result.note);
+      window.alert(
+        `已导出到：\n${result.path}` +
+          (result.note ? `\n\n注意：${result.note}` : ""),
+      );
+    } catch (e) {
+      // fetchJson 抛出来的是 `400: {"detail":"..."}`——把 detail 抠出来，
+      // 别把一串 JSON 甩给用户。导出失败最常见的原因就是 spec 有问题
+      // （组件名写错之类），那句话本身是能看懂的。
+      const raw = e instanceof Error ? e.message : String(e);
+      let detail = raw;
+      const brace = raw.indexOf("{");
+      if (brace >= 0) {
+        try {
+          detail = JSON.parse(raw.slice(brace)).detail ?? raw;
+        } catch {
+          /* 解析不出来就用原文 */
+        }
+      }
+      addLog("error", `导出失败：${detail}`);
+      window.alert(`导出失败：\n${detail}`);
+    } finally {
+      setExporting(false);
+    }
+  };
 
   // Play 前先看看入口 step 需要哪些种子输入（比如 customer_message）——
   // Studio 不接真实生产流量，没有真人填这些字段，prompt_template 里的
@@ -94,6 +135,20 @@ export default function ControlBar({ projectId }: { projectId: string }) {
         >
           ■ Stop
         </button>
+        {!isExport && (
+          <button
+            onClick={runExport}
+            disabled={playing || exporting}
+            title={
+              playing
+                ? "运行中不能导出"
+                : "打包成不依赖 Studio 的独立项目"
+            }
+            className="rounded-lg border border-gray-300 px-4 py-1.5 text-sm text-gray-700 hover:bg-gray-100 disabled:opacity-50"
+          >
+            {exporting ? "导出中…" : "⬇ 导出"}
+          </button>
+        )}
         {showPause && (
           <button
             onClick={pause}

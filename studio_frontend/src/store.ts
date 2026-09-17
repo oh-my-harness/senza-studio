@@ -41,6 +41,14 @@ interface StudioStore {
   // Pause/Step 都会让这个变 true）。跟 pausedStepId 是两个不同维度：
   // 后者专门只在 checker 审批时才非空，用来单独控制审批横幅。
   enginePaused: boolean;
+  // 会话列表。从 ChatPanel 的局部 state 提上来（Phase 7 切片三）：WebSocket
+  // 的生命周期要从 ChatPanel 里搬出去（export 模式根本不渲染对话面板），
+  // 而消息处理器里唯一还依赖局部 state 的就是 session_switched 这一条。
+  sessions: string[];
+  activeSession: string | null;
+  // 元 agent 是否正在回复。同样是从 ChatPanel 提上来的——WebSocket 处理器
+  // 会改它，而处理器已经不住在 ChatPanel 里了。
+  streaming: boolean;
 
   setProject: (p: ProjectMeta | null) => void;
   setSpec: (s: Spec) => void;
@@ -51,6 +59,10 @@ interface StudioStore {
   appendToLastAssistant: (text: string) => void;
   selectStep: (name: string | null) => void;
   setWs: (ws: WebSocket | null) => void;
+  // 支持函数式更新：session_switched 要基于当前列表去重追加
+  setSessions: (s: string[] | ((prev: string[]) => string[])) => void;
+  setActiveSession: (s: string | null) => void;
+  setStreaming: (v: boolean) => void;
   resetPlay: () => void;
   startStep: (stepId: string, stepName: string) => void;
   appendStepText: (stepId: string, text: string) => void;
@@ -78,6 +90,9 @@ export const useStudioStore = create<StudioStore>((set) => ({
   project: null,
   spec: { stages: [] },
   runtimeSpec: null,
+  sessions: [],
+  activeSession: null,
+  streaming: false,
   status: "idle",
   messages: [],
   selectedStepName: null,
@@ -98,6 +113,15 @@ export const useStudioStore = create<StudioStore>((set) => ({
   setMessages: (messages) => set({ messages }),
   selectStep: (selectedStepName) => set({ selectedStepName }),
   setWs: (ws) => set({ ws }),
+  setSessions: (value) =>
+    set((s) => ({
+      sessions:
+        typeof value === "function"
+          ? (value as (prev: string[]) => string[])(s.sessions)
+          : value,
+    })),
+  setActiveSession: (activeSession) => set({ activeSession }),
+  setStreaming: (streaming) => set({ streaming }),
   appendToLastAssistant: (text) =>
     set((s) => {
       const msgs = s.messages;

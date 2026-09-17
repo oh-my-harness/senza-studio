@@ -463,19 +463,29 @@ def create_app(config: StudioConfig | None = None) -> FastAPI:
         """
         state = _get_or_load_project(cfg, project_id)
         try:
-            target, with_webui = export_project(
+            target, with_webui, missing_wheels = export_project(
                 state["project"], state["spec"], name=req.name, webui_dist=WEBUI_DIST
             )
         except ExportError as exc:
             return JSONResponse(status_code=400, content={"detail": str(exc)})
+        notes: list[str] = []
+        if not with_webui:
+            # 没带上前端不是失败，但用户得知道——否则跑起来看到的是空页面
+            notes.append(
+                "没有找到前端构建产物，导出的项目暂时没有网页界面。"
+                "在 studio_frontend/ 里跑一次 npm run build 再导出即可。"
+            )
+        if missing_wheels:
+            # 同理：目录还是能用，只是不能整个拷给别人直接装
+            notes.append(
+                "这几个依赖没能打进 vendor/：" + "、".join(missing_wheels)
+                + "。导出的项目需要自己解决它们才能安装。"
+            )
         return {
             "path": str(target),
             "with_webui": with_webui,
-            # 没带上前端不是失败，但用户得知道——否则跑起来看到的是空页面
-            "note": None
-            if with_webui
-            else "没有找到前端构建产物，导出的项目暂时没有网页界面。"
-            "在 studio_frontend/ 里跑一次 npm run build 再导出即可。",
+            "missing_wheels": missing_wheels,
+            "note": "\n".join(notes) or None,
         }
 
     @app.get("/api/projects/{project_id}/expanded_spec")
