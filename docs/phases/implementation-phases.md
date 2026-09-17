@@ -274,13 +274,14 @@ system prompt 注入、read_document 均已单独验证（含真实 xlsx/csv/pdf
 
 ## Phase 7: Export 打包
 
-**仓库**：`senza-studio` + `senza-studio-runtime`（新包）+ `senza-studio-webui`（新 npm 包）
+**仓库**：`senza-studio`（`senza-studio-runtime` 是它的子目录包，同
+`senza-studio-components`；不抽 `senza-studio-webui` npm 包，理由见下方"与原计划的
+两处偏离"）
 
 **目标**：能导出完整项目，导出项目能独立运行。
 
 **交付内容**：
 - `senza-studio-runtime` pip 包提取：executor + judge + preprocessor（从 Studio 后端代码抽出）
-- `senza-studio-webui` npm 包提取：Game/Scene/Inspector/Console/控制条 React 组件
 - 全量打包：pipeline.yaml + tools/ + plugins/ + webui/dist/ + pyproject.toml + .env.example + README.md
 - 导出项目结构生成
 - 导出项目能独立运行：`senza-studio-runtime serve pipeline.yaml`
@@ -289,7 +290,28 @@ system prompt 注入、read_document 均已单独验证（含真实 xlsx/csv/pdf
 - Studio 里构建 spec → Play 测试通过 → Export → 导出项目独立运行，行为和 Studio 里一致
 - 导出项目不依赖 Studio
 
-**状态**：待实现
+**状态**：进行中，按切片推进（同 Phase 3/4 的做法）
+
+| 切片 | 内容 | 状态 |
+|---|---|---|
+| 1. 抽取 runtime 包 | executor/judge/模板渲染/工具与插件加载/PlaySession/预处理器搬进 `senza-studio-runtime`，接口去 Studio 化（收 root + spec dict + model + provider），**Studio 自己也改成 import 它**，不留第二份实现 | 已实现（`65b716f`） |
+| 2. 导出打包 | `export.py` + `POST /api/projects/{id}/export`，拷贝 tools/plugins、生成 pyproject.toml / .env.example / README.md；导出前先 validate + preprocess，spec 有问题就地拦住 | 已实现 |
+| 3. serve + 前端 export 模式 | CLI、Play 那部分路由（固定 project id）、WS 生命周期从 ChatPanel 提出来、模式开关、把 dist 打进导出包 | 待实现 |
+| 4. 行为一致性验证 | 同一个 spec 在 Studio 和导出项目里各跑一遍，比对 step 序列和每步输出 | 待实现 |
+
+切片 1 之所以对外看不出变化：它是纯重构，原有 411 个测试一个不改地全绿，
+用户可见的 Export 功能在切片 2/3。切片 4 是这一阶段真正的验收，跑通了才算完。
+
+**与原计划的两处偏离**（已确认）：
+
+- **不抽 `senza-studio-webui` npm 包**。那五个组件全部深挂在 `useStudioStore`
+  上（17 个字段，含 `setSpec`/`setStatus`/`ws` 这些 Studio 专有的），抽包等于把
+  ~1360 行改成 props 传参，而除了 Studio 和导出项目并没有第三个消费者。改为给
+  现有前端加一个 export 模式，导出时直接带上 Studio 的构建产物 `dist/`。等真
+  出现第三个消费者再抽。
+- **`senza-studio-runtime` 是子目录包不是独立仓库**，沿用
+  `senza-studio-components` 已经确立的先例：包独立可安装（导出项目要装它），
+  仓库不拆，改动保持原子。
 
 ---
 
@@ -304,3 +326,37 @@ Phase 0 ──→ Phase 1 ──→ Phase 2 ──→ Phase 3 ──→ Phase 4 
 - Phase 0 和 Phase 1 可以并行（Phase 0 改 runtime，Phase 1 建 Studio）
 - Phase 4/5/6 之间无强依赖，可以并行或调整顺序
 - Phase 7 依赖前面所有阶段
+
+---
+
+## 遗留事项
+
+单独列在这里，是为了"还剩什么"这个问题能从文档里得到答案，而不是靠翻记忆和
+commit log。
+
+### 挂在 LLM 供应商上的验收（三条，各阶段内已分别记录）
+
+| 阶段 | 没跑通的验收 |
+|---|---|
+| Phase 4 | 元 agent 在真实对话里自主调用 `add_component` |
+| Phase 5 | 元 agent 在真实对话里自主调用 `generate_tool` |
+| Phase 6 | 元 agent 拿着上传的文档构建 spec |
+
+共同原因：`OPENAI_API_BASE` 指向的局域网网关（New API 风格）本身很快（~110ms
+就返回），但它的上游一直 `upstream error: do request failed`，裸 curl 同样复现，
+与 Studio 无关。三条都**不是**代码没写，而是没法验证"模型会不会自己选它"——
+工具注册、schema、系统提示词、中英文检索、降级路径均已单独验证。网关恢复后
+补跑即可，每条几分钟。
+
+### Phase 6 的图片（vision）
+
+没做。当前钉住的 SDK 里 `AgentHarness.prompt(self, text)` 只收文本，runtime 的
+多模态支持（`1e4b37b`，8/29）比钉住的 rev（`1997636`，8/28）晚一天，不在这个
+构建里。要做得先升 runtime pin + 重建 wheel + 重跑 compat，是独立的一件事。
+现在上传图片会得到一句明确的"暂不支持，等 SDK 升级"，不是看不懂的解析错误。
+
+### 不在本路线图内的工作
+
+Agent Team 代理、本地 API 认证、桌面端打包（`e909d9d`、`3652f3c`、`ad207f1`、
+`04da48c` 等）是独立推进的功能线，本文档没有对应阶段，状态也不由这里维护。
+提一句是为了避免有人对着这份路线图以为"Phase 7 做完就全做完了"。

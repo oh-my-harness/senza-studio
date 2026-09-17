@@ -742,3 +742,54 @@ def test_upload_of_a_corrupt_file_reports_the_reason(app_client):
     r = _upload(app_client, pid, "broken.xlsx", b"this is not really xlsx")
     assert r.status_code == 200
     assert r.json()["ok"] is False
+
+
+# ── 导出（Phase 7） ──────────────────────────────────────
+
+
+def test_export_endpoint_writes_a_runnable_bundle(app_client):
+    pid = app_client.post("/api/projects", json={"name": "Order Flow"}).json()["id"]
+    app_client.put(
+        f"/api/projects/{pid}/spec",
+        json={"spec": {"stages": [
+            {"name": "a", "type": "agent", "prompt_template": "hi", "next_on_success": "z"},
+            {"name": "z", "type": "terminal", "message": "done"},
+        ]}},
+    )
+    r = app_client.post(f"/api/projects/{pid}/export", json={})
+    assert r.status_code == 200
+    body = r.json()
+    from pathlib import Path
+
+    target = Path(body["path"])
+    assert target.is_dir()
+    assert (target / "pipeline.yaml").is_file()
+    assert (target / "pyproject.toml").is_file()
+    # 导出目录必须落在项目的 exports/ 底下
+    assert target.parent.name == "exports"
+
+
+def test_export_endpoint_rejects_an_invalid_spec_with_a_readable_reason(app_client):
+    """导出一个跑不起来的项目比导出失败更糟——要在这一步拦住并说清原因。"""
+    pid = app_client.post("/api/projects", json={"name": "坏 spec"}).json()["id"]
+    app_client.put(
+        f"/api/projects/{pid}/spec",
+        json={"spec": {"stages": [{"name": "gate", "component": "nope",
+                                   "next_on_approve": "z"},
+                                  {"name": "z", "type": "terminal"}]}},
+    )
+    r = app_client.post(f"/api/projects/{pid}/export", json={})
+    assert r.status_code == 400
+    assert "nope" in r.json()["detail"]
+
+
+def test_export_reports_when_the_webui_build_is_missing(app_client):
+    """没 build 过前端不算失败，但用户得知道——否则跑起来是个空页面。"""
+    pid = app_client.post("/api/projects", json={"name": "无前端"}).json()["id"]
+    app_client.put(
+        f"/api/projects/{pid}/spec",
+        json={"spec": {"stages": [{"name": "z", "type": "terminal"}]}},
+    )
+    body = app_client.post(f"/api/projects/{pid}/export", json={}).json()
+    if not body["with_webui"]:
+        assert body["note"] and "npm run build" in body["note"]

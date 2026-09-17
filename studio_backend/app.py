@@ -18,6 +18,7 @@ from pydantic import BaseModel, ValidationError
 
 from .config import StudioConfig
 from .docingest import ingest
+from .export import ExportError, export_project
 from .docs import (
     ingest_cache_path,
     resolve_doc_path,
@@ -79,6 +80,10 @@ async def read_limited_bootstrap_body(request: Request) -> bytes:
             raise ValueError("Bootstrap request body is too large")
         chunks.append(chunk)
     return b"".join(chunks)
+
+
+class ExportReq(BaseModel):
+    name: str | None = None
 
 
 class UpdateSettingsReq(BaseModel):
@@ -443,6 +448,34 @@ def create_app(config: StudioConfig | None = None) -> FastAPI:
             # 解析失败也返回 200：文件确实存下来了，失败的是解析。前端据此
             # 显示一条说明，而不是把上传本身报成错误。
             "ok": result.get("kind") != "error",
+        }
+
+    # Studio 前端的构建产物。导出项目直接带上它跑（不另抽 npm 包，见
+    # docs/phases 里 Phase 7 的说明）。dev 模式下可能还没 build 过，那就
+    # 导出一个没有网页界面的项目，并在响应里说明。
+    WEBUI_DIST = Path(__file__).resolve().parent.parent / "studio_frontend" / "dist"
+
+    @app.post("/api/projects/{project_id}/export")
+    async def export_project_endpoint(project_id: str, req: ExportReq):
+        """导出成可独立运行的项目目录。
+
+        用内存里的 spec 而不是 pipeline.yaml：用户要导出的是他现在屏幕上那份。
+        """
+        state = _get_or_load_project(cfg, project_id)
+        try:
+            target, with_webui = export_project(
+                state["project"], state["spec"], name=req.name, webui_dist=WEBUI_DIST
+            )
+        except ExportError as exc:
+            return JSONResponse(status_code=400, content={"detail": str(exc)})
+        return {
+            "path": str(target),
+            "with_webui": with_webui,
+            # 没带上前端不是失败，但用户得知道——否则跑起来看到的是空页面
+            "note": None
+            if with_webui
+            else "没有找到前端构建产物，导出的项目暂时没有网页界面。"
+            "在 studio_frontend/ 里跑一次 npm run build 再导出即可。",
         }
 
     @app.get("/api/projects/{project_id}/expanded_spec")
