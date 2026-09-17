@@ -951,8 +951,16 @@ class PlaySession:
         # InvalidStatus 拒绝 —— 那个异常会把 WS 连接打死）。
         if self._engine.state() not in ("paused", "failed"):
             return
-        self._engine.set_context_variable(decision_context_key(step_id), decision)
-        self._engine.resume()
+        try:
+            self._engine.set_context_variable(decision_context_key(step_id), decision)
+            self._engine.resume()
+        except senza.HarnessStateError:
+            # 竞争窗口：守卫读到 paused/failed 之后、resume 执行前，stop()
+            #（用户 Stop 或 15 分钟超时计时器线程）已把引擎终态化。此时决定
+            # 已经过期——静默放弃即可。异常绝不能向上抛：本方法在 WS 事件
+            # 循环线程执行（app.py 无 try/except），HarnessStateError 会把
+            # 整个连接打死（守卫只能缩小窗口，不能消除）。
+            return
         if self._step_mode:
             self._engine.pause("single-step (after approval)")
         self.run_error = None

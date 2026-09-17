@@ -2109,3 +2109,42 @@ def test_submit_decision_failed_still_resumes(monkeypatch):
     assert ("resume",) in engine.calls
     assert started == [True]
 
+
+def test_submit_decision_vs_concurrent_cancel_does_not_raise(monkeypatch):
+    """回归 E2（并发窗口）：submit_decision 的 state 守卫读到底后、resume()
+   执行前，stop()（用户 Stop 或 15 分钟超时计时器线程）把引擎置为
+   Cancelled——resume() 会抛 HarnessStateError。该异常发生在 WS 事件循环
+   线程（app.py 的 submit_decision 分支无 try/except），会把整个 WebSocket
+   连接打死。真实场景：预算在 HITL 等待中耗尽，用户恰在此时点批准。
+   守卫只能缩小窗口，不能消除——resume 调用本身必须容忍终态竞争。"""
+    engine = FakeGuardEngine("paused")
+    session = _make_guard_session(engine)
+    started = []
+    monkeypatch.setattr(session, "start", lambda: started.append(True))
+
+    # 构造竞争：守卫读到 paused 之后、resume 之前，引擎被终态化。
+    # 用 set_context_variable 的回调时机触发——它恰好在守卫之后、resume
+    # 之前被调用（submit_decision 的真实调用顺序）。
+    original_set = engine.set_context_variable
+
+    def set_then_cancel(key, value):
+        original_set(key, value)
+        engine._state = "cancelled"  # 模拟并发 cancel 已落定
+
+    engine.set_context_variable = set_then_cancel
+    # 真引擎 resume 对 Cancelled 抛 HarnessStateError——假引擎同样抛。
+    def racy_resume():
+        engine.calls.append(("resume",))
+        if engine._state == "cancelled":
+            raise play.senza.HarnessStateError(
+                "run: task is not Idle/Paused/Running (status=Cancelled)"
+            )
+
+    engine.resume = racy_resume
+
+    # 不得抛——决定被静默放弃，WS 连接存活。
+    session.submit_decision("gate_review", "approve")
+
+    assert session.state() == "cancelled"
+    assert started == []  # 引擎已终态，绝不能重启
+
