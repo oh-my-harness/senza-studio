@@ -13,8 +13,10 @@
 - ``WS /ws/run`` 只有三个动词：start / decision / cancel。没有 pause / resume
   / step——那是调试器的动词。
 
-``ui.display`` 的分派规则和 Studio 的 Game view 完全一致（默认 chat，``none``
-不展示）：spec 作者在 Studio 里看到的效果，就是最终用户看到的效果。
+``GET /api/agent`` 回的那份契约由 ``contract.describe_agent`` 生成，Studio 的
+``/api/projects/{id}/agent`` 回的是**同一个函数的输出**——Game view 就是这个
+界面的预览，两边共用一份数据和一份渲染代码，"看到的就是发出去的"才不是靠
+人工对齐维持的。
 """
 from __future__ import annotations
 
@@ -29,14 +31,9 @@ from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
-from .play import PlaySession, create_provider, get_entry_inputs
-from .preprocess import PreprocessError, preprocess_spec
+from .contract import describe_agent
+from .play import PlaySession, create_provider
 from .stream import run_play_streaming
-
-# ui.display 没写时按 chat 渲染——和 Studio 的 Game view 同一个默认值
-# （GameView.tsx 的 displayConfigFor）。两边默认值不一致的话，作者在 Studio
-# 里看到的和用户在导出产品里看到的就不是一回事。
-DEFAULT_DISPLAY = "chat"
 
 
 def load_spec(path: Path) -> dict:
@@ -58,44 +55,6 @@ def load_manifest(root: Path) -> dict:
         return data if isinstance(data, dict) else {}
     except (OSError, ValueError):
         return {}
-
-
-def describe_steps(spec_dict: dict) -> dict[str, dict]:
-    """展开后的 spec → 每个 step 的**展示契约**。
-
-    只有三件事：怎么展示、展示哪些字段、停下来时有哪些选项。刻意不回
-    prompt_template / tool / next_on_* 的目标——前端不需要知道流程长什么样。
-
-    收编辑态 spec，内部先 preprocess：能力组件展开出来的 step（gate_review
-    之类）在编辑态里根本不存在，而它恰恰常常就是那个要人工审批的 step。
-    """
-    steps: dict[str, dict] = {}
-    for stage in preprocess_spec(spec_dict).get("stages", []):
-        name = stage.get("name")
-        if not name:
-            continue
-        ui = stage.get("ui") or {}
-        steps[name] = {
-            "display": ui.get("display") or DEFAULT_DISPLAY,
-            "fields": ui.get("fields") or [],
-            # 暂停等人工决定时给用户的选项。标签就是 next_on_* 的后缀，
-            # 不写死"批准/拒绝"——spec 作者可以定义任意标签。
-            #
-            # 只给 checker：只有它会停下来问人。给别的 step 也算 choices 的话
-            # 等于把"这一步之后能走哪几条分支"告诉了前端——那是流程结构，
-            # 产品界面不需要知道（用户实测的 spec 里，classify_message 的三个
-            # 分类分支就会这样漏出去）。
-            "choices": sorted(
-                key[len("next_on_"):]
-                for key, value in stage.items()
-                if key.startswith("next_on_") and isinstance(value, str)
-            )
-            if stage.get("type") == "checker"
-            else [],
-            # 终点 step。前端据此把最后一张卡片渲染成"结果"而不是"过程"。
-            "terminal": stage.get("type") == "terminal",
-        }
-    return steps
 
 
 def create_app(pipeline: Path, webui_dist: Path | None = None) -> FastAPI:
@@ -124,24 +83,14 @@ def create_app(pipeline: Path, webui_dist: Path | None = None) -> FastAPI:
 
     @app.get("/api/agent")
     async def agent():
-        """界面渲染所需的全部信息。一次请求拿齐，前端不用再拼第二个接口。
+        """界面渲染所需的全部信息。和 Studio 的 /api/projects/{id}/agent 回的是
+        同一个东西，由同一个 describe_agent 生成——Game view 就是这个界面的
+        预览，两边的数据来源必须是一份。
 
-        展不开的组件不抛 500：产品界面该显示一条"这个 agent 装坏了"，而不是
-        白屏。inputs/steps 给空，error 说明原因。
+        标题优先用 spec 里 ui.title（作者写的产品名），没有才退回 agent.json
+        里的项目名、再退回目录名。
         """
-        info: dict[str, Any] = {
-            "name": manifest.get("name") or root.name,
-            "description": manifest.get("description") or "",
-            "inputs": [],
-            "steps": {},
-            "error": None,
-        }
-        try:
-            info["inputs"] = get_entry_inputs(spec_dict)
-            info["steps"] = describe_steps(spec_dict)
-        except PreprocessError as exc:
-            info["error"] = str(exc)
-        return info
+        return describe_agent(spec_dict, manifest.get("name") or root.name)
 
     @app.websocket("/ws/run")
     async def run_ws(websocket: WebSocket):

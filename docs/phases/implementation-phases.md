@@ -305,6 +305,7 @@ Phase 被标成了已实现而实际上点不到。补成 2 + 2b 两行，免得
 | 4. 行为一致性验证 | 同一个 spec 两边各跑一遍，比对 step 序列、route_key、输出、终态（tests/test_export_equivalence.py，approve/reject 两条路径） | 已实现 |
 | 5. 导出产物改成 Agent 本身 | 独立的 Agent 界面（`studio_frontend/agent/` → `dist-agent/`，另一次 vite build）、runtime 的接口换成产品契约（`GET /api/agent` + `WS /ws/run`）、Studio 前端里的 export 模式代码删干净 | 已实现 |
 | 6. 一条命令跑起来 | 生成 `run.sh`：找 Python、建 venv、按指纹装依赖、生成并校验 `.env`、挑空闲端口、起服务并开浏览器；重新导出保留 `.env` / `.venv` | 已实现 |
+| 7. Game view = 导出产品的预览 | 界面契约（`contract.describe_agent`）两边共用；`src/player/AgentRunView` 一个组件两个宿主；入口表单搬进 Game view；spec 顶层 `ui` 块 + Inspector 编辑 + `set_agent_ui` 工具；实现 `approval_form` | 已实现 |
 
 切片 1 之所以对外看不出变化：它是纯重构，原有 411 个测试一个不改地全绿，
 用户可见的 Export 功能在切片 2/3。切片 4 是这一阶段真正的验收，跑通了才算完。
@@ -334,6 +335,40 @@ DAG、Inspector、Play / Play Paused / Stop / Pause / Step、工具调用面板�
   展示）——作者在 Studio 里看到的效果就是最终用户看到的效果。
 - Studio 前端里的 export 模式代码（`/api/mode` 探测、`isExport`、Inspector
   `readOnly`）全部删除：导出包已经不跑这份前端了，留着只会误导。
+
+### 切片 7：Game view 就是导出产品的预览
+
+切片 5 之后，同一个想法有**两份实现**：Studio 的 `GameView.tsx` 和导出的
+`AgentApp.tsx`。两边都按 `ui.display` 分派，但已经差出七八处——入口输入（控制条
+一排裸变量名 vs 页内表单）、卡片外观、终点 step 的处理、审批区文案、跑完之后
+给什么按钮、`approval_form` 两边都没实现。手工对齐一次只是重置漂移的时钟。
+
+所以改成**一份数据 + 一份渲染**：
+
+- `senza_studio_runtime/contract.py` 产出展示契约（标题、说明、入口输入、每个
+  step 的 title/display/fields/choices/terminal），Studio 的
+  `/api/projects/{id}/agent` 和导出的 `/api/agent` 回的是同一个函数的输出。
+  测试直接断言两边逐字节相同。标签（step 标题、选项文案、输入框 label）全在
+  后端算好，前端不做任何猜测——猜测放在前端就等于放了两份，而且作者无从覆盖。
+- `studio_frontend/src/player/AgentRunView.tsx` 是那份界面，Game view 和导出
+  各写一层薄适配（store → props / hook → props），本身不含任何渲染逻辑。
+- 入口表单从控制条搬进 Game view：那一屏是最终用户打开产品看到的**第一屏**，
+  以前在 Studio 里根本没法预览。Play 按钮现在只负责进入运行视图，真正的 play
+  消息由表单发；`start_paused`（从头单步，调试用）经 store 传过去。
+- spec 顶层 `ui` 块（`title` / `description` / `inputs.<name>.{label,placeholder,
+  multiline}`）让作者控制产品文案，默认值仍是推导出来的（项目名当标题、变量名
+  humanize 成 label）——默认值只够看草稿，不够交付。Inspector 在"没选中节点"
+  时编辑它（那本来是整个 agent 唯一没有归属的属性），元 agent 用 `set_agent_ui`。
+- `approval_form` 终于名副其实：把 checker 已产出的结构化字段摆成表格放在决定
+  按钮上方。它之前一直在 Inspector 下拉框和系统提示词里，但两个渲染器都没实现。
+
+又一个只有真跑才会发现的坑，而且是这一片里最隐蔽的：重新导出之后，导出的
+agent 跑的还是**上一版代码**。两层原因叠在一起——`run.sh` 的依赖指纹只看
+wheel 文件名，而版本号钉死在 0.1.0，文件名永远不变；就算指纹变了，
+`pip install -r requirements.txt` 看到"0.1.0 已装"也会直接跳过。改成：导出时
+按源码算摘要写进 `vendor/sources.sha256`（不能哈希 wheel 字节——pip wheel 的
+产物不可复现，同源码连打两次就不一样，那样每次导出都白白重装），指纹变了就
+`--force-reinstall --no-deps vendor/*.whl` 按文件路径强制装一遍。
 
 ### 切片 6：交付物要能被跑起来，不只是能被装起来
 

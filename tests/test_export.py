@@ -502,3 +502,24 @@ def test_re_export_keeps_the_env_and_the_venv(tmp_path):
     assert (target / ".venv" / "bin" / "python").is_file()
     assert not (target / "stale.txt").exists(), "其它内容还是要整个重写"
     assert (target / "run.sh").is_file()
+
+
+def test_vendor_carries_a_source_digest_so_stale_installs_get_replaced(tmp_path):
+    """run.sh 靠指纹决定要不要重装依赖，而指纹必须跟着**源码**变。
+
+    只看 wheel 文件名不行：版本号钉死在 0.1.0，改了代码文件名也不变，于是
+    .venv 里一直是第一次装的旧代码（实测踩到过：重新导出之后跑的还是老界面，
+    接口都换了还在回旧字段）。直接哈希 wheel 字节也不行：pip wheel 的产物
+    不可复现，同一份源码连打两次 sha256 就不一样，那样每次导出都白白重装。
+    """
+    from studio_backend.export import _source_digest, build_vendor_wheels
+
+    assert _source_digest() == _source_digest(), "同样的源码必须算出同样的摘要"
+
+    proj = _project(tmp_path)
+    target, _, _ = export_project(proj, _spec(), vendor=True)
+    digest_file = target / "vendor" / "sources.sha256"
+    assert digest_file.is_file()
+    assert digest_file.read_text(encoding="utf-8").strip() == _source_digest()
+    # run.sh 得真的读它，否则写了也白写
+    assert "sources.sha256" in (target / "run.sh").read_text(encoding="utf-8")

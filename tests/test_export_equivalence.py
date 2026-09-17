@@ -29,6 +29,12 @@ from studio_backend.project import Project
 from studio_backend.spec import Spec
 
 SPEC = {
+    # 顶层 ui 块：导出 Agent（和它的预览 Game view）顶上的文案
+    "ui": {
+        "title": "退款审批",
+        "description": "确认之后自动退款",
+        "inputs": {"reason": {"label": "退款理由", "multiline": False}},
+    },
     "stages": [
         {
             "name": "gate",
@@ -167,7 +173,7 @@ def test_export_serves_the_same_entry_inputs(tmp_path):
     export, _ = _export_client(tmp_path, config, pid)
     assert (
         studio.get(f"/api/projects/{pid}/entry_inputs").json()["fields"]
-        == export.get("/api/agent").json()["inputs"]
+        == [field["name"] for field in export.get("/api/agent").json()["inputs"]]
     )
     _reset_state()
 
@@ -183,12 +189,12 @@ def test_agent_contract_describes_display_not_structure(tmp_path):
     export, _ = _export_client(tmp_path, config, pid)
     info = export.get("/api/agent").json()
 
-    assert info["name"] == "一致性"  # agent.json 里的人类可读名字
+    assert info["title"] == "退款审批"  # spec 里 ui.title 优先于项目名
     assert info["error"] is None
     steps = info["steps"]
 
     # 组件展开出来的审批 step——不展开的话界面上根本没有可点的选项
-    assert steps["gate_review"]["choices"] == ["approve", "reject"]
+    assert [c["value"] for c in steps["gate_review"]["choices"]] == ["approve", "reject"]
     assert steps["gate_review"]["terminal"] is False
     # 终点 step 要标出来，界面据此把最后一张卡片渲染成"结果"
     assert steps["refunded"]["terminal"] is True
@@ -197,7 +203,7 @@ def test_agent_contract_describes_display_not_structure(tmp_path):
 
     # 结构信息不能漏出去
     for name, step in steps.items():
-        assert set(step) == {"display", "fields", "choices", "terminal"}, name
+        assert set(step) == {"title", "display", "fields", "choices", "terminal"}, name
     assert "stages" not in info
     _reset_state()
 
@@ -256,4 +262,41 @@ def test_exported_pipeline_round_trips(tmp_path):
     _, target = _export_client(tmp_path, config, pid)
     loaded = yaml.safe_load((target / "pipeline.yaml").read_text(encoding="utf-8"))
     assert loaded == SPEC
+    _reset_state()
+
+
+def test_studio_and_export_serve_the_same_agent_contract(tmp_path):
+    """Game view 和导出 Agent 渲染的是同一个组件，喂给它的数据也必须是同一份。
+
+    这一条是"看到的就是发出去的"在接口层的样子：两边的契约由同一个
+    describe_agent 生成，所以应该逐字节相同。不相同的话，Studio 里预览出来的
+    界面和用户真正看到的界面就是两回事——而那正是 Game view 存在的意义。
+    """
+    studio, pid, config = _studio_client(tmp_path)
+    export, _ = _export_client(tmp_path, config, pid)
+
+    from_studio = studio.get(f"/api/projects/{pid}/agent").json()
+    from_export = export.get("/api/agent").json()
+    assert from_studio == from_export
+
+    # 顺带确认这份契约确实带着作者写的文案，而不是两边同样地回了默认值
+    assert from_studio["title"] == "退款审批"
+    assert from_studio["description"] == "确认之后自动退款"
+    _reset_state()
+
+
+def test_agent_ui_copy_overrides_the_derived_defaults(tmp_path):
+    """没写 ui 的 spec 用推导出来的默认值（项目名当标题、变量名 humanize 成
+    label）；写了就用作者写的。默认值只是让草稿阶段能看，不是能交付的文案。"""
+    studio, pid, config = _studio_client(tmp_path)
+
+    bare = {k: v for k, v in SPEC.items() if k != "ui"}
+    studio.put(f"/api/projects/{pid}/spec", json={"spec": bare})
+    info = studio.get(f"/api/projects/{pid}/agent").json()
+    assert info["title"] == "一致性"  # 退回项目名
+    assert info["description"] == ""
+
+    studio.put(f"/api/projects/{pid}/spec", json={"spec": SPEC})
+    info = studio.get(f"/api/projects/{pid}/agent").json()
+    assert info["title"] == "退款审批"
     _reset_state()

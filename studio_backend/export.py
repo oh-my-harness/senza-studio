@@ -28,6 +28,7 @@ pipeline.yaml 刻意存**编辑态**（`component:` 引用没有展开）：导�
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
@@ -111,7 +112,36 @@ def build_vendor_wheels(target: Path) -> tuple[list[str], list[str]]:
         except (subprocess.SubprocessError, OSError):
             missing.append(name)
 
+    # 源码摘要：run.sh 靠它判断"要不要重装依赖"。不能用 wheel 的字节——
+    # pip wheel 的产物不可复现（同源码连打两次 sha256 就不一样），那样每次
+    # 重新导出都会白白重装一遍；也不能只看 wheel 文件名——版本号钉死在
+    # 0.1.0，改了代码文件名也不变，于是 venv 里会一直是第一次装的旧代码
+    # （实测踩到过：重新导出之后跑的还是老界面）。
+    (vendor / "sources.sha256").write_text(_source_digest() + "\n", encoding="utf-8")
+
     return sorted(p.name for p in vendor.glob("*.whl")), missing
+
+
+# 打包时跳过的东西——和 _IGNORE 一个意思，但这里要按目录名过滤
+_DIGEST_SKIP = {"__pycache__", ".venv", "build", "dist", ".git", "node_modules"}
+
+
+def _source_digest() -> str:
+    """被 vendor 的那几个包的源码摘要。路径和内容都算进去，所以改名、删文件
+    同样会让摘要变化。"""
+    digest = hashlib.sha256()
+    for name in _VENDORED_PACKAGES:
+        root = REPO_ROOT / name
+        if not root.is_dir():
+            continue
+        for path in sorted(root.rglob("*")):
+            if not path.is_file() or path.suffix in (".pyc", ".pyo"):
+                continue
+            if any(part in _DIGEST_SKIP or part.endswith(".egg-info") for part in path.parts):
+                continue
+            digest.update(str(path.relative_to(root)).encode())
+            digest.update(path.read_bytes())
+    return digest.hexdigest()
 
 
 def _locked_sdk_version() -> str | None:
@@ -264,9 +294,17 @@ if [ ! -x "$VENV_PY" ]; then
 fi
 
 # ── 3. 依赖 ────────────────────────────────────────────────────────
-# 装完记一个指纹（requirements.txt 的内容 + vendor 里的 wheel 文件名）。下次
-# 指纹没变就整段跳过——装依赖占了首次启动的绝大部分时间，每次都装会让"一条
-# 命令跑起来"变成"一条命令等一分钟"。
+# 装完记一个指纹。下次指纹没变就整段跳过——装依赖占了首次启动的绝大部分
+# 时间，每次都装会让"一条命令跑起来"变成"一条命令等一分钟"。
+#
+# 光看 wheel 的文件名不够：版本号钉死在 0.1.0，文件名永远是
+# senza_studio_runtime-0.1.0-py3-none-any.whl，改了代码重新导出也一个字不变。
+# 只看文件名的话 venv 会一直留着第一次装的那份旧代码，而界面和接口都已经换了
+# ——实测踩到过：重新导出之后页面还是老样子，查了半天才发现跑的根本不是新代码。
+#
+# 也不能直接哈希 wheel 的字节：pip wheel 的产物不可复现（同一份源码连续打两次
+# 的 sha256 不一样），那样每次导出都会重装一遍。所以导出时按**源码**算一个
+# 摘要写进 vendor/sources.sha256，这里读它——源码没动就没动。
 STAMP="$VENV/.senza-deps"
 FINGERPRINT="$("$VENV_PY" - <<'FINGERPRINT_PY'
 import hashlib, pathlib
@@ -274,6 +312,9 @@ import hashlib, pathlib
 digest = hashlib.sha256(pathlib.Path("requirements.txt").read_bytes())
 for wheel in sorted(pathlib.Path("vendor").glob("*.whl")):
     digest.update(wheel.name.encode())
+sources = pathlib.Path("vendor/sources.sha256")
+if sources.is_file():
+    digest.update(sources.read_bytes())
 print(digest.hexdigest())
 FINGERPRINT_PY
 )"
@@ -288,6 +329,14 @@ if [ "$NEED_INSTALL" = 1 ]; then
     # senza-sdk、fastapi 这些公共依赖照常走 PyPI。
     "$VENV_PY" -m pip install --quiet --disable-pip-version-check \
       --find-links vendor -r requirements.txt
+    # 再按文件路径强制装一遍本地 wheel。上面那条对**已经装过**的本地包是
+    # 空操作：版本号钉死在 0.1.0，pip 看到"要求已满足"就跳过，哪怕 wheel 里
+    # 是新代码。于是重新导出之后跑的还是上一版（实测踩到过：界面和接口都换
+    # 了，页面却一点没变）。--no-deps 是因为依赖上一条已经解完了。
+    if ls vendor/*.whl >/dev/null 2>&1; then
+      "$VENV_PY" -m pip install --quiet --disable-pip-version-check \
+        --force-reinstall --no-deps vendor/*.whl
+    fi
   else
     "$VENV_PY" -m pip install --quiet --disable-pip-version-check \
       -r requirements.txt

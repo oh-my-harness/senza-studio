@@ -17,6 +17,8 @@ export interface Step {
 
 export interface Spec {
   stages: Step[];
+  /** 顶层 ui 块：导出 Agent 的标题/说明/入口输入文案。见 AgentUiPanel。 */
+  ui?: Record<string, unknown>;
 }
 
 export interface ProjectMeta {

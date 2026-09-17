@@ -145,7 +145,7 @@ def test_describe_steps_defaults_display_to_chat():
     """ui.display 没写时按 chat 渲染——必须和 Studio 的 Game view 同一个默认
     值（GameView.tsx 的 displayConfigFor）。两边默认值不一样的话，作者在
     Studio 里看到的效果和用户在导出产品里看到的就不是一回事。"""
-    from senza_studio_runtime.serve import describe_steps
+    from senza_studio_runtime.contract import describe_steps
 
     steps = describe_steps(
         {
@@ -167,7 +167,7 @@ def test_only_checker_steps_expose_choices():
     DAG 的一部分漏出去。用户实测的 spec 里 classify_message 有三个分类分支，
     以前会原样出现在 /api/agent 的响应里。
     """
-    from senza_studio_runtime.serve import describe_steps
+    from senza_studio_runtime.contract import describe_steps
 
     steps = describe_steps(
         {
@@ -191,7 +191,7 @@ def test_only_checker_steps_expose_choices():
         }
     )
     assert steps["classify"]["choices"] == []
-    assert steps["gate"]["choices"] == ["approve", "reject"]
+    assert [c["value"] for c in steps["gate"]["choices"]] == ["approve", "reject"]
 
 
 def test_event_poll_keeps_the_same_silence_budget():

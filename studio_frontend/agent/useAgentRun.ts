@@ -1,36 +1,7 @@
 // studio_frontend/agent/useAgentRun.ts
 import { useCallback, useEffect, useRef, useState } from "react";
 import { PENDING_APPROVAL_ROUTE_KEY } from "../src/types";
-
-export interface StepInfo {
-  display: string;
-  fields: string[];
-  choices: string[];
-  terminal: boolean;
-}
-
-export interface AgentInfo {
-  name: string;
-  description: string;
-  inputs: string[];
-  steps: Record<string, StepInfo>;
-  error: string | null;
-}
-
-export type CardStatus = "running" | "done" | "error";
-
-export interface Card {
-  stepId: string;
-  stepName: string;
-  text: string;
-  status: CardStatus;
-  fields?: Record<string, unknown> | null;
-}
-
-/** idle：还没跑 / running：跑着 / done：这一轮结束了（成功或失败）。
- *  刻意没有 "paused" 这个阶段——等人工决定时流程并没有停止，只是在等用户，
- *  UI 上体现为多一块决定区，不是换一个界面。 */
-export type Phase = "idle" | "running" | "done";
+import type { AgentInfo, CardStatus, RunCard, RunPhase } from "../src/player/types";
 
 interface StructuredPayload {
   route_key?: string;
@@ -46,8 +17,8 @@ interface StructuredPayload {
 export function useAgentRun() {
   const [info, setInfo] = useState<AgentInfo | null>(null);
   const [connected, setConnected] = useState(false);
-  const [phase, setPhase] = useState<Phase>("idle");
-  const [cards, setCards] = useState<Card[]>([]);
+  const [phase, setPhase] = useState<RunPhase>("idle");
+  const [cards, setCards] = useState<RunCard[]>([]);
   const [pendingStep, setPendingStep] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [finishedState, setFinishedState] = useState<string | null>(null);
@@ -213,7 +184,7 @@ export function useAgentRun() {
 
 /** 就地更新某个 step 最后一张卡片。从后往前找：同一个 step 可能因为循环
  *  跑过多次，要改的永远是最近这一张。 */
-function patchLast(cards: Card[], stepId: string, fn: (c: Card) => Card): Card[] {
+function patchLast(cards: RunCard[], stepId: string, fn: (c: RunCard) => RunCard): RunCard[] {
   const idx = [...cards].reverse().findIndex((c) => c.stepId === stepId);
   if (idx === -1) return cards;
   const real = cards.length - 1 - idx;

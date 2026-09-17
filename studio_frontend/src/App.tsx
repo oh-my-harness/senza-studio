@@ -258,7 +258,7 @@ export default function App() {
         {playing && (
           <>
             <Panel id="game" defaultSize="25%" minSize="15%">
-              <GameView />
+              <GameView projectId={projectId} />
             </Panel>
             <Separator className="w-1 bg-gray-200 hover:bg-blue-400 transition-colors cursor-col-resize" />
           </>
