@@ -450,10 +450,13 @@ def create_app(config: StudioConfig | None = None) -> FastAPI:
             "ok": result.get("kind") != "error",
         }
 
-    # Studio 前端的构建产物。导出项目直接带上它跑（不另抽 npm 包，见
-    # docs/phases 里 Phase 7 的说明）。dev 模式下可能还没 build 过，那就
-    # 导出一个没有网页界面的项目，并在响应里说明。
-    WEBUI_DIST = Path(__file__).resolve().parent.parent / "studio_frontend" / "dist"
+    # Agent 界面的构建产物（studio_frontend/agent/ → dist-agent/）。**不是**
+    # Studio 自己的 dist：导出的是做好的 agent，不是做它用的编辑器，DAG /
+    # Inspector / Play 控制条不该出现在交付物里。两者是两次独立的 vite
+    # build，所以编辑器的代码根本没打进导出包。
+    # dev 模式下可能还没 build 过，那就导出一个没有网页界面的项目，并在
+    # 响应里说明。
+    WEBUI_DIST = Path(__file__).resolve().parent.parent / "studio_frontend" / "dist-agent"
 
     @app.post("/api/projects/{project_id}/export")
     async def export_project_endpoint(project_id: str, req: ExportReq):
@@ -472,7 +475,7 @@ def create_app(config: StudioConfig | None = None) -> FastAPI:
         if not with_webui:
             # 没带上前端不是失败，但用户得知道——否则跑起来看到的是空页面
             notes.append(
-                "没有找到前端构建产物，导出的项目暂时没有网页界面。"
+                "没有找到 Agent 界面的构建产物，导出的项目暂时没有网页界面。"
                 "在 studio_frontend/ 里跑一次 npm run build 再导出即可。"
             )
         if missing_wheels:

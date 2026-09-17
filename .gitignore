@@ -4,6 +4,7 @@
 /.cache
 /studio_frontend/node_modules
 /studio_frontend/dist
+/studio_frontend/dist-agent
 /.venv
 __pycache__/
 *.pyc

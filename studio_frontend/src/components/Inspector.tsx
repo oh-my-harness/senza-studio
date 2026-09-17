@@ -95,15 +95,7 @@ function RuntimeInspector({ card, stepType }: { card: GameCard | undefined; step
   );
 }
 
-export default function Inspector({
-  projectId,
-  readOnly = false,
-}: {
-  projectId: string;
-  /** 导出项目里 spec 是只读的——那是个跑流程的项目，不是编辑器，
-   *  而且 runtime 那边根本没有写 spec 的接口。 */
-  readOnly?: boolean;
-}) {
+export default function Inspector({ projectId }: { projectId: string }) {
   const selectedStepName = useStudioStore((s) => s.selectedStepName);
   const status = useStudioStore((s) => s.status);
   const gameCards = useStudioStore((s) => s.gameCards);
@@ -295,15 +287,14 @@ export default function Inspector({
       <div className="flex gap-2 p-4 border-t border-gray-200 shrink-0">
         <button
           onClick={save}
-          disabled={!isDirty || readOnly}
-          title={readOnly ? "导出的项目里 spec 是只读的" : undefined}
+          disabled={!isDirty}
           className="flex-1 rounded-lg bg-blue-500 px-3 py-1.5 text-sm text-white hover:bg-blue-600 disabled:opacity-50 disabled:cursor-not-allowed"
         >
           保存
         </button>
         <button
           onClick={reset}
-          disabled={!isDirty || readOnly}
+          disabled={!isDirty}
           className="flex-1 rounded-lg border border-gray-300 px-3 py-1.5 text-sm text-gray-600 hover:bg-gray-100 disabled:opacity-50 disabled:cursor-not-allowed"
         >
           重置

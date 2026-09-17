@@ -7,6 +7,9 @@
 from __future__ import annotations
 
 import pathlib
+import re
+import shutil
+import subprocess
 import tomllib
 
 import pytest
@@ -56,6 +59,8 @@ def test_slugify_handles_chinese_names():
     assert slugify("订单处理流程") == "senza-agent"  # 全中文 → 退回兜底
     assert slugify("Order Flow v2") == "order-flow-v2"
     assert slugify("a___b") == "a-b"
+    # 目录名有长度上限，项目名没有——不截断的话 mkdir 直接抛 OSError
+    assert len(slugify("x" * 500)) <= 64
 
 
 # ── 产物内容 ─────────────────────────────────────────────
@@ -64,10 +69,41 @@ def test_slugify_handles_chinese_names():
 def test_export_writes_every_file_the_readme_promises(tmp_path):
     proj = _project(tmp_path)
     target, _, _ = export_project(proj, _spec(), vendor=False)
-    for name in ("pipeline.yaml", "pyproject.toml", ".env.example", "README.md"):
+    for name in (
+        "pipeline.yaml",
+        "agent.json",
+        "pyproject.toml",
+        ".env.example",
+        "README.md",
+    ):
         assert (target / name).is_file(), f"少了 {name}"
     assert (target / "tools").is_dir()
     assert (target / "plugins").is_dir()
+
+
+def test_agent_manifest_keeps_the_human_readable_name(tmp_path):
+    """目录名和包名都被 slug 成 ASCII（中文项目名会被过滤光，退回
+    senza-agent），人看的那个名字必须另外存下来——否则界面标题会显示
+    "senza-agent"，用户看到的是一个自己没起过的名字。"""
+    import json
+
+    proj = _project(tmp_path, name="订单处理流程")
+    target, _, _ = export_project(proj, _spec(), vendor=False)
+    assert target.name == "senza-agent"  # slug 兜底
+    manifest = json.loads((target / "agent.json").read_text(encoding="utf-8"))
+    assert manifest["name"] == "订单处理流程"
+
+
+def test_readme_does_not_promise_the_editor_ui(tmp_path):
+    """导出的是做好的 agent，不是做它用的编辑器。README 以前写着"界面和
+    Studio 里的 Play 视图一样：DAG、Pause/Step"——那份承诺现在是错的，而且
+    正是用户指出的问题。"""
+    proj = _project(tmp_path)
+    target, _, _ = export_project(proj, _spec(), vendor=False)
+    readme = (target / "README.md").read_text(encoding="utf-8")
+    for editor_word in ("DAG", "Inspector", "Pause/Step"):
+        assert editor_word in readme, "README 该明说这些不在导出产物里"
+    assert "没有" in readme
 
 
 def test_exported_pipeline_keeps_components_unexpanded(tmp_path):
@@ -341,3 +377,128 @@ def test_missing_wheels_are_reported_not_fatal(tmp_path, monkeypatch):
     assert (target / "pipeline.yaml").is_file()  # 导出本身成功了
     assert missing == ["no-such-package"]
     assert "⚠️" in (target / "README.md").read_text(encoding="utf-8")
+
+
+# ── run.sh：一条命令跑起来 ─────────────────────────────
+
+
+def _run_script(tmp_path, name="订单处理流程"):
+    proj = _project(tmp_path, name=name)
+    # 目录名单独给：这里要试的是**项目名**进到脚本里会怎样，不想让一个很长
+    # 或很怪的名字顺带把导出目录名也搞坏。
+    target, _, _ = export_project(proj, _spec(), name="agent", vendor=False)
+    return target / "run.sh"
+
+
+def test_run_script_is_executable(tmp_path):
+    """不给执行位的话用户得先 chmod，或者记得写 `bash run.sh`——那就又变回
+    两步了，而"一条命令"正是这个脚本存在的全部理由。"""
+    script = _run_script(tmp_path)
+    assert script.is_file()
+    assert script.stat().st_mode & 0o111, "run.sh 没有执行位"
+
+
+@pytest.mark.skipif(shutil.which("bash") is None, reason="需要 bash")
+def test_run_script_parses(tmp_path):
+    """语法错误要在导出这一步就暴露，而不是等用户拿到目录、敲了命令才发现。"""
+    script = _run_script(tmp_path)
+    result = subprocess.run(
+        ["bash", "-n", str(script)], capture_output=True, text=True
+    )
+    assert result.returncode == 0, result.stderr
+
+
+def test_run_script_never_leaves_a_variable_next_to_a_multibyte_char(tmp_path):
+    """`$VENV）` 这种写法会炸。
+
+    bash 按字节找变量名，全角括号的字节会被吸进变量名里，于是报
+    `VENV?: unbound variable` —— 脚本在第 60 行就退出，用户看到的是一个
+    莫名其妙的变量名。实测踩到过。注释和提示文案全是中文，这个坑离得很近，
+    所以用测试挡住：变量一律写成 ${VAR}。
+    """
+    text = _run_script(tmp_path).read_text(encoding="utf-8")
+    offenders = [
+        line
+        for line in text.splitlines()
+        if re.search(r"\$[A-Za-z_][A-Za-z0-9_]*[^\x00-\x7f]", line)
+    ]
+    assert offenders == [], f"这些行的变量要改成 ${{VAR}}: {offenders}"
+
+
+@pytest.mark.skipif(shutil.which("bash") is None, reason="需要 bash")
+def test_run_script_survives_a_hostile_project_name(tmp_path):
+    """项目名是用户随手输入的，会原样进到这个脚本里。带引号能把字符串提前
+    闭合，带换行能让名字的后半截变成自己一行的命令。
+
+    不靠读文本判断，直接**跑一遍**：`--help` 会在真正干活之前退出，但在那
+    之前已经执行到了带名字的那行赋值——注入成功的话 canary 就没了。"""
+    canary = tmp_path / "canary"
+    canary.write_text("still here", encoding="utf-8")
+    nasty = f'it\'s "a test"\nrm -f {canary}\n`touch {tmp_path}/pwned`'
+    script = _run_script(tmp_path, name=nasty)
+
+    result = subprocess.run(
+        ["bash", str(script), "--help"], capture_output=True, text=True
+    )
+    assert result.returncode == 0, result.stderr
+    assert canary.is_file(), "项目名里的命令被执行了"
+    assert not (tmp_path / "pwned").exists(), "反引号里的命令被执行了"
+
+
+def test_run_script_checks_the_env_vars_that_serve_actually_reads(tmp_path):
+    """脚本提前把"没填 key"变成一句能照着做的提示。它检查的变量名必须真的
+    是设置面板里的那些——改名之后留下一个永远检查不到的脚本，比不检查更糟
+    （用户以为配好了，跑到第一次调模型才炸）。"""
+    from studio_backend.export import REQUIRED_ENV_GROUPS
+
+    known = {field["key"] for field in SETTINGS_SCHEMA}
+    text = _run_script(tmp_path).read_text(encoding="utf-8")
+    for group in REQUIRED_ENV_GROUPS:
+        assert group[0] in known, f"{group[0]} 不在 SETTINGS_SCHEMA 里了"
+        for key in group:
+            assert key in text
+
+
+def test_requirements_and_pyproject_list_the_same_dependencies(tmp_path):
+    """两份清单，一处来源。各写各的迟早有一份漏掉新依赖——而且是"装上了、
+    跑起来才炸"那种漏。"""
+    proj = _project(tmp_path)
+    target, _, _ = export_project(proj, _spec(), vendor=False)
+    declared = tomllib.loads(
+        (target / "pyproject.toml").read_text(encoding="utf-8")
+    )["project"]["dependencies"]
+    listed = [
+        line.strip()
+        for line in (target / "requirements.txt").read_text(encoding="utf-8").splitlines()
+        if line.strip() and not line.startswith("#")
+    ]
+    assert sorted(declared) == sorted(listed)
+
+
+def test_readme_leads_with_the_one_command(tmp_path):
+    proj = _project(tmp_path)
+    target, _, _ = export_project(proj, _spec(), vendor=False)
+    readme = (target / "README.md").read_text(encoding="utf-8")
+    assert "./run.sh" in readme
+    # 手动那条路径留着，但不该是第一条
+    assert readme.index("./run.sh") < readme.index("python3 -m venv")
+
+
+def test_re_export_keeps_the_env_and_the_venv(tmp_path):
+    """改 spec 之后重新导出是常规操作。每次都把用户填好的 .env 和 run.sh
+    装好的 .venv 删掉的话，"一条命令跑起来"就只有第一次成立——第二次又要
+    重填 key、重装一分多钟的依赖。"""
+    proj = _project(tmp_path)
+    target, _, _ = export_project(proj, _spec(), vendor=False)
+    (target / ".env").write_text("SENZA_STUDIO_API_KEY=sk-mine\n", encoding="utf-8")
+    (target / ".venv" / "bin").mkdir(parents=True)
+    (target / ".venv" / "bin" / "python").write_text("#!/bin/sh\n", encoding="utf-8")
+    # 上一次导出留下的、这次不该再有的文件
+    (target / "stale.txt").write_text("old", encoding="utf-8")
+
+    export_project(proj, _spec(), vendor=False)
+
+    assert (target / ".env").read_text(encoding="utf-8") == "SENZA_STUDIO_API_KEY=sk-mine\n"
+    assert (target / ".venv" / "bin" / "python").is_file()
+    assert not (target / "stale.txt").exists(), "其它内容还是要整个重写"
+    assert (target / "run.sh").is_file()

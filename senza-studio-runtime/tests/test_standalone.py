@@ -126,3 +126,82 @@ def test_index_html_is_served_with_no_cache(tmp_path):
     asset = client.get("/assets/index-abc123.js")
     assert asset.status_code == 200
     assert "no-cache" not in asset.headers.get("cache-control", "")
+
+
+def test_manifest_name_falls_back_to_the_directory(tmp_path):
+    """手写的 pipeline 旁边没有 agent.json——不能因此让界面标题空着。"""
+    from senza_studio_runtime.serve import load_manifest
+
+    assert load_manifest(tmp_path) == {}
+    (tmp_path / "agent.json").write_text('{"name": "退款助手"}', encoding="utf-8")
+    assert load_manifest(tmp_path)["name"] == "退款助手"
+
+    # 坏掉的 agent.json 不该让整个服务起不来——名字退回目录名就行
+    (tmp_path / "agent.json").write_text("{ not json", encoding="utf-8")
+    assert load_manifest(tmp_path) == {}
+
+
+def test_describe_steps_defaults_display_to_chat():
+    """ui.display 没写时按 chat 渲染——必须和 Studio 的 Game view 同一个默认
+    值（GameView.tsx 的 displayConfigFor）。两边默认值不一样的话，作者在
+    Studio 里看到的效果和用户在导出产品里看到的就不是一回事。"""
+    from senza_studio_runtime.serve import describe_steps
+
+    steps = describe_steps(
+        {
+            "stages": [
+                {"name": "a", "type": "agent", "prompt_template": "x", "next_on_success": "b"},
+                {"name": "b", "type": "terminal", "message": "完"},
+            ]
+        }
+    )
+    assert steps["a"]["display"] == "chat"
+    assert steps["a"]["terminal"] is False
+    assert steps["b"]["terminal"] is True
+
+
+def test_only_checker_steps_expose_choices():
+    """choices 是"停下来问人时给的选项"，不是"这一步能走哪几条分支"。
+
+    普通 step 的 next_on_* 是流程结构，产品界面不需要知道——回给它等于把
+    DAG 的一部分漏出去。用户实测的 spec 里 classify_message 有三个分类分支，
+    以前会原样出现在 /api/agent 的响应里。
+    """
+    from senza_studio_runtime.serve import describe_steps
+
+    steps = describe_steps(
+        {
+            "stages": [
+                {
+                    "name": "classify",
+                    "type": "agent",
+                    "prompt_template": "分类 {{msg}}",
+                    "next_on_complaint": "gate",
+                    "next_on_question": "done",
+                },
+                {
+                    "name": "gate",
+                    "type": "checker",
+                    "prompt_template": "审批",
+                    "next_on_approve": "done",
+                    "next_on_reject": "done",
+                },
+                {"name": "done", "type": "terminal", "message": "完"},
+            ]
+        }
+    )
+    assert steps["classify"]["choices"] == []
+    assert steps["gate"]["choices"] == ["approve", "reject"]
+
+
+def test_event_poll_keeps_the_same_silence_budget():
+    """缩短轮询间隔是为了尽快发现"跑完了"（终态没有事件通知，只能靠 timeout
+    哨兵醒过来时检查后台线程）。但两个常数的乘积是"允许一直没有事件"的总
+    时长——真实 LLM 长时间不出字是正常的，间隔变小而次数没同比变大，就会把
+    跑得慢的 step 误判成卡死。这条把这个不变量钉住。"""
+    from senza_studio_runtime import stream
+
+    budget_seconds = stream.POLL_INTERVAL_MS / 1000 * stream.MAX_SILENT_POLLS
+    assert budget_seconds >= 4800, "静默预算被缩短了，慢的 LLM step 会被误杀"
+    # 终态发现延迟直接就是这个间隔；超过 1s 用户就能感觉到按钮"卡"在上一个状态
+    assert stream.POLL_INTERVAL_MS <= 500

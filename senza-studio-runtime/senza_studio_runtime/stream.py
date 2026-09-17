@@ -20,6 +20,17 @@ from .play import PlaySession
 _TERMINAL_TYPES = frozenset({"settled", "aborted", "error", "agent_end"})
 _SKIP_TYPES = frozenset({"timeout"})
 
+# "跑完了"这件事没有事件通知——只能靠 timeout 哨兵醒过来时发现后台线程死了
+# （见下面循环里的注释）。所以这个间隔就是**终态的发现延迟**：设成 5s 的时候，
+# 导出产品里最后一张结果卡片已经显示出来了，底下的按钮还有 5.4 秒写着"取消"
+# 而不是"再来一次"（实测）。
+#
+# 两个值相乘是"允许一直没有任何事件"的总时长（≈83 分钟），这是给真实 LLM
+# 长时间不出字留的余量。缩短间隔必须同比放大次数，否则会把一个跑得慢但正常
+# 的 step 误判成卡死。
+POLL_INTERVAL_MS = 250
+MAX_SILENT_POLLS = 20_000
+
 
 async def run_play_streaming(
     websocket: WebSocket,
@@ -56,7 +67,9 @@ async def run_play_streaming(
         except Exception:  # noqa: BLE001
             pass
 
-    event_iter = play_session.events(timeout_ms=5000, max_consecutive_timeouts=999)
+    event_iter = play_session.events(
+        timeout_ms=POLL_INTERVAL_MS, max_consecutive_timeouts=MAX_SILENT_POLLS
+    )
     play_session.start()
     loop = asyncio.get_event_loop()
 
@@ -86,7 +99,8 @@ async def run_play_streaming(
                 # 后才出现。跑得很快、没有真实 LLM 调用的 step（比如直接
                 # fail 的 checker）可能后台线程已经结束但事件流早就抽干，
                 # 只在这里检查线程是否还活着才能及时退出，否则要傻等到
-                # max_consecutive_timeouts 耗尽（最多 999*5s）。
+                # max_consecutive_timeouts 耗尽。醒得越快，用户看到
+                # "跑完了"越及时——POLL_INTERVAL_MS 就是这个延迟。
                 #
                 # 但线程死了不等于跑完了——checker 等人工审批时，run()
                 # 因为 WorkflowPausedError 也会让线程退出，这时 engine 状态

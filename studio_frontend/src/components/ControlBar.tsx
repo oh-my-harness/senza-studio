@@ -3,15 +3,7 @@ import { useState } from "react";
 import { useStudioStore } from "../store";
 import { api } from "../api";
 
-export default function ControlBar({
-  projectId,
-  isExport = false,
-}: {
-  projectId: string;
-  /** 导出的项目里不显示"导出"——它本来就是导出产物，而且 runtime
-   *  那边根本没有这个接口。 */
-  isExport?: boolean;
-}) {
+export default function ControlBar({ projectId }: { projectId: string }) {
   const ws = useStudioStore((s) => s.ws);
   const status = useStudioStore((s) => s.status);
   const resetPlay = useStudioStore((s) => s.resetPlay);
@@ -135,20 +127,14 @@ export default function ControlBar({
         >
           ■ Stop
         </button>
-        {!isExport && (
-          <button
-            onClick={runExport}
-            disabled={playing || exporting}
-            title={
-              playing
-                ? "运行中不能导出"
-                : "打包成不依赖 Studio 的独立项目"
-            }
-            className="rounded-lg border border-gray-300 px-4 py-1.5 text-sm text-gray-700 hover:bg-gray-100 disabled:opacity-50"
-          >
-            {exporting ? "导出中…" : "⬇ 导出"}
-          </button>
-        )}
+        <button
+          onClick={runExport}
+          disabled={playing || exporting}
+          title={playing ? "运行中不能导出" : "打包成不依赖 Studio 的独立项目"}
+          className="rounded-lg border border-gray-300 px-4 py-1.5 text-sm text-gray-700 hover:bg-gray-100 disabled:opacity-50"
+        >
+          {exporting ? "导出中…" : "⬇ 导出"}
+        </button>
         {showPause && (
           <button
             onClick={pause}
