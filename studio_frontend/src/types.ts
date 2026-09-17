@@ -95,3 +95,54 @@ export interface ToolCallEntry {
   toolName?: string;
   timestamp: number;
 }
+
+// ---- 执行可观测性 V1(Play 工具执行时间线)-----------------------------
+
+// 一条工具执行记录的生命周期:calling(LLM 已发起调用)→ executing(工具
+// 开始执行)→ done / failed。failed 同时覆盖中断:运行失败或用户 Stop 时,
+// 还没落终态的 in-flight 记录会被统一标记成 failed(见 store 的
+// finalizeInFlightExec)。
+export type ExecPhase = "calling" | "executing" | "done" | "failed";
+
+export interface ExecToolRow {
+  kind: "tool";
+  // 全局递增序号——显示排序用。旧行被裁剪出列表后序号不回退,新行的 seq
+  // 一定比所有保留行大,排序永远稳定。
+  seq: number;
+  // 关联键 `${step_id}:${tool_use_id}`
+  key: string;
+  stepId: string;
+  toolUseId: string;
+  toolName: string;
+  // tool_call_end 下发的原始 args JSON 字符串;还没收到时为 null
+  argsRaw: string | null;
+  phase: ExecPhase;
+  // 执行结束时的 ok 值;未结束为 null
+  ok: boolean | null;
+  error: string | null;
+  // start 事件缺失/乱序时由后续事件合成的记录——UI 要提示"没等到开始事件"
+  missingStart: boolean;
+  startedAt: number;
+  endedAt: number | null;
+}
+
+// turn_end 分隔标记(一轮 LLM 调用结束)
+export interface ExecTurnMarker {
+  kind: "turn";
+  seq: number;
+  stepId: string;
+  index: number;
+  timestamp: number;
+}
+
+export type ExecRow = ExecToolRow | ExecTurnMarker;
+
+// Play 执行事件——只有带 step_id 的才算(不带 step_id 的同名事件是对话
+// 路径 meta-agent 的工具调用,走 toolCalls 逻辑,别混进执行时间线)。
+export const EXEC_EVENT_TYPES: Record<string, true> = {
+  tool_call_start: true,
+  tool_call_end: true,
+  tool_execution_start: true,
+  tool_execution_end: true,
+  turn_end: true,
+};

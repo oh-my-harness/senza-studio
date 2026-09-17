@@ -223,6 +223,17 @@ def _run_agent_step(harness: Any, prompt: str, emit: Any) -> tuple[str, int]:
             emit.text_delta(text)
         elif etype == "tool_call_start":
             tool_calls_count += 1
+            emit.tool_call_start(event["tool_use_id"], event["tool_name"])
+        elif etype == "tool_call_end":
+            emit.tool_call_end(event["tool_use_id"], json.dumps(event["args"]))
+        elif etype == "tool_execution_start":
+            emit.tool_execution_start(event["tool_use_id"], event["tool_name"])
+        elif etype == "tool_execution_end":
+            emit.tool_execution_end(
+                event["tool_use_id"], event["ok"], event.get("error")
+            )
+        elif etype == "turn_end":
+            emit.turn_end(event["index"])
         elif etype in _TERMINAL_TYPES:
             break
 

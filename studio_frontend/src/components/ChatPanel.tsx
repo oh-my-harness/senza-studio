@@ -2,9 +2,9 @@
 import { useState, useRef, useEffect } from "react";
 import { useStudioStore } from "../store";
 import { createWebSocket, api } from "../api";
-import Markdown from "./Markdown";
 import { splitToolCalls } from "../utils";
-import { PENDING_APPROVAL_ROUTE_KEY } from "../types";
+import Markdown from "./Markdown";
+import { PENDING_APPROVAL_ROUTE_KEY, EXEC_EVENT_TYPES } from "../types";
 
 const MAX_TEXTAREA_HEIGHT = 160; // px，约 6~7 行，超过就交给滚动条
 
@@ -35,6 +35,8 @@ export default function ChatPanel({ projectId }: { projectId: string }) {
   const setPausedStep = useStudioStore((s) => s.setPausedStep);
   const markAwaitingApproval = useStudioStore((s) => s.markAwaitingApproval);
   const setEnginePaused = useStudioStore((s) => s.setEnginePaused);
+  const handleExecEvent = useStudioStore((s) => s.handleExecEvent);
+  const finalizeInFlightExec = useStudioStore((s) => s.finalizeInFlightExec);
   const scrollRef = useRef<HTMLDivElement>(null);
   const bottomRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
@@ -65,8 +67,16 @@ export default function ChatPanel({ projectId }: { projectId: string }) {
     socket.onmessage = (e) => {
       if (!isCurrent) return;
       const event = JSON.parse(e.data);
-
-      if (event.type === "text_delta" && event.step_id) {
+      // Play 执行事件(带 step_id)——先于下面的对话路径处理,因为
+      // tool_call_start 等事件名两条路径共用:不带 step_id 的是 meta-agent
+      // 对话工具调用,走 toolCalls;带 step_id 的进执行时间线。
+      if (
+        EXEC_EVENT_TYPES[event.type] &&
+        typeof event.step_id === "string" &&
+        event.step_id.length > 0
+      ) {
+        handleExecEvent(event);
+      } else if (event.type === "text_delta" && event.step_id) {
         // Play 事件（带 step_id）——追加到对应 step 的 Game view 卡片
         appendStepText(event.step_id, event.text || "");
       } else if (event.type === "step_started") {
@@ -105,16 +115,26 @@ export default function ChatPanel({ projectId }: { projectId: string }) {
         setEnginePaused(false);
         addLog("info", "▶ 已恢复运行");
       } else if (event.type === "failed") {
+        // 工作流失败:引擎死了,来不及发 execution_end 的 in-flight 工具
+        // 记录在这里兜底标 failed,别永远停在 calling/executing。
+        finalizeInFlightExec("工作流失败,工具调用被中断");
         failRunningSteps();
         addLog("error", event.error || "工作流失败");
       } else if (event.type === "workflow_done") {
         // 跑完了（成功或失败）不自动退出 playing——留给用户自己看完结果
         // 再点 Stop。真正回到 editing 由下面的 play_stopped 触发。
+        // 兜底再 finalize 一次:cancelled(用户 Stop)路径不会发 failed
+        // 事件,succeeded 时正常不该有 in-flight 记录,防御一下也无妨。
+        finalizeInFlightExec("运行结束,工具调用被中断");
         setRunFinished(event.state);
         if (event.state === "succeeded") {
           addLog("info", "✅ 运行成功完成");
         }
       } else if (event.type === "play_stopped") {
+        // 用户点 Stop 后的收尾事件。正常路径 workflow_done(cancelled)
+        // 已经 finalize 过;这里是"跑完之后才点 Stop"路径(app.py 的
+        // stop handler 直接 finalize_play)的防御性兜底。
+        finalizeInFlightExec("用户停止运行");
         setRunFinished(null);
         setPausedStep(null);
         setEnginePaused(false);

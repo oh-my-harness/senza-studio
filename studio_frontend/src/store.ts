@@ -10,7 +10,16 @@ import type {
   LogEntry,
   LogLevel,
   ToolCallEntry,
+  ExecRow,
+  ExecToolRow,
+  ExecPhase,
 } from "./types";
+
+// 执行时间线保留上限(约 500 行)——超出时从头部裁掉旧行。execIndex 只记
+// 关联键 -> 当前行引用,行被裁掉后键仍指向同一个对象引用,只要裁剪不改写
+// 保留行的对象,索引就不用跟着重建;但键会泄漏,所以行数超限后把"索引里
+// 指向已裁剪行"的键一并清掉。
+const EXEC_MAX_ROWS = 500;
 
 interface StudioStore {
   project: ProjectMeta | null;
@@ -40,6 +49,13 @@ interface StudioStore {
   // engine 是否处于暂停状态（不管原因——checker 审批或控制条手动
   // Pause/Step 都会让这个变 true）。跟 pausedStepId 是两个不同维度：
   // 后者专门只在 checker 审批时才非空，用来单独控制审批横幅。
+  // Play 工具执行时间线 + 关联索引(key = `${step_id}:${tool_use_id}`)。
+  // index 值是行对象引用而不是下标——行对象一旦创建就不改 identity,更新
+  // 时替换引用并同步 index,UI 侧按 seq 排序展示,不怕裁剪导致的位移。
+  execRows: ExecRow[];
+  execIndex: Record<string, ExecToolRow>;
+  // 下一条执行记录的全局序号(裁剪不回退)
+  execSeq: number;
   enginePaused: boolean;
 
   setProject: (p: ProjectMeta | null) => void;
@@ -63,6 +79,8 @@ interface StudioStore {
       fields?: Record<string, unknown> | null;
     }
   ) => void;
+  handleExecEvent: (event: Record<string, unknown>) => void;
+  finalizeInFlightExec: (reason: string) => void;
   failRunningSteps: () => void;
   setRunFinished: (state: string | null) => void;
   addLog: (level: LogLevel, message: string) => void;
@@ -74,8 +92,43 @@ interface StudioStore {
   setEnginePaused: (paused: boolean) => void;
 }
 
+// 把一条新执行行追加到时间线尾部;超过 EXEC_MAX_ROWS 时从头部裁剪旧行。
+// execIndex 里指向被裁行的键一并清掉(保留行对象引用不变,键无需重建)。
+function appendExecRow(
+  s: { execRows: ExecRow[]; execIndex: Record<string, ExecToolRow>; execSeq: number },
+  row: ExecRow
+): { execRows: ExecRow[]; execIndex: Record<string, ExecToolRow>; execSeq: number } {
+  let rows = [...s.execRows, row];
+  const index = { ...s.execIndex };
+  if (row.kind === "tool") index[row.key] = row;
+  if (rows.length > EXEC_MAX_ROWS) {
+    const dropped = rows.slice(0, rows.length - EXEC_MAX_ROWS);
+    rows = rows.slice(rows.length - EXEC_MAX_ROWS);
+    for (const r of dropped) {
+      if (r.kind === "tool") delete index[r.key];
+    }
+  }
+  return { execRows: rows, execIndex: index, execSeq: s.execSeq + 1 };
+}
+
+// 用新对象替换一条已有的工具记录(execIndex 同步指向新对象)。
+function replaceExecRow(
+  s: { execRows: ExecRow[]; execIndex: Record<string, ExecToolRow> },
+  updated: ExecToolRow
+): { execRows: ExecRow[]; execIndex: Record<string, ExecToolRow> } {
+  return {
+    execRows: s.execRows.map((r) =>
+      r.kind === "tool" && r.key === updated.key ? updated : r
+    ),
+    execIndex: { ...s.execIndex, [updated.key]: updated },
+  };
+}
+
 export const useStudioStore = create<StudioStore>((set) => ({
   project: null,
+  execRows: [],
+  execIndex: {},
+  execSeq: 1,
   spec: { stages: [] },
   runtimeSpec: null,
   status: "idle",
@@ -117,13 +170,16 @@ export const useStudioStore = create<StudioStore>((set) => ({
       };
     }),
 
-  // 点 Play 时调用——顺带清空日志面板，避免上一次运行的日志跟这次的混在一起。
+  // 点 Play 时调用——顺带清空日志面板,避免上一次运行的日志跟这次的混在一起。
   resetPlay: () =>
     set({
       stepStatus: {},
       gameCards: [],
       runFinishedState: null,
       logs: [],
+      execRows: [],
+      execIndex: {},
+      execSeq: 1,
       pausedStepId: null,
       enginePaused: false,
       // 上一次运行的展开结果不能留到下一次——spec 改了组件参数/换了组件，
@@ -216,5 +272,199 @@ export const useStudioStore = create<StudioStore>((set) => ({
           c.status === "running" ? { ...c, status: "error" } : c
         ),
       };
+    }),
+
+  // ---- 执行可观测性 V1--------------------------------------------------
+  //
+  // Play 路径的工具事件(带 step_id)按 `${step_id}:${tool_use_id}` 关联成
+  // 一条记录,生命周期 calling -> executing -> done/failed。设计要点:
+  //
+  // - 事件乱序/缺失容忍:execution_start 没等到 tool_call_start、execution_end
+  //   没等到前两者,都直接合成记录并标 missingStart(旧 v1 Trace 的行为参照)。
+  // - turn_end 不参与关联,直接插一条分隔标记。
+  // - 行一旦进入列表 identity 不变,更新时用新对象替换并同步 execIndex 里
+  //   的引用;裁剪只从头删,execIndex 里指向已删行的键清掉,保留行的键不动。
+  //
+  // 事件字段跟后端转发保持一致(见 senza-studio-runtime/play.py
+  // _run_agent_step + probe 验证):tool_call_start 带 name,tool_call_end 带
+  // args(JSON 字符串),tool_execution_start 带 tool_name,
+  // tool_execution_end 带 ok/error,turn_end 带 index。
+  handleExecEvent: (event) =>
+    set((s) => {
+      const type = event.type;
+      const stepId = typeof event.step_id === "string" ? event.step_id : null;
+      const toolUseId =
+        typeof event.tool_use_id === "string" ? event.tool_use_id : null;
+      // 每种事件的有效载荷解析都在这里做完,后面不再碰 event
+      const toolNameFromCall =
+        typeof event.name === "string" ? event.name : null;
+      const toolNameFromExec =
+        typeof event.tool_name === "string" ? event.tool_name : null;
+      const argsRaw = typeof event.args === "string" ? event.args : null;
+      const ok = typeof event.ok === "boolean" ? event.ok : null;
+      const error =
+        typeof event.error === "string" && event.error.length > 0
+          ? event.error
+          : null;
+      const turnIndex = typeof event.index === "number" ? event.index : 0;
+
+      if (type === "turn_end") {
+        if (stepId === null) return {};
+        const row: ExecRow = {
+          kind: "turn",
+          seq: s.execSeq,
+          stepId,
+          index: turnIndex,
+          timestamp: Date.now(),
+        };
+        return appendExecRow(s, row);
+      }
+
+      // 其余四种都要能定位到一条工具记录
+      if (stepId === null || toolUseId === null) return {};
+      const key = `${stepId}:${toolUseId}`;
+
+      if (type === "tool_call_start") {
+        if (toolNameFromCall === null) return {};
+        // 重复的 tool_call_start(理论上不该有)不覆盖已有记录
+        if (s.execIndex[key]) return {};
+        const row: ExecToolRow = {
+          kind: "tool",
+          seq: s.execSeq,
+          key,
+          stepId,
+          toolUseId,
+          toolName: toolNameFromCall,
+          argsRaw: null,
+          phase: "calling",
+          ok: null,
+          error: null,
+          missingStart: false,
+          startedAt: Date.now(),
+          endedAt: null,
+        };
+        return appendExecRow(s, row);
+      }
+
+      const existing = s.execIndex[key];
+
+      if (type === "tool_call_end") {
+        // args 补挂到已有记录上;孤儿 call_end(没等到 start)合成一条
+        // executing 记录——已经过了"调用"阶段才收得到 call_end。
+        if (existing) {
+          const updated: ExecToolRow = {
+            ...existing,
+            argsRaw: existing.argsRaw ?? argsRaw,
+          };
+          return replaceExecRow(s, updated);
+        }
+        const row: ExecToolRow = {
+          kind: "tool",
+          seq: s.execSeq,
+          key,
+          stepId,
+          toolUseId,
+          toolName: toolNameFromExec ?? "(未知工具)",
+          argsRaw,
+          phase: "executing",
+          ok: null,
+          error: null,
+          missingStart: true,
+          startedAt: Date.now(),
+          endedAt: null,
+        };
+        return appendExecRow(s, row);
+      }
+
+      if (type === "tool_execution_start") {
+        if (existing) {
+          // calling -> executing;乱序再来的 call_end 之后还能补挂 args
+          const updated: ExecToolRow = {
+            ...existing,
+            phase: "executing",
+            toolName: existing.toolName || (toolNameFromExec ?? ""),
+            missingStart: false,
+          };
+          return replaceExecRow(s, updated);
+        }
+        // 孤儿 execution_start:没等到 LLM 发起调用的通知就开跑了
+        const row: ExecToolRow = {
+          kind: "tool",
+          seq: s.execSeq,
+          key,
+          stepId,
+          toolUseId,
+          toolName: toolNameFromExec ?? "(未知工具)",
+          argsRaw: null,
+          phase: "executing",
+          ok: null,
+          error: null,
+          missingStart: true,
+          startedAt: Date.now(),
+          endedAt: null,
+        };
+        return appendExecRow(s, row);
+      }
+
+      if (type === "tool_execution_end") {
+        if (existing) {
+          const updated: ExecToolRow = {
+            ...existing,
+            phase: ok === false ? "failed" : "done",
+            ok: ok ?? false,
+            error,
+            endedAt: Date.now(),
+          };
+          return replaceExecRow(s, updated);
+        }
+        // 孤儿 execution_end:三种前置事件全没见到(订阅晚了/事件被截断)
+        const row: ExecToolRow = {
+          kind: "tool",
+          seq: s.execSeq,
+          key,
+          stepId,
+          toolUseId,
+          toolName: toolNameFromExec ?? "(未知工具)",
+          argsRaw: null,
+          phase: ok === false ? "failed" : "done",
+          ok: ok ?? false,
+          error,
+          missingStart: true,
+          startedAt: Date.now(),
+          endedAt: Date.now(),
+        };
+        return appendExecRow(s, row);
+      }
+
+      return {};
+    }),
+
+  // 失败/用户 Stop 时兜底:把所有还挂在 calling/executing 的记录标成
+  // failed,错误信息带上原因。不带 step_id 的 failed/cancelled/workflow_done/
+  // play_stopped 事件都会走到这里(见 ChatPanel 的事件分发)。
+  finalizeInFlightExec: (reason) =>
+    set((s) => {
+      const hasInFlight = s.execRows.some(
+        (r) => r.kind === "tool" && (r.phase === "calling" || r.phase === "executing")
+      );
+      if (!hasInFlight) return {};
+      const index = { ...s.execIndex };
+      let changed = false;
+      const rows = s.execRows.map((r) => {
+        if (r.kind !== "tool" || (r.phase !== "calling" && r.phase !== "executing")) {
+          return r;
+        }
+        changed = true;
+        const updated: ExecToolRow = {
+          ...r,
+          phase: "failed",
+          ok: false,
+          error: r.error ?? reason,
+          endedAt: Date.now(),
+        };
+        index[updated.key] = updated;
+        return updated;
+      });
+      return changed ? { execRows: rows, execIndex: index } : {};
     }),
 }));
