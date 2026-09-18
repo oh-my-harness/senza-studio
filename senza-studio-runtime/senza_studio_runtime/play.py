@@ -741,10 +741,12 @@ class PlaySession:
         # 本轮 run() 的开始时刻（time.monotonic()）；线程不在跑时为 None。
         self._active_since: float | None = None
         # 保护累计账本的锁：_run_once 收尾与 stop() 都会关闭账本，防双计。
-        self._active_lock = threading.Lock()
+        self._active_lock = threading.RLock()
         # 剩余预算的倒计时器；到点调 stop(_TIMEOUT_REASON)。
         self._timeout_timer: threading.Timer | None = None
         self._timed_out = False
+        # 每个执行段一个 epoch：旧 run 线程/旧 timer 不得关闭新段的账本。
+        self._run_epoch = 0
         # 用户是不是在"手动逐步执行"——Step 按钮或 Play Paused 打开它，
         # Resume 按钮关掉它。submit_decision（checker 审批）需要知道这个：
         # 不看这个标志的话，用户在单步模式下走到一个 checker、点了
@@ -840,49 +842,63 @@ class PlaySession:
         """play() 重放时调用：清空累计账本，新一轮 Play 拿到完整预算。"""
         with self._active_lock:
             self._disarm_timer_locked()
+            self._run_epoch += 1
             self._active_accum = 0.0
             self._active_since = None
         self._timed_out = False
 
-    def _disarm_time_budget(self) -> None:
+    def _disarm_time_budget(self, run_epoch: int | None = None) -> None:
         """run() 收尾（正常结束/pause/异常）与 stop() 共用的收账入口。
-        锁保证"关计时器 + 结算账本"只发生一次，stop() 与 _run_once()
-        竞争时不会双计活跃时间。"""
+        锁保证"关计时器 + 结算账本"只发生一次；run_epoch 不匹配时说明
+        这是旧执行段的迟到收尾，不能影响新执行段。"""
         with self._active_lock:
-            self._disarm_timer_locked()
-            if self._active_since is not None:
-                self._active_accum += time.monotonic() - self._active_since
-                self._active_since = None
+            if run_epoch is not None and run_epoch != self._run_epoch:
+                return
+            self._settle_time_budget_locked()
+
+    def _settle_time_budget_locked(self) -> None:
+        """须持 _active_lock 调用。关闭当前计时器并结算当前活跃段。"""
+        self._disarm_timer_locked()
+        if self._active_since is not None:
+            self._active_accum += time.monotonic() - self._active_since
+            self._active_since = None
 
     def _disarm_timer_locked(self) -> None:
-        """须持 _active_lock 调用。取消计时器；迟到回调在 _on_time_budget_
-        expired 里被 terminal 状态守卫拦下，不会覆盖已结束的 workflow。"""
+        """须持 _active_lock 调用。取消当前计时器；迟到回调由 epoch 守卫拦下。"""
         timer = self._timeout_timer
         self._timeout_timer = None
         if timer is not None:
             timer.cancel()
 
-    def _arm_time_budget_locked(self) -> None:
-        """须持 _active_lock 调用。按剩余预算武装超时计时器并开始记账。"""
+    def _arm_time_budget_locked(self, run_epoch: int) -> None:
+        """须持 _active_lock 调用。按剩余预算武装本 epoch 的计时器。"""
         remaining = PLAY_MAX_ACTIVE_SECONDS - self._active_accum
         if remaining <= 0:
             # 预算已在之前的活跃段耗尽（防御分支；start() 已先行拦截）。
             self._timed_out = True
             return
         self._active_since = time.monotonic()
-        timer = threading.Timer(remaining, self._on_time_budget_expired)
+        timer = threading.Timer(
+            remaining, self._on_time_budget_expired, args=(run_epoch,)
+        )
         timer.daemon = True
         timer.start()
         self._timeout_timer = timer
 
-    def _on_time_budget_expired(self) -> None:
+    def _on_time_budget_expired(self, run_epoch: int | None = None) -> None:
         """超时回调：复用 stop() → engine.cancel() 终止运行。stop() 内部
         的 state 守卫保证运行已自然结束时（succeeded/failed）不会覆盖
-        真实结果；跑得快于预算的运行根本不会等到这一枪。"""
-        self._timed_out = True
-        self.stop(_TIMEOUT_REASON)
+        真实结果；跑得快于预算的运行根本不会等到这一枪。epoch 守卫防止
+        已被 start() 取代的旧 timer 误杀新执行段。"""
+        with self._active_lock:
+            if run_epoch is None:
+                run_epoch = self._run_epoch
+            if run_epoch != self._run_epoch:
+                return
+            self._timed_out = True
+            self.stop(_TIMEOUT_REASON)
 
-    def _run_once(self) -> None:
+    def _run_once(self, run_epoch: int) -> None:
         """跑一次 .run()（初次启动或 pause 后 resume 都调这个）。
 
         engine.run() 在 workflow 失败时 raise senza.SenzaError（比如
@@ -906,7 +922,7 @@ class PlaySession:
             # 不再累计（线程已退出），resume 后 start() 会按剩余预算重新
             # 武装计时器。finally 与 stop() 里的收账经 _active_lock 串行，
             # 不会双计。
-            self._disarm_time_budget()
+            self._disarm_time_budget(run_epoch)
 
     def start(self) -> None:
         """在后台线程启动 .run()。必须在 events() 订阅之后调用（见 play()）。
@@ -917,12 +933,18 @@ class PlaySession:
         if self._engine is None:
             raise RuntimeError("Engine not built. Call play() first.")
         with self._active_lock:
+            self._settle_time_budget_locked()
+            self._run_epoch += 1
+            run_epoch = self._run_epoch
             if self._active_accum >= PLAY_MAX_ACTIVE_SECONDS:
                 self._timed_out = True
                 self._engine.cancel(_TIMEOUT_REASON)
                 return
-            self._arm_time_budget_locked()
-        self._thread = threading.Thread(target=self._run_once, daemon=True)
+            self._arm_time_budget_locked(run_epoch)
+        thread = threading.Thread(
+            target=self._run_once, args=(run_epoch,), daemon=True
+        )
+        self._thread = thread
         self._thread.start()
 
     def submit_decision(self, step_id: str, decision: str) -> None:

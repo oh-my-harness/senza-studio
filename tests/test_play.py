@@ -1735,6 +1735,73 @@ def test_resume_preserves_cumulative_time(monkeypatch):
     assert session._active_accum > first
 
 
+def test_rapid_resume_before_old_finally_keeps_new_budget(monkeypatch):
+    """Resume 与旧 run 线程 finally 交错时，旧线程不得关闭新执行段的账本。
+
+    真实窗口：engine 已进入 Paused，但旧 run() 线程尚未执行 finally；
+    用户立即 Resume。start() 会先结算旧段并开启新 epoch，旧 finally 与
+    旧 timer 都必须只作用于旧 epoch。
+    """
+    _patch_guard_constants(monkeypatch, 60.0)
+
+    class RapidResumeEngine:
+        def __init__(self):
+            self._state = "running"
+            self.run_count = 0
+            self.pause_seen = threading.Event()
+            self.old_finally_gate = threading.Event()
+            self.second_gate = threading.Event()
+
+        def state(self):
+            return self._state
+
+        def resume(self):
+            self._state = "running"
+
+        def run(self):
+            self.run_count += 1
+            if self.run_count == 1:
+                self._state = "paused"
+                self.pause_seen.set()
+                self.old_finally_gate.wait(timeout=5)
+            else:
+                self.second_gate.wait(timeout=5)
+                self._state = "succeeded"
+
+    engine = RapidResumeEngine()
+    session = _make_guard_session(engine)
+    session.start()
+    assert engine.pause_seen.wait(timeout=5)
+    old_thread = session._thread
+    old_epoch = session._run_epoch
+
+    session.resume_run()
+
+    assert engine.run_count == 2
+    assert session._thread is not old_thread
+    assert session._timeout_timer is not None
+    assert session._active_since is not None
+
+    session._on_time_budget_expired(old_epoch)
+    assert session._timeout_timer is not None
+    assert session._active_since is not None
+    assert session.state() == "running"
+
+    engine.old_finally_gate.set()
+    old_thread.join(timeout=5)
+    assert not old_thread.is_alive()
+    assert session._timeout_timer is not None
+    assert session._active_since is not None
+    assert session._thread.is_alive()
+
+    time.sleep(0.05)
+    engine.second_gate.set()
+    session._thread.join(timeout=5)
+    assert session._active_accum > 0.01
+    assert session._timeout_timer is None
+    assert session._active_since is None
+
+
 def test_exhausted_budget_blocks_resume(monkeypatch):
     """预算耗尽后 resume/step/审批都不再启动执行，直接 cancel。"""
     _patch_guard_constants(monkeypatch, 0)
@@ -2147,4 +2214,3 @@ def test_submit_decision_vs_concurrent_cancel_does_not_raise(monkeypatch):
 
     assert session.state() == "cancelled"
     assert started == []  # 引擎已终态，绝不能重启
-
