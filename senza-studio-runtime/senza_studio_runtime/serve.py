@@ -1,15 +1,27 @@
-"""导出项目的 HTTP/WS 服务（Phase 7 切片三）。
+"""导出 Agent 的 HTTP/WS 服务。
 
-只提供 **Play 那一部分**契约：加载 spec、问入口输入、展开组件、跑流程。
-没有对话，也不能改 spec——导出的是一个跑流程的项目，不是编辑器。
+这里提供的是**产品契约**，不是编辑器契约。导出的东西是"做好的 agent"本身，
+不是做它用的工具——DAG、Inspector、Play/Pause/Step 这些属于 Studio，属于开发
+和调试阶段，不属于交付物（Unity 导出的游戏里没有场景编辑器）。
 
-路由沿用 Studio 的形状（``/api/projects/{id}/...``），project id 固定成
-``default``。这样导出包里那份 Studio 前端构建产物一个字都不用改就能用；
-真去另发明一套 URL，前端就得跟着分叉。
+所以这一层刻意不暴露 spec：
+
+- ``GET /api/agent`` 只回**渲染界面需要的东西**——要用户填哪几个输入、每个
+  step 该怎么展示（``ui.display``）、哪些 step 会停下来等人工决定。spec 的图
+  结构（谁连谁、prompt 怎么写、用了哪些工具）一个字都不回。前端因此在结构上
+  就画不出 DAG，而不是"画得出但我们不画"。
+- ``WS /ws/run`` 只有三个动词：start / decision / cancel。没有 pause / resume
+  / step——那是调试器的动词。
+
+``GET /api/agent`` 回的那份契约由 ``contract.describe_agent`` 生成，Studio 的
+``/api/projects/{id}/agent`` 回的是**同一个函数的输出**——Game view 就是这个
+界面的预览，两边共用一份数据和一份渲染代码，"看到的就是发出去的"才不是靠
+人工对齐维持的。
 """
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 from pathlib import Path
 from typing import Any
@@ -19,12 +31,9 @@ from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
-from .play import PlaySession, create_provider, get_entry_inputs
-from .preprocess import PreprocessError, preprocess_spec
+from .contract import describe_agent
+from .play import PlaySession, create_provider
 from .stream import run_play_streaming
-
-# 导出项目只有一个流程。沿用 Studio 的路由形状，但 id 固定。
-PROJECT_ID = "default"
 
 
 def load_spec(path: Path) -> dict:
@@ -34,12 +43,27 @@ def load_spec(path: Path) -> dict:
     return data
 
 
+def load_manifest(root: Path) -> dict:
+    """agent.json——导出时写的展示信息（人类可读的名字等）。
+
+    名字不放进 pipeline.yaml：那是流程定义，不该塞展示用的元数据。没有这个
+    文件（比如手写的 pipeline）就退回目录名。
+    """
+    path = root / "agent.json"
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+        return data if isinstance(data, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
 def create_app(pipeline: Path, webui_dist: Path | None = None) -> FastAPI:
     """pipeline 是 pipeline.yaml 的路径；它所在的目录就是项目根目录
     （tools/ 和 plugins/ 在旁边）。"""
     pipeline = pipeline.resolve()
     root = pipeline.parent
     spec_dict = load_spec(pipeline)
+    manifest = load_manifest(root)
 
     model = os.environ.get("SENZA_STUDIO_MODEL") or os.environ.get(
         "OPENAI_MODEL", "deepseek-chat"
@@ -51,48 +75,25 @@ def create_app(pipeline: Path, webui_dist: Path | None = None) -> FastAPI:
         "OPENAI_API_BASE", ""
     )
 
-    app = FastAPI(title="Senza Studio Runtime", docs_url=None, redoc_url=None)
+    app = FastAPI(title="Senza Agent", docs_url=None, redoc_url=None)
 
     @app.get("/api/health")
     async def health():
         return {"status": "ok"}
 
-    @app.get("/api/mode")
-    async def mode():
-        """前端据此进入 export 模式：不渲染对话面板、spec 只读。"""
-        return {"mode": "export", "project_id": PROJECT_ID}
+    @app.get("/api/agent")
+    async def agent():
+        """界面渲染所需的全部信息。和 Studio 的 /api/projects/{id}/agent 回的是
+        同一个东西，由同一个 describe_agent 生成——Game view 就是这个界面的
+        预览，两边的数据来源必须是一份。
 
-    @app.get("/api/projects")
-    async def list_projects():
-        # 前端的项目列表页复用同一个接口；导出项目永远只有这一个。
-        return [{"id": PROJECT_ID, "name": root.name, "status": "editing"}]
+        标题优先用 spec 里 ui.title（作者写的产品名），没有才退回 agent.json
+        里的项目名、再退回目录名。
+        """
+        return describe_agent(spec_dict, manifest.get("name") or root.name)
 
-    @app.get("/api/projects/{project_id}")
-    async def get_project(project_id: str):
-        return {"id": PROJECT_ID, "name": root.name, "status": "editing"}
-
-    @app.get("/api/projects/{project_id}/spec")
-    async def get_spec(project_id: str):
-        return spec_dict
-
-    @app.get("/api/projects/{project_id}/entry_inputs")
-    async def entry_inputs(project_id: str):
-        return {"fields": get_entry_inputs(spec_dict)}
-
-    @app.get("/api/projects/{project_id}/expanded_spec")
-    async def expanded_spec(project_id: str):
-        try:
-            return {"spec": preprocess_spec(spec_dict), "error": None}
-        except PreprocessError as exc:
-            return {"spec": None, "error": str(exc)}
-
-    @app.get("/api/projects/{project_id}/messages")
-    async def messages(project_id: str):
-        # 没有对话历史，但前端启动时会读一次——返回空列表比 404 干净。
-        return []
-
-    @app.websocket("/ws/projects/{project_id}")
-    async def project_ws(websocket: WebSocket, project_id: str):
+    @app.websocket("/ws/run")
+    async def run_ws(websocket: WebSocket):
         await websocket.accept()
         play_session: PlaySession | None = None
         play_task: asyncio.Task | None = None
@@ -101,9 +102,9 @@ def create_app(pipeline: Path, webui_dist: Path | None = None) -> FastAPI:
                 msg = await websocket.receive_json()
                 msg_type = msg.get("type")
 
-                if msg_type == "play":
+                if msg_type == "start":
                     if play_task is not None and not play_task.done():
-                        continue  # 已经在跑，忽略重复 play
+                        continue  # 已经在跑，忽略重复 start
                     play_session = PlaySession(
                         root=root,
                         spec=spec_dict,
@@ -111,26 +112,30 @@ def create_app(pipeline: Path, webui_dist: Path | None = None) -> FastAPI:
                         provider=create_provider(api_key, api_base),
                     )
                     try:
-                        play_session.play(
-                            inputs=msg.get("inputs"),
-                            start_paused=bool(msg.get("start_paused")),
-                        )
+                        play_session.play(inputs=msg.get("inputs"))
                     except Exception as exc:  # noqa: BLE001
                         # 构建阶段就失败（多半是组件展不开）。不接住的话异常会
                         # 穿出 handler 把连接打死，前端只看到一个莫名其妙断开的
                         # socket——Studio 那边踩过同样的坑。
                         play_session = None
                         await websocket.send_json(
-                            {"type": "error", "message": f"无法启动 Play: {exc}"}
+                            {"type": "error", "message": f"无法启动: {exc}"}
                         )
                         continue
                     play_task = asyncio.create_task(
                         run_play_streaming(websocket, play_session)
                     )
 
-                elif msg_type == "stop":
+                elif msg_type == "decision":
                     if play_session is not None:
-                        play_session.stop("user stop")
+                        step_id = msg.get("step_id")
+                        decision = msg.get("decision")
+                        if step_id and decision:
+                            play_session.submit_decision(step_id, decision)
+
+                elif msg_type == "cancel":
+                    if play_session is not None:
+                        play_session.stop("user cancel")
                     if play_task is not None and not play_task.done():
                         try:
                             await play_task
@@ -142,27 +147,8 @@ def create_app(pipeline: Path, webui_dist: Path | None = None) -> FastAPI:
                         except Exception:  # noqa: BLE001
                             pass
 
-                elif msg_type == "submit_decision":
-                    if play_session is not None:
-                        step_id = msg.get("step_id")
-                        decision = msg.get("decision")
-                        if step_id and decision:
-                            play_session.submit_decision(step_id, decision)
-
-                elif msg_type == "pause":
-                    if play_session is not None:
-                        play_session.request_pause()
-
-                elif msg_type == "resume":
-                    if play_session is not None:
-                        play_session.resume_run()
-
-                elif msg_type == "step":
-                    if play_session is not None:
-                        play_session.step()
-
-                # 其余消息（prompt 等）导出项目不支持，静默忽略：前端在
-                # export 模式下不会发，发了也只是没有对话功能而已。
+                # pause / resume / step 是调试器的动词，导出产品没有——发过来
+                # 也静默忽略。
         except WebSocketDisconnect:
             if play_session is not None:
                 play_session.stop("client disconnected")

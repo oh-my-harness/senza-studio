@@ -19,6 +19,7 @@ from pydantic import BaseModel, ValidationError
 from .config import StudioConfig
 from .docingest import ingest
 from .export import ExportError, export_project
+from senza_studio_runtime.contract import describe_agent
 from .docs import (
     ingest_cache_path,
     resolve_doc_path,
@@ -450,10 +451,13 @@ def create_app(config: StudioConfig | None = None) -> FastAPI:
             "ok": result.get("kind") != "error",
         }
 
-    # Studio 前端的构建产物。导出项目直接带上它跑（不另抽 npm 包，见
-    # docs/phases 里 Phase 7 的说明）。dev 模式下可能还没 build 过，那就
-    # 导出一个没有网页界面的项目，并在响应里说明。
-    WEBUI_DIST = Path(__file__).resolve().parent.parent / "studio_frontend" / "dist"
+    # Agent 界面的构建产物（studio_frontend/agent/ → dist-agent/）。**不是**
+    # Studio 自己的 dist：导出的是做好的 agent，不是做它用的编辑器，DAG /
+    # Inspector / Play 控制条不该出现在交付物里。两者是两次独立的 vite
+    # build，所以编辑器的代码根本没打进导出包。
+    # dev 模式下可能还没 build 过，那就导出一个没有网页界面的项目，并在
+    # 响应里说明。
+    WEBUI_DIST = Path(__file__).resolve().parent.parent / "studio_frontend" / "dist-agent"
 
     @app.post("/api/projects/{project_id}/export")
     async def export_project_endpoint(project_id: str, req: ExportReq):
@@ -472,7 +476,7 @@ def create_app(config: StudioConfig | None = None) -> FastAPI:
         if not with_webui:
             # 没带上前端不是失败，但用户得知道——否则跑起来看到的是空页面
             notes.append(
-                "没有找到前端构建产物，导出的项目暂时没有网页界面。"
+                "没有找到 Agent 界面的构建产物，导出的项目暂时没有网页界面。"
                 "在 studio_frontend/ 里跑一次 npm run build 再导出即可。"
             )
         if missing_wheels:
@@ -487,6 +491,21 @@ def create_app(config: StudioConfig | None = None) -> FastAPI:
             "missing_wheels": missing_wheels,
             "note": "\n".join(notes) or None,
         }
+
+    @app.get("/api/projects/{project_id}/agent")
+    async def get_agent_contract(project_id: str):
+        """Game view 的渲染契约——和导出 Agent 的 GET /api/agent 完全同构，
+        由同一个 describe_agent 生成。
+
+        Game view 就是导出产品的预览，所以它不该自己去翻 spec 算 ui.display /
+        审批选项/标签：那等于把同一套规则实现两遍，两份实现迟早不一样（已经
+        踩过一次）。画布要的那份结构信息走 expanded_spec，和这里井水不犯河水。
+        """
+        state = _get_or_load_project(cfg, project_id)
+        return describe_agent(
+            state["spec"].get_current_spec(),
+            str(state["project"].meta.get("name") or "Agent"),
+        )
 
     @app.get("/api/projects/{project_id}/expanded_spec")
     async def get_expanded_spec(project_id: str):

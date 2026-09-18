@@ -127,6 +127,19 @@ def make_spec_callbacks(spec: Spec) -> dict[str, Callable[[dict, Any], str]]:
 
     callbacks["set_ui_config"] = _set_ui_config
 
+    def _set_agent_ui(args, ctx):
+        try:
+            spec.set_agent_ui(
+                title=args.get("title"),
+                description=args.get("description"),
+                inputs=args.get("inputs"),
+            )
+            return "Agent UI updated."
+        except SpecError as e:
+            return f"Error: {e}"
+
+    callbacks["set_agent_ui"] = _set_agent_ui
+
     def _get_current_spec(args, ctx):
         return json.dumps(spec.get_current_spec(), ensure_ascii=False, indent=2)
 
@@ -269,6 +282,45 @@ _SCHEMAS: dict[str, dict] = {
                 },
             },
             "required": ["step", "display"],
+        },
+    },
+    "set_agent_ui": {
+        "description": (
+            "Set the product UI copy for the whole agent: the title and one-line "
+            "description shown at the top, and the label/placeholder/multiline "
+            "of each entry input. This is what the end user sees in the exported "
+            "agent (and in Studio's Game view, which previews it). Incremental — "
+            "pass only what you want to change. Entry inputs are the {{var}} "
+            "placeholders in the first step's prompt_template."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "title": {
+                    "type": "string",
+                    "description": "Product name shown as the page heading",
+                },
+                "description": {
+                    "type": "string",
+                    "description": "One line under the title saying what it does",
+                },
+                "inputs": {
+                    "type": "object",
+                    "description": (
+                        "Keyed by entry input name, e.g. "
+                        '{"customer_email": {"label": "Customer email", '
+                        '"placeholder": "Paste the email body", "multiline": true}}'
+                    ),
+                    "additionalProperties": {
+                        "type": "object",
+                        "properties": {
+                            "label": {"type": "string"},
+                            "placeholder": {"type": "string"},
+                            "multiline": {"type": "boolean"},
+                        },
+                    },
+                },
+            },
         },
     },
     "get_current_spec": {

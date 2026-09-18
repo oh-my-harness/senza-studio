@@ -10,6 +10,7 @@ import type {
   SettingsField,
   Spec,
 } from "./types";
+import type { AgentInfo } from "./player/types";
 
 const BASE = "/api";
 const bootstrapToken = import.meta.env.DEV
@@ -120,8 +121,6 @@ export const api = {
     fetchJson<{ sessions: string[]; active: string | null }>(
       `${BASE}/projects/${id}/sessions`
     ),
-  getEntryInputs: (id: string) =>
-    fetchJson<{ fields: string[] }>(`${BASE}/projects/${id}/entry_inputs`),
   deleteProject: (id: string) =>
     fetchJson<{ status: string }>(`${BASE}/projects/${id}`, { method: "DELETE" }),
   // 上传文档：multipart，不走 fetchJson（它写死了 JSON body）。不设
@@ -142,18 +141,9 @@ export const api = {
       ok: boolean;
     };
   },
-  // 运行模式。Studio 后端没有这个路由（404），导出项目的 runtime 才有——
-  // 所以"探测失败"就等于"这是 Studio"，不需要 Studio 那边配合改任何东西。
-  getMode: async (): Promise<"studio" | "export"> => {
-    try {
-      const r = await fetch(`${BASE}/mode`);
-      if (!r.ok) return "studio";
-      const body = await r.json();
-      return body.mode === "export" ? "export" : "studio";
-    } catch {
-      return "studio";
-    }
-  },
+  // Game view 的渲染契约。和导出 Agent 的 GET /api/agent 同构，由后端同一个
+  // describe_agent 生成——Game view 就是那个界面的预览。
+  getAgent: (id: string) => fetchJson<AgentInfo>(`${BASE}/projects/${id}/agent`),
   // 导出成可独立运行的项目目录。spec 不合法 / 组件展不开时后端返回 400，
   // detail 里是能直接给用户看的原因。
   exportProject: (id: string, name?: string) =>

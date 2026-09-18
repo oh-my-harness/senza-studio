@@ -301,19 +301,112 @@ Phase 被标成了已实现而实际上点不到。补成 2 + 2b 两行，免得
 | 1. 抽取 runtime 包 | executor/judge/模板渲染/工具与插件加载/PlaySession/预处理器搬进 `senza-studio-runtime`，接口去 Studio 化（收 root + spec dict + model + provider），**Studio 自己也改成 import 它**，不留第二份实现 | 已实现（`65b716f`） |
 | 2. 导出打包（后端） | `export.py` + `POST /api/projects/{id}/export`，拷贝 tools/plugins、生成 pyproject.toml / .env.example / README.md；导出前先 validate + preprocess，spec 有问题就地拦住 | 已实现 |
 | 2b. 导出按钮（前端） | 控制条上的「⬇ 导出」，成功显示落盘路径、失败显示后端给的原因（不是一串 JSON）；export 模式下不显示 | 已实现 |
-| 3. serve + 前端 export 模式 | `senza-studio-runtime serve`、Play 那部分路由（project id 固定 `default`）、WS 生命周期提到 App、`/api/mode` 探测、Inspector 只读、dist 打进导出包 | 已实现 |
+| 3. serve + 前端 export 模式 | `senza-studio-runtime serve`、Play 那部分路由（project id 固定 `default`）、WS 生命周期提到 App、`/api/mode` 探测、Inspector 只读、dist 打进导出包 | 已废弃，见切片 5 |
 | 4. 行为一致性验证 | 同一个 spec 两边各跑一遍，比对 step 序列、route_key、输出、终态（tests/test_export_equivalence.py，approve/reject 两条路径） | 已实现 |
+| 5. 导出产物改成 Agent 本身 | 独立的 Agent 界面（`studio_frontend/agent/` → `dist-agent/`，另一次 vite build）、runtime 的接口换成产品契约（`GET /api/agent` + `WS /ws/run`）、Studio 前端里的 export 模式代码删干净 | 已实现 |
+| 6. 一条命令跑起来 | 生成 `run.sh`：找 Python、建 venv、按指纹装依赖、生成并校验 `.env`、挑空闲端口、起服务并开浏览器；重新导出保留 `.env` / `.venv` | 已实现 |
+| 7. Game view = 导出产品的预览 | 界面契约（`contract.describe_agent`）两边共用；`src/player/AgentRunView` 一个组件两个宿主；入口表单搬进 Game view；spec 顶层 `ui` 块 + Inspector 编辑 + `set_agent_ui` 工具；实现 `approval_form` | 已实现 |
 
 切片 1 之所以对外看不出变化：它是纯重构，原有 411 个测试一个不改地全绿，
 用户可见的 Export 功能在切片 2/3。切片 4 是这一阶段真正的验收，跑通了才算完。
 
-**与原计划的两处偏离**（已确认）：
+### 切片 5：导出的应该是 agent，不是编辑器
+
+切片 3 让导出包直接带上 Studio 的构建产物，跑起来就是一个"只读的 Studio"：
+DAG、Inspector、Play / Play Paused / Stop / Pause / Step、工具调用面板，全在。
+用户指出这是错的——**Studio 是引擎，导出的是作品**；Unity 导出的游戏里没有
+场景编辑器、没有 Animator 面板，那些是做游戏时用的，不是玩游戏时用的。
+
+这个错误的根源在我提问的方式：当时给的三个选项（复用 Studio dist / 抽 npm 包 /
+先做 headless）全是围绕**打包方式**的，没有一条说明"复用 dist 等于把整个编辑器
+一起发出去"。选项本身没有错，是问题问错了，所以答案也就只能选错。
+
+改法：
+
+- 新增 `studio_frontend/agent/`，一次**独立的** vite build（`vite.agent.config.ts`
+  → `dist-agent/`）。不是运行时藏起来——reactflow、zustand store、Inspector /
+  Canvas / ControlBar 的代码根本没打进这个包（310 kB vs Studio 的 568 kB）。
+- runtime 的 HTTP 接口换成**产品契约**：`GET /api/agent` 只回渲染界面要的东西
+  （入口输入、每个 step 的 `ui.display` / 展示字段 / 停下来时的选项），spec 的
+  图结构一个字都不回；`WS /ws/run` 只有 start / decision / cancel 三个动词，
+  pause / resume / step 是调试器的动词，产品里没有。前端因此在结构上就画不出
+  DAG，而不是"画得出但我们不画"。
+- `ui.display` 的分派规则和 Studio 的 Game view 完全一致（默认 chat，`none` 不
+  展示）——作者在 Studio 里看到的效果就是最终用户看到的效果。
+- Studio 前端里的 export 模式代码（`/api/mode` 探测、`isExport`、Inspector
+  `readOnly`）全部删除：导出包已经不跑这份前端了，留着只会误导。
+
+### 切片 7：Game view 就是导出产品的预览
+
+切片 5 之后，同一个想法有**两份实现**：Studio 的 `GameView.tsx` 和导出的
+`AgentApp.tsx`。两边都按 `ui.display` 分派，但已经差出七八处——入口输入（控制条
+一排裸变量名 vs 页内表单）、卡片外观、终点 step 的处理、审批区文案、跑完之后
+给什么按钮、`approval_form` 两边都没实现。手工对齐一次只是重置漂移的时钟。
+
+所以改成**一份数据 + 一份渲染**：
+
+- `senza_studio_runtime/contract.py` 产出展示契约（标题、说明、入口输入、每个
+  step 的 title/display/fields/choices/terminal），Studio 的
+  `/api/projects/{id}/agent` 和导出的 `/api/agent` 回的是同一个函数的输出。
+  测试直接断言两边逐字节相同。标签（step 标题、选项文案、输入框 label）全在
+  后端算好，前端不做任何猜测——猜测放在前端就等于放了两份，而且作者无从覆盖。
+- `studio_frontend/src/player/AgentRunView.tsx` 是那份界面，Game view 和导出
+  各写一层薄适配（store → props / hook → props），本身不含任何渲染逻辑。
+- 入口表单从控制条搬进 Game view：那一屏是最终用户打开产品看到的**第一屏**，
+  以前在 Studio 里根本没法预览。Play 按钮现在只负责进入运行视图，真正的 play
+  消息由表单发；`start_paused`（从头单步，调试用）经 store 传过去。
+- spec 顶层 `ui` 块（`title` / `description` / `inputs.<name>.{label,placeholder,
+  multiline}`）让作者控制产品文案，默认值仍是推导出来的（项目名当标题、变量名
+  humanize 成 label）——默认值只够看草稿，不够交付。Inspector 在"没选中节点"
+  时编辑它（那本来是整个 agent 唯一没有归属的属性），元 agent 用 `set_agent_ui`。
+- `approval_form` 终于名副其实：把 checker 已产出的结构化字段摆成表格放在决定
+  按钮上方。它之前一直在 Inspector 下拉框和系统提示词里，但两个渲染器都没实现。
+
+又一个只有真跑才会发现的坑，而且是这一片里最隐蔽的：重新导出之后，导出的
+agent 跑的还是**上一版代码**。两层原因叠在一起——`run.sh` 的依赖指纹只看
+wheel 文件名，而版本号钉死在 0.1.0，文件名永远不变；就算指纹变了，
+`pip install -r requirements.txt` 看到"0.1.0 已装"也会直接跳过。改成：导出时
+按源码算摘要写进 `vendor/sources.sha256`（不能哈希 wheel 字节——pip wheel 的
+产物不可复现，同源码连打两次就不一样，那样每次导出都白白重装），指纹变了就
+`--force-reinstall --no-deps vendor/*.whl` 按文件路径强制装一遍。
+
+### 切片 6：交付物要能被跑起来，不只是能被装起来
+
+导出目录原本要用户自己走五步（建 venv、pip install、cp .env、source、serve），
+每一步都能出错，而且错的方式对第一次拿到这个目录的人毫无提示——最典型的是
+key 没填，跑起来一切正常，直到第一次调模型才炸。现在是 `./run.sh` 一条。
+
+设计上值得记的几点：
+
+- **依赖指纹**：装完把 `requirements.txt` 的内容 + `vendor/` 里的 wheel 文件名
+  哈希一下记在 `.venv/.senza-deps`。没变就整段跳过——不然"一条命令跑起来"会
+  变成"一条命令等一分钟"。
+- **配置检查前置**：`.env` 缺 key 时直接停下来，把缺的变量名列出来。检查的
+  变量组（`SENZA_STUDIO_MODEL` / `OPENAI_MODEL` 等）和 `serve.py` 实际读的顺序
+  一致，测试会校验这些 key 还在 `SETTINGS_SCHEMA` 里——改名不会悄悄留下一个
+  永远检查不到的脚本。
+- **重新导出保留 `.env` 和 `.venv`**：改 spec 之后重导是常规操作，每次都删掉
+  等于让"一条命令"只在第一次成立。
+- `requirements.txt` 和 `pyproject.toml` 从同一个依赖列表生成，测试比对两者
+  一致。
+
+一个只有真跑才会发现的坑：`say "· 建虚拟环境（$VENV）"` 里全角括号的字节会被
+bash 吸进变量名，报 `VENV?: unbound variable`，脚本第 60 行就退出。注释和提示
+文案全是中文，这个坑离得很近，所以加了条测试禁止裸 `$VAR` 紧跟多字节字符。
+项目名注入（引号、反引号、换行）也补了测试，直接跑 `run.sh --help` 验证，
+而不是读文本猜。
+
+顺带修掉一个用真机跑才能发现的问题：`stream.py` 靠 timeout 哨兵醒来时检查后台
+线程是否还活着来判断"跑完了"，间隔 5s，于是结果卡片已经显示出来了、底下按钮
+还有 5.4 秒写着"取消"而不是"再来一次"。间隔改成 250ms、次数同比放大（静默预算
+不变，仍是 ≈83 分钟），实测 5.4s → 0.3s。
+
+**与原计划的偏离**（已确认）：
 
 - **不抽 `senza-studio-webui` npm 包**。那五个组件全部深挂在 `useStudioStore`
   上（17 个字段，含 `setSpec`/`setStatus`/`ws` 这些 Studio 专有的），抽包等于把
-  ~1360 行改成 props 传参，而除了 Studio 和导出项目并没有第三个消费者。改为给
-  现有前端加一个 export 模式，导出时直接带上 Studio 的构建产物 `dist/`。等真
-  出现第三个消费者再抽。
+  ~1360 行改成 props 传参。结论仍然成立，但理由变了：导出产物现在压根不复用
+  那五个组件，而是另写了一套只有三件事（填输入、看进展、做决定）的界面。
 - **`senza-studio-runtime` 是子目录包不是独立仓库**，沿用
   `senza-studio-components` 已经确立的先例：包独立可安装（导出项目要装它），
   仓库不拆，改动保持原子。

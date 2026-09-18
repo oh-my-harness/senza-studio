@@ -18,6 +18,11 @@ class SpecError(Exception):
 _VALID_TYPES = {"agent", "checker", "tool", "terminal"}
 _EDGE_PREFIX = "next_on_"
 
+# spec 顶层 ui 块：导出产品（和 Game view，它就是那个产品的预览）的界面文案。
+# 不放进 stages 里——这些是整个 agent 的属性，不属于任何一个 step。
+_AGENT_UI_KEYS = {"title", "description", "inputs"}
+_AGENT_UI_INPUT_KEYS = {"label", "placeholder", "multiline"}
+
 
 class Spec:
     """Pipeline spec 的内存表示。
@@ -151,6 +156,42 @@ class Spec:
             raise SpecError(f"step '{step_name}' not found")
         step[key] = value
 
+    def set_agent_ui(
+        self,
+        title: str | None = None,
+        description: str | None = None,
+        inputs: dict[str, dict] | None = None,
+    ) -> None:
+        """设置整个 agent 的界面文案（顶层 ui 块）。
+
+        增量更新：只传 title 就只改 title，别的保持原样——元 agent 分几轮
+        逐步完善界面是常态，每次都要求它把整块重发一遍必然丢东西。
+        inputs 按字段名合并，同理。
+        """
+        ui = self._data.setdefault("ui", {})
+        if not isinstance(ui, dict):
+            ui = {}
+            self._data["ui"] = ui
+        if title is not None:
+            ui["title"] = title
+        if description is not None:
+            ui["description"] = description
+        if inputs is not None:
+            merged = ui.setdefault("inputs", {})
+            if not isinstance(merged, dict):
+                merged = {}
+                ui["inputs"] = merged
+            for name, options in inputs.items():
+                if not isinstance(options, dict):
+                    raise SpecError(f"ui.inputs['{name}'] must be an object")
+                unknown = set(options) - _AGENT_UI_INPUT_KEYS
+                if unknown:
+                    raise SpecError(
+                        f"ui.inputs['{name}'] has unknown keys: {sorted(unknown)} "
+                        f"(expected {sorted(_AGENT_UI_INPUT_KEYS)})"
+                    )
+                merged.setdefault(name, {}).update(options)
+
     # ── 校验 ──────────────────────────────────────────────
 
     def validate(self) -> None:
@@ -195,6 +236,33 @@ class Spec:
         has_terminal = any(s.get("type") == "terminal" for s in stages)
         if not has_terminal:
             raise SpecError("spec has no terminal step")
+
+        # 顶层 ui 块。写错的 key 不会让流程跑不起来（契约那边一律当没写），
+        # 所以运行时是宽松的——但在 Studio 里编辑时必须报出来，否则作者改了
+        # 半天文案没生效，只能靠肉眼比对才发现是拼错了键名。
+        ui = self._data.get("ui")
+        if ui is not None:
+            if not isinstance(ui, dict):
+                raise SpecError("top-level 'ui' must be an object")
+            unknown = set(ui) - _AGENT_UI_KEYS
+            if unknown:
+                raise SpecError(
+                    f"top-level 'ui' has unknown keys: {sorted(unknown)} "
+                    f"(expected {sorted(_AGENT_UI_KEYS)})"
+                )
+            inputs = ui.get("inputs")
+            if inputs is not None:
+                if not isinstance(inputs, dict):
+                    raise SpecError("ui.inputs must be an object keyed by field name")
+                for name, options in inputs.items():
+                    if not isinstance(options, dict):
+                        raise SpecError(f"ui.inputs['{name}'] must be an object")
+                    unknown = set(options) - _AGENT_UI_INPUT_KEYS
+                    if unknown:
+                        raise SpecError(
+                            f"ui.inputs['{name}'] has unknown keys: {sorted(unknown)} "
+                            f"(expected {sorted(_AGENT_UI_INPUT_KEYS)})"
+                        )
 
     # ── 序列化 ────────────────────────────────────────────
 
