@@ -22,6 +22,7 @@ import json
 import re
 import sys
 import threading
+import time
 import uuid
 from pathlib import Path
 from typing import Any, Callable
@@ -32,6 +33,14 @@ from .preprocess import preprocess_spec
 
 _TERMINAL_TYPES = frozenset({"settled", "aborted", "error", "agent_end"})
 _SKIP_TYPES = frozenset({"timeout"})
+
+# ── 平台级安全护栏（与业务/loop 逻辑无关的最后兜底）──────────────────────
+# max_steps：引擎级 step_history 总上限（含所有 Retry 重跑）。超过 → Failed。
+# max_active_seconds：累计 *活跃* 执行时间的墙钟上限。暂停/HITL 等待不计入，
+# 跨 resume 累计；耗尽后走 PlaySession.stop()（engine.cancel）终止。
+PLAY_MAX_STEPS = 75
+PLAY_MAX_ACTIVE_SECONDS = 15 * 60
+_TIMEOUT_REASON = "play execution time limit exceeded (15 active minutes)"
 
 
 def create_provider(api_key: str, api_base: str | None = None) -> Any:
@@ -737,6 +746,18 @@ class PlaySession:
         self._engine_ref: dict[str, Any] = {}
         self._thread: threading.Thread | None = None
         self.run_error: BaseException | None = None
+        # ── 平台级执行护栏状态（见模块顶常量）─────────────────────────
+        # 累计活跃执行秒数：run() 线程活着才算。暂停/HITL 不计入。
+        self._active_accum: float = 0.0
+        # 本轮 run() 的开始时刻（time.monotonic()）；线程不在跑时为 None。
+        self._active_since: float | None = None
+        # 保护累计账本的锁：_run_once 收尾与 stop() 都会关闭账本，防双计。
+        self._active_lock = threading.RLock()
+        # 剩余预算的倒计时器；到点调 stop(_TIMEOUT_REASON)。
+        self._timeout_timer: threading.Timer | None = None
+        self._timed_out = False
+        # 每个执行段一个 epoch：旧 run 线程/旧 timer 不得关闭新段的账本。
+        self._run_epoch = 0
         # 用户是不是在"手动逐步执行"——Step 按钮或 Play Paused 打开它，
         # Resume 按钮关掉它。submit_decision（checker 审批）需要知道这个：
         # 不看这个标志的话，用户在单步模式下走到一个 checker、点了
@@ -745,7 +766,9 @@ class PlaySession:
         # 遵守同一个单步节奏（亲测复现过这个 bug）。
         self._step_mode = False
 
-    def play(self, inputs: dict[str, str] | None = None, start_paused: bool = False) -> None:
+    def play(
+        self, inputs: dict[str, str] | None = None, start_paused: bool = False
+    ) -> None:
         """构建 WorkflowEngine。不启动 .run()——调用方必须先 events() 订阅，
         再调用 start()，否则 tokio broadcast 会丢掉 run() 线程里发生太快
         （比如立刻 fail 的 step，没有真实 LLM 调用）的早期事件：broadcast
@@ -801,10 +824,17 @@ class PlaySession:
         )
         judge = make_judge(routes_by_name)
 
+        # 平台护栏 1：引擎级 step_history 上限（含所有 Retry 重跑），超过 →
+        # Failed("max_steps (75) exceeded")。必须在此处、首次 run() 之前
+        # 设置——engine 一旦被 run() 共享，with_max_steps 会拒绝。
+        # 重复 play() 会重建 engine，这里是唯一也是每次都会经过的入口。
         self._engine = senza.WorkflowEngine(
             spec_dict, provider, self._model, senza.create_judge(judge), env=env
-        )
+        ).with_max_steps(PLAY_MAX_STEPS)
         self._engine.with_executor("eda_executor", senza.create_executor(executor))
+        # 平台护栏 2 记账：每次 play() 重置本轮预算（同一 PlaySession 重放
+        # 是一次全新运行，不是 resume）。
+        self._reset_time_budget()
         # 晚绑定：executor 闭包在 engine 造好之前就已经创建，这里把真正的
         # engine 塞进去，让它自己在 agent step 算完后能调用
         # set_context_variable 往 context 写数据（详见 make_executor 注释）。
@@ -817,8 +847,69 @@ class PlaySession:
         if start_paused:
             self._engine.pause("start paused")
 
+    # ── 平台护栏 2：累计活跃执行时间（暂停/HITL 不计入，跨 resume 累计）──
 
-    def _run_once(self) -> None:
+    def _reset_time_budget(self) -> None:
+        """play() 重放时调用：清空累计账本，新一轮 Play 拿到完整预算。"""
+        with self._active_lock:
+            self._disarm_timer_locked()
+            self._run_epoch += 1
+            self._active_accum = 0.0
+            self._active_since = None
+        self._timed_out = False
+
+    def _disarm_time_budget(self, run_epoch: int | None = None) -> None:
+        """run() 收尾（正常结束/pause/异常）与 stop() 共用的收账入口。
+        锁保证"关计时器 + 结算账本"只发生一次；run_epoch 不匹配时说明
+        这是旧执行段的迟到收尾，不能影响新执行段。"""
+        with self._active_lock:
+            if run_epoch is not None and run_epoch != self._run_epoch:
+                return
+            self._settle_time_budget_locked()
+
+    def _settle_time_budget_locked(self) -> None:
+        """须持 _active_lock 调用。关闭当前计时器并结算当前活跃段。"""
+        self._disarm_timer_locked()
+        if self._active_since is not None:
+            self._active_accum += time.monotonic() - self._active_since
+            self._active_since = None
+
+    def _disarm_timer_locked(self) -> None:
+        """须持 _active_lock 调用。取消当前计时器；迟到回调由 epoch 守卫拦下。"""
+        timer = self._timeout_timer
+        self._timeout_timer = None
+        if timer is not None:
+            timer.cancel()
+
+    def _arm_time_budget_locked(self, run_epoch: int) -> None:
+        """须持 _active_lock 调用。按剩余预算武装本 epoch 的计时器。"""
+        remaining = PLAY_MAX_ACTIVE_SECONDS - self._active_accum
+        if remaining <= 0:
+            # 预算已在之前的活跃段耗尽（防御分支；start() 已先行拦截）。
+            self._timed_out = True
+            return
+        self._active_since = time.monotonic()
+        timer = threading.Timer(
+            remaining, self._on_time_budget_expired, args=(run_epoch,)
+        )
+        timer.daemon = True
+        timer.start()
+        self._timeout_timer = timer
+
+    def _on_time_budget_expired(self, run_epoch: int | None = None) -> None:
+        """超时回调：复用 stop() → engine.cancel() 终止运行。stop() 内部
+        的 state 守卫保证运行已自然结束时（succeeded/failed）不会覆盖
+        真实结果；跑得快于预算的运行根本不会等到这一枪。epoch 守卫防止
+        已被 start() 取代的旧 timer 误杀新执行段。"""
+        with self._active_lock:
+            if run_epoch is None:
+                run_epoch = self._run_epoch
+            if run_epoch != self._run_epoch:
+                return
+            self._timed_out = True
+            self.stop(_TIMEOUT_REASON)
+
+    def _run_once(self, run_epoch: int) -> None:
         """跑一次 .run()（初次启动或 pause 后 resume 都调这个）。
 
         engine.run() 在 workflow 失败时 raise senza.SenzaError（比如
@@ -837,12 +928,34 @@ class PlaySession:
         except BaseException as exc:  # noqa: BLE001
             self.run_error = exc
             print(f"Play run error: {exc}", file=sys.stderr)
+        finally:
+            # 无论正常结束、pause 还是异常都收账——暂停/HITL 的时间从此
+            # 不再累计（线程已退出），resume 后 start() 会按剩余预算重新
+            # 武装计时器。finally 与 stop() 里的收账经 _active_lock 串行，
+            # 不会双计。
+            self._disarm_time_budget(run_epoch)
 
     def start(self) -> None:
-        """在后台线程启动 .run()。必须在 events() 订阅之后调用（见 play()）。"""
+        """在后台线程启动 .run()。必须在 events() 订阅之后调用（见 play()）。
+
+        预算已耗尽（之前的活跃时间用满 15 分钟）时拒绝启动并直接终止——
+        resume/step/审批 submit 都经由这里，守一处即覆盖所有重启路径。
+        """
         if self._engine is None:
             raise RuntimeError("Engine not built. Call play() first.")
-        self._thread = threading.Thread(target=self._run_once, daemon=True)
+        with self._active_lock:
+            self._settle_time_budget_locked()
+            self._run_epoch += 1
+            run_epoch = self._run_epoch
+            if self._active_accum >= PLAY_MAX_ACTIVE_SECONDS:
+                self._timed_out = True
+                self._engine.cancel(_TIMEOUT_REASON)
+                return
+            self._arm_time_budget_locked(run_epoch)
+        thread = threading.Thread(
+            target=self._run_once, args=(run_epoch,), daemon=True
+        )
+        self._thread = thread
         self._thread.start()
 
     def submit_decision(self, step_id: str, decision: str) -> None:
@@ -862,8 +975,25 @@ class PlaySession:
         """
         if self._engine is None:
             raise RuntimeError("Engine not built. Call play() first.")
-        self._engine.set_context_variable(decision_context_key(step_id), decision)
-        self._engine.resume()
+        # 状态守卫（与 resume_run/step 的守卫同一哲学）：决定只在引擎仍在
+        # 等待审批（paused）或处于可恢复失败（failed —— Runtime resume 显式
+        # 支持 Failed → Paused 恢复）时有意义。其它状态都是过期决定——典型
+        # 场景：15 分钟活跃预算在 HITL 等待期间到期，超时已把引擎置为
+        # Cancelled，而审批卡片还挂在界面上。过期决定必须无害：不 raise、
+        # 不改状态、不重启（Cancelled 是终态，Runtime resume 会以
+        # InvalidStatus 拒绝 —— 那个异常会把 WS 连接打死）。
+        if self._engine.state() not in ("paused", "failed"):
+            return
+        try:
+            self._engine.set_context_variable(decision_context_key(step_id), decision)
+            self._engine.resume()
+        except senza.HarnessStateError:
+            # 竞争窗口：守卫读到 paused/failed 之后、resume 执行前，stop()
+            #（用户 Stop 或 15 分钟超时计时器线程）已把引擎终态化。此时决定
+            # 已经过期——静默放弃即可。异常绝不能向上抛：本方法在 WS 事件
+            # 循环线程执行（app.py 无 try/except），HarnessStateError 会把
+            # 整个连接打死（守卫只能缩小窗口，不能消除）。
+            return
         if self._step_mode:
             self._engine.pause("single-step (after approval)")
         self.run_error = None
@@ -915,6 +1045,10 @@ class PlaySession:
         自然结束（succeeded/failed）之后才点的，那种情况下 engine 已经
         跑完，.cancel() 会把真实结果悄悄改写成 "cancelled"（亲测行为），
         所以只在还真的在跑的时候才调用它。
+
+        手动 Stop（与超时回调共用本方法）同时收账并解除计时器——与
+        _run_once 的 finally 经 _active_lock 串行，不会双计活跃时间；
+        已到终态时这里不做事，迟到的超时回调因此无法覆盖真实结果。
         """
         if self._engine is not None and self._engine.state() in (
             "idle",
@@ -922,6 +1056,7 @@ class PlaySession:
             "paused",
         ):
             self._engine.cancel(reason)
+        self._disarm_time_budget()
 
     def events(self, timeout_ms: int = 5000, max_consecutive_timeouts: int = 999):
         if self._engine is None:

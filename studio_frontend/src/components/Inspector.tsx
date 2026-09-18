@@ -1,6 +1,7 @@
 // studio_frontend/src/components/Inspector.tsx
 import { useEffect, useState } from "react";
 import { useStudioStore } from "../store";
+import AgentUiPanel from "./AgentUiPanel";
 import { api } from "../api";
 import Markdown from "./Markdown";
 import type { GameCard, Step } from "../types";
@@ -113,12 +114,15 @@ export default function Inspector({ projectId }: { projectId: string }) {
   }, [selectedStepName]);
 
   if (!selectedStep) {
+    // 没选中节点时这块地方以前只写着"选择一个节点查看属性"。整个 agent 的
+    // 界面文案（标题、说明、入口输入的 label）没有别的地方可挂——它们不属于
+    // 任何一个 step——正好放这儿。
     return (
       <div className="h-full w-full border-l border-gray-200 bg-white flex flex-col">
         <div className="px-4 py-3 border-b border-gray-200 font-medium text-gray-700 shrink-0">
-          Inspector
+          Agent 界面
         </div>
-        <div className="p-4 text-sm text-gray-400">选择一个节点查看属性</div>
+        <AgentUiPanel projectId={projectId} />
       </div>
     );
   }

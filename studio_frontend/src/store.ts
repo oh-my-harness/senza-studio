@@ -43,9 +43,16 @@ interface StudioStore {
   runFinishedState: string | null;
   logs: LogEntry[];
   toolCalls: ToolCallEntry[];
-  // checker step 暂停等待人工审批时，是哪个 step——非空时 GameView 显示
+  // checker step 暂停等待人工审批时，是哪个 step——非空时 Game view 显示
   // 审批按钮。
   pausedStepId: string | null;
+  // "Play Paused"（从头单步）的标志。Play 按钮只负责**进入运行视图**，真正
+  // 的 play 消息是 Game view 里的开始表单发的（那个表单就是导出产品的第一屏，
+  // 得在 Studio 里能预览到），所以这个标志要在两者之间传一程。
+  playStartPaused: boolean;
+  // Play 期间的错误。导出产品把错误显示在界面上，Game view 是它的预览，
+  // 所以也得有——只记在日志面板里的话，两边看到的就不是一回事了。
+  playError: string | null;
   // engine 是否处于暂停状态（不管原因——checker 审批或控制条手动
   // Pause/Step 都会让这个变 true）。跟 pausedStepId 是两个不同维度：
   // 后者专门只在 checker 审批时才非空，用来单独控制审批横幅。
@@ -57,6 +64,14 @@ interface StudioStore {
   // 下一条执行记录的全局序号(裁剪不回退)
   execSeq: number;
   enginePaused: boolean;
+  // 会话列表。从 ChatPanel 的局部 state 提上来（Phase 7 切片三）：WebSocket
+  // 的生命周期要从 ChatPanel 里搬出去（export 模式根本不渲染对话面板），
+  // 而消息处理器里唯一还依赖局部 state 的就是 session_switched 这一条。
+  sessions: string[];
+  activeSession: string | null;
+  // 元 agent 是否正在回复。同样是从 ChatPanel 提上来的——WebSocket 处理器
+  // 会改它，而处理器已经不住在 ChatPanel 里了。
+  streaming: boolean;
 
   setProject: (p: ProjectMeta | null) => void;
   setSpec: (s: Spec) => void;
@@ -67,6 +82,10 @@ interface StudioStore {
   appendToLastAssistant: (text: string) => void;
   selectStep: (name: string | null) => void;
   setWs: (ws: WebSocket | null) => void;
+  // 支持函数式更新：session_switched 要基于当前列表去重追加
+  setSessions: (s: string[] | ((prev: string[]) => string[])) => void;
+  setActiveSession: (s: string | null) => void;
+  setStreaming: (v: boolean) => void;
   resetPlay: () => void;
   startStep: (stepId: string, stepName: string) => void;
   appendStepText: (stepId: string, text: string) => void;
@@ -88,6 +107,8 @@ interface StudioStore {
   addToolCall: (entry: ToolCallEntry) => void;
   setToolCalls: (entries: ToolCallEntry[]) => void;
   setPausedStep: (stepId: string | null) => void;
+  setPlayStartPaused: (v: boolean) => void;
+  setPlayError: (message: string | null) => void;
   markAwaitingApproval: (stepId: string, text: string) => void;
   setEnginePaused: (paused: boolean) => void;
 }
@@ -131,6 +152,9 @@ export const useStudioStore = create<StudioStore>((set) => ({
   execSeq: 1,
   spec: { stages: [] },
   runtimeSpec: null,
+  sessions: [],
+  activeSession: null,
+  streaming: false,
   status: "idle",
   messages: [],
   selectedStepName: null,
@@ -141,6 +165,8 @@ export const useStudioStore = create<StudioStore>((set) => ({
   logs: [],
   toolCalls: [],
   pausedStepId: null,
+  playStartPaused: false,
+  playError: null,
   enginePaused: false,
 
   setProject: (project) => set({ project }),
@@ -151,6 +177,15 @@ export const useStudioStore = create<StudioStore>((set) => ({
   setMessages: (messages) => set({ messages }),
   selectStep: (selectedStepName) => set({ selectedStepName }),
   setWs: (ws) => set({ ws }),
+  setSessions: (value) =>
+    set((s) => ({
+      sessions:
+        typeof value === "function"
+          ? (value as (prev: string[]) => string[])(s.sessions)
+          : value,
+    })),
+  setActiveSession: (activeSession) => set({ activeSession }),
+  setStreaming: (streaming) => set({ streaming }),
   appendToLastAssistant: (text) =>
     set((s) => {
       const msgs = s.messages;
@@ -181,6 +216,7 @@ export const useStudioStore = create<StudioStore>((set) => ({
       execIndex: {},
       execSeq: 1,
       pausedStepId: null,
+      playError: null,
       enginePaused: false,
       // 上一次运行的展开结果不能留到下一次——spec 改了组件参数/换了组件，
       // 留着会让审批按钮和 ui 配置停在旧的展开上。
@@ -188,6 +224,8 @@ export const useStudioStore = create<StudioStore>((set) => ({
     }),
 
   setPausedStep: (pausedStepId) => set({ pausedStepId }),
+  setPlayStartPaused: (playStartPaused) => set({ playStartPaused }),
+  setPlayError: (playError) => set({ playError }),
   setEnginePaused: (enginePaused) => set({ enginePaused }),
 
   setRunFinished: (runFinishedState) => set({ runFinishedState }),

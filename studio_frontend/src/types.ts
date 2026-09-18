@@ -17,6 +17,8 @@ export interface Step {
 
 export interface Spec {
   stages: Step[];
+  /** 顶层 ui 块：导出 Agent 的标题/说明/入口输入文案。见 AgentUiPanel。 */
+  ui?: Record<string, unknown>;
 }
 
 export interface ProjectMeta {
@@ -146,3 +148,64 @@ export const EXEC_EVENT_TYPES: Record<string, true> = {
   tool_execution_end: true,
   turn_end: true,
 };
+
+export interface AgentTeamProject {
+  id: string;
+  repo_path?: string | null;
+}
+
+export interface AgentTeamTemplate {
+  id: string;
+  version: string;
+  name: string;
+  member_ids: string[];
+}
+
+export interface AgentTeamSettings {
+  models: {
+    strong: string;
+    main: string;
+    cheap: string;
+  };
+  scout_interval_secs: number;
+  base_url: string;
+  api_key_set: boolean;
+}
+
+export interface AgentTeamAgent {
+  id: string;
+  status: string;
+  phase?: string | null;
+  error?: string | null;
+  activity?: {
+    task?: string | null;
+    tools?: string[];
+  } | null;
+}
+
+export interface AgentTeamPendingMessage {
+  from?: string;
+  to: string;
+  type?: string;
+  body?: string;
+}
+
+export interface AgentTeamPulse {
+  agents: AgentTeamAgent[];
+  pending: AgentTeamPendingMessage[];
+  timers: { pending: number };
+  issues: { pending: number; confirmed: number };
+}
+
+export interface AgentTeamRecoveryFailure {
+  team_id: string;
+  reason: string;
+  detail: string;
+}
+
+export interface AgentTeamStartupRecovery {
+  status: string;
+  persisted_teams: number;
+  restored_teams: number;
+  failed_teams: AgentTeamRecoveryFailure[];
+}

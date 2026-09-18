@@ -17,6 +17,12 @@ cd "$(dirname "$0")"
 MODEL="${SENZA_STUDIO_MODEL:-}"
 BACKEND_PORT=7878
 FRONTEND_PORT=5173
+if [[ -n "${SENZA_STUDIO_API_TOKEN_FILE:-}" ]]; then
+  API_TOKEN="$(python3 -c 'import sys; print(sys.stdin.read().strip())' < "$SENZA_STUDIO_API_TOKEN_FILE")"
+  unset SENZA_STUDIO_API_TOKEN_FILE
+else
+  API_TOKEN="${SENZA_STUDIO_API_TOKEN:-$(python3 -c 'import secrets; print(secrets.token_hex(32))')}"
+fi
 
 # ── 清理函数 ────────────────────────────────────────────
 cleanup() {
@@ -133,10 +139,13 @@ fi
 if [ -n "$MODEL" ]; then
   echo "🚀 启动后端 (model=$MODEL 来自环境变量, port=$BACKEND_PORT)..."
   SENZA_STUDIO_MODEL="$MODEL" PYTHONPATH=studio_backend \
+    SENZA_STUDIO_API_TOKEN="$API_TOKEN" \
     python -m studio_backend.server &
 else
   echo "🚀 启动后端 (model 由设置面板决定, port=$BACKEND_PORT)..."
-  PYTHONPATH=studio_backend python -m studio_backend.server &
+  PYTHONPATH=studio_backend \
+    SENZA_STUDIO_API_TOKEN="$API_TOKEN" \
+    python -m studio_backend.server &
 fi
 BACKEND_PID=$!
 
@@ -154,7 +163,7 @@ done
 # ── 启动前端 ────────────────────────────────────────────
 echo "🚀 启动前端 (port=$FRONTEND_PORT)..."
 cd studio_frontend
-npm run dev &
+VITE_SENZA_STUDIO_API_TOKEN="$API_TOKEN" npm run dev &
 FRONTEND_PID=$!
 cd ..
 

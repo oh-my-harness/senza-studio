@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" role="img" aria-label="Senza Studio">
+  <defs>
+    <linearGradient id="background" x1="32" y1="24" x2="224" y2="232" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#2563eb"/>
+      <stop offset="1" stop-color="#7c3aed"/>
+    </linearGradient>
+  </defs>
+  <rect width="256" height="256" rx="56" fill="url(#background)"/>
+  <path d="M168 82c-13-11-32-17-54-17-34 0-58 17-58 44 0 59 124 35 124 94 0 28-27 45-68 45-28 0-51-8-68-24" fill="none" stroke="#fff" stroke-width="29" stroke-linecap="round"/>
+  <circle cx="194" cy="62" r="18" fill="#22d3ee"/>
+</svg>

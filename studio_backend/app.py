@@ -3,17 +3,23 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
+import stat
 import sys
 from contextlib import asynccontextmanager
+from pathlib import Path
+from mimetypes import guess_type
 
 import httpx
-from fastapi import FastAPI, File, UploadFile, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, File, Request, UploadFile, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
-from pydantic import BaseModel
+from fastapi.responses import JSONResponse, StreamingResponse
+from pydantic import BaseModel, ValidationError
 
 from .config import StudioConfig
 from .docingest import ingest
+from .export import ExportError, export_project
+from senza_studio_runtime.contract import describe_agent
 from .docs import (
     ingest_cache_path,
     resolve_doc_path,
@@ -39,6 +45,13 @@ from .settings import (
 from .spec import Spec, SpecError
 from .agent import StudioAgent
 from .agent_team import PROXY_TIMEOUT_SECONDS, install_agent_team_proxy
+from .auth import (
+    API_COOKIE_NAME,
+    http_request_is_authenticated,
+    is_valid_api_token,
+    token_matches,
+    websocket_is_authenticated,
+)
 from .ws import finalize_play, run_play_streaming, run_prompt_streaming
 
 
@@ -50,8 +63,77 @@ class UpdateSpecReq(BaseModel):
     spec: dict
 
 
+class BootstrapAuthReq(BaseModel):
+    token: str
+
+
+MAX_BOOTSTRAP_BODY_BYTES = 1024
+
+
+async def read_limited_bootstrap_body(request: Request) -> bytes:
+    chunks: list[bytes] = []
+    total_size = 0
+    async for chunk in request.stream():
+        if not chunk:
+            continue
+        total_size += len(chunk)
+        if total_size > MAX_BOOTSTRAP_BODY_BYTES:
+            raise ValueError("Bootstrap request body is too large")
+        chunks.append(chunk)
+    return b"".join(chunks)
+
+
+class ExportReq(BaseModel):
+    name: str | None = None
+
+
 class UpdateSettingsReq(BaseModel):
     values: dict
+
+
+def _open_static_file(
+    root: Path, relative_path: str
+) -> tuple[int, os.stat_result, Path] | None:
+    if not relative_path or "\\" in relative_path or "\x00" in relative_path:
+        return None
+    segments = relative_path.split("/")
+    if any(segment in ("", ".", "..") for segment in segments):
+        return None
+    if any(
+        ord(character) < 32 or ord(character) == 127
+        for segment in segments
+        for character in segment
+    ):
+        return None
+    candidate = root.joinpath(*segments)
+    try:
+        opened_metadata = candidate.lstat()
+    except OSError:
+        return None
+    if not stat.S_ISREG(opened_metadata.st_mode):
+        return None
+    try:
+        file_descriptor = os.open(
+            candidate,
+            os.O_RDONLY
+            | getattr(os, "O_NONBLOCK", 0)
+            | getattr(os, "O_NOFOLLOW", 0),
+        )
+    except OSError:
+        return None
+    try:
+        metadata = os.fstat(file_descriptor)
+        if (
+            not stat.S_ISREG(metadata.st_mode)
+            or metadata.st_dev != opened_metadata.st_dev
+            or metadata.st_ino != opened_metadata.st_ino
+        ):
+            os.close(file_descriptor)
+            return None
+    except OSError:
+        os.close(file_descriptor)
+        return None
+    return file_descriptor, metadata, candidate
 
 
 # ── 全局状态 ──────────────────────────────────────────────
@@ -81,6 +163,16 @@ def _get_or_load_project(config: StudioConfig, project_id: str) -> dict:
 def create_app(config: StudioConfig | None = None) -> FastAPI:
     check_sdk_pin()
     cfg = config or StudioConfig.from_env()
+    if not is_valid_api_token(cfg.api_token):
+        raise ValueError(
+            "Senza Studio API token is required; set "
+            "SENZA_STUDIO_API_TOKEN or SENZA_STUDIO_API_TOKEN_FILE"
+        )
+    static_root = None
+    if cfg.static_dir:
+        static_root = Path(cfg.static_dir).resolve(strict=True)
+        if not static_root.is_dir():
+            raise ValueError("Senza Studio static directory is invalid")
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
@@ -92,16 +184,28 @@ def create_app(config: StudioConfig | None = None) -> FastAPI:
         yield
         await app.state.agent_team_client.aclose()
 
-    app = FastAPI(title="Senza Studio", lifespan=lifespan)
+    app = FastAPI(
+        title="Senza Studio",
+        lifespan=lifespan,
+        docs_url=None,
+        redoc_url=None,
+        openapi_url=None,
+    )
 
     @app.middleware("http")
-    async def reject_foreign_origin(request, call_next):
+    async def enforce_local_api_security(request, call_next):
         origin = request.headers.get("origin")
         if origin is not None and origin not in cfg.allowed_origins:
             return JSONResponse(
                 status_code=403,
                 content={"detail": "Origin is not allowed"},
             )
+        if request.url.path not in ("/api/health", "/auth/bootstrap") and not (
+            http_request_is_authenticated(request, cfg.api_token)
+        ):
+            response = JSONResponse(status_code=401, content={"detail": "Not authenticated"})
+            response.headers["WWW-Authenticate"] = "Bearer"
+            return response
         return await call_next(request)
 
     app.add_middleware(
@@ -109,12 +213,14 @@ def create_app(config: StudioConfig | None = None) -> FastAPI:
         allow_origins=list(cfg.allowed_origins),
         allow_methods=["*"],
         allow_headers=["*"],
+        allow_credentials=True,
     )
 
     install_agent_team_proxy(
         app,
         cfg.agent_team_descriptor,
         cfg.allowed_origins,
+        cfg.api_token,
     )
 
     # 先快照"哪些设置项来自真正的环境变量"，再注入 settings.json——顺序不
@@ -165,6 +271,36 @@ def create_app(config: StudioConfig | None = None) -> FastAPI:
     @app.get("/api/health")
     async def health():
         return {"status": "ok"}
+
+
+    # ── Authentication ────────────────────────────────────
+    @app.post("/auth/bootstrap")
+    async def bootstrap_auth(request: Request):
+        try:
+            body = await read_limited_bootstrap_body(request)
+            req = BootstrapAuthReq.model_validate_json(body)
+        except ValueError:
+            return JSONResponse(
+                status_code=413,
+                content={"detail": "Bootstrap request body is too large"},
+            )
+        except json.JSONDecodeError:
+            return JSONResponse(status_code=422, content={"detail": "Invalid JSON"})
+        except ValidationError:
+            return JSONResponse(status_code=422, content={"detail": "Invalid request"})
+        if not token_matches(req.token, cfg.api_token):
+            return JSONResponse(status_code=401, content={"detail": "Not authenticated"})
+        response = JSONResponse({"status": "ok"})
+        response.set_cookie(
+            API_COOKIE_NAME,
+            cfg.api_token,
+            path="/",
+            httponly=True,
+            samesite="strict",
+        )
+        response.headers["Cache-Control"] = "no-store"
+        return response
+
 
     # ── Settings ─────────────────────────────────────────
     @app.get("/api/settings")
@@ -315,6 +451,62 @@ def create_app(config: StudioConfig | None = None) -> FastAPI:
             "ok": result.get("kind") != "error",
         }
 
+    # Agent 界面的构建产物（studio_frontend/agent/ → dist-agent/）。**不是**
+    # Studio 自己的 dist：导出的是做好的 agent，不是做它用的编辑器，DAG /
+    # Inspector / Play 控制条不该出现在交付物里。两者是两次独立的 vite
+    # build，所以编辑器的代码根本没打进导出包。
+    # dev 模式下可能还没 build 过，那就导出一个没有网页界面的项目，并在
+    # 响应里说明。
+    WEBUI_DIST = Path(__file__).resolve().parent.parent / "studio_frontend" / "dist-agent"
+
+    @app.post("/api/projects/{project_id}/export")
+    async def export_project_endpoint(project_id: str, req: ExportReq):
+        """导出成可独立运行的项目目录。
+
+        用内存里的 spec 而不是 pipeline.yaml：用户要导出的是他现在屏幕上那份。
+        """
+        state = _get_or_load_project(cfg, project_id)
+        try:
+            target, with_webui, missing_wheels = export_project(
+                state["project"], state["spec"], name=req.name, webui_dist=WEBUI_DIST
+            )
+        except ExportError as exc:
+            return JSONResponse(status_code=400, content={"detail": str(exc)})
+        notes: list[str] = []
+        if not with_webui:
+            # 没带上前端不是失败，但用户得知道——否则跑起来看到的是空页面
+            notes.append(
+                "没有找到 Agent 界面的构建产物，导出的项目暂时没有网页界面。"
+                "在 studio_frontend/ 里跑一次 npm run build 再导出即可。"
+            )
+        if missing_wheels:
+            # 同理：目录还是能用，只是不能整个拷给别人直接装
+            notes.append(
+                "这几个依赖没能打进 vendor/：" + "、".join(missing_wheels)
+                + "。导出的项目需要自己解决它们才能安装。"
+            )
+        return {
+            "path": str(target),
+            "with_webui": with_webui,
+            "missing_wheels": missing_wheels,
+            "note": "\n".join(notes) or None,
+        }
+
+    @app.get("/api/projects/{project_id}/agent")
+    async def get_agent_contract(project_id: str):
+        """Game view 的渲染契约——和导出 Agent 的 GET /api/agent 完全同构，
+        由同一个 describe_agent 生成。
+
+        Game view 就是导出产品的预览，所以它不该自己去翻 spec 算 ui.display /
+        审批选项/标签：那等于把同一套规则实现两遍，两份实现迟早不一样（已经
+        踩过一次）。画布要的那份结构信息走 expanded_spec，和这里井水不犯河水。
+        """
+        state = _get_or_load_project(cfg, project_id)
+        return describe_agent(
+            state["spec"].get_current_spec(),
+            str(state["project"].meta.get("name") or "Agent"),
+        )
+
     @app.get("/api/projects/{project_id}/expanded_spec")
     async def get_expanded_spec(project_id: str):
         """展开能力组件之后的 spec——画布画组件 group 用。
@@ -385,6 +577,13 @@ def create_app(config: StudioConfig | None = None) -> FastAPI:
     # ── WebSocket ────────────────────────────────────────
     @app.websocket("/ws/projects/{project_id}")
     async def project_ws(websocket: WebSocket, project_id: str):
+        origin = websocket.headers.get("origin")
+        if origin is not None and origin not in cfg.allowed_origins:
+            await websocket.close(code=1008)
+            return
+        if not websocket_is_authenticated(websocket, cfg.api_token):
+            await websocket.close(code=1008)
+            return
         await websocket.accept()
         state = _get_or_load_project(cfg, project_id)
         agent = state["agent"]
@@ -531,6 +730,34 @@ def create_app(config: StudioConfig | None = None) -> FastAPI:
                 # 运行已自然结束但用户没点 Stop 就断开了连接——项目状态
                 # 不该永远卡在 playing（下次打开这个项目会显示"运行中"）。
                 await finalize_play(websocket, project)
+
+    if static_root is not None:
+        @app.get("/{full_path:path}")
+        async def serve_static_file(full_path: str):
+            opened_file = _open_static_file(
+                static_root, full_path if full_path else "index.html"
+            )
+            if opened_file is None:
+                return JSONResponse(status_code=404, content={"detail": "Not found"})
+            file_descriptor, metadata, file_path = opened_file
+            media_type = guess_type(file_path.name)[0] or "application/octet-stream"
+            headers = {
+                "Cache-Control": "no-store",
+                "Content-Length": str(metadata.st_size),
+            }
+            if file_path.relative_to(static_root).parts[0] == "assets":
+                headers["Cache-Control"] = "public, max-age=31536000, immutable"
+
+            def static_file_chunks():
+                with os.fdopen(file_descriptor, "rb") as static_file:
+                    while chunk := static_file.read(64 * 1024):
+                        yield chunk
+
+            return StreamingResponse(
+                static_file_chunks(),
+                media_type=media_type,
+                headers=headers,
+            )
 
 
     return app

@@ -170,6 +170,7 @@ def test_spec_tools_factory_returns_tools_with_names():
         "set_step_property",
         "bind_tool",
         "set_ui_config",
+        "set_agent_ui",
         "get_current_spec",
         "validate_spec",
     }

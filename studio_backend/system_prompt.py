@@ -70,6 +70,14 @@ _RULES = """\
   For table/chart, ui.fields names which of this step's structured output fields to render
   (e.g. fields extracted from an agent's trailing JSON, or a tool's dict return) — it does NOT
   declare workflow inputs, only which already-produced fields a table/chart card shows.
+  Use approval_form on a checker step to show those fields as a labelled form above the
+  decision buttons, so the reviewer sees the facts rather than a wall of prose.
+  Steps set to "none" are hidden from the end user entirely — use it for internal plumbing.
+- Product UI: use set_agent_ui to set the title, the one-line description, and the
+  label/placeholder/multiline of each entry input. This is the copy an end user reads in the
+  exported agent; Studio's Game view renders exactly the same thing, so it doubles as the
+  preview. Default labels are derived from the variable name ("customer_email" → "Customer
+  email"), which is fine for a draft but not for something you hand to someone.
 - Use get_current_spec to review the spec before making changes.
 - Use validate_spec to check completeness after modifications.
 
@@ -84,7 +92,8 @@ _RULES = """\
 - bind_tool(step, tool_ref) — bind a prefab tool to a step
 - add_component(name, component, params?, description?) — add a capability component reference
   as a step (expands into real steps at run time)
-- set_ui_config(step, display, fields?) — set UI display config
+- set_ui_config(step, display, fields?) — set UI display config for one step
+- set_agent_ui(title?, description?, inputs?) — set the product UI copy for the whole agent
 - get_current_spec() — read current spec as JSON
 - validate_spec() — validate spec completeness
 

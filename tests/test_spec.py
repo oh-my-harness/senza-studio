@@ -202,3 +202,57 @@ def test_validate_rejects_step_with_neither_type_nor_component():
     ]})
     with pytest.raises(SpecError, match="no valid type"):
         spec.validate()
+
+
+# ── 顶层 ui 块（导出 Agent 的界面文案）─────────────────────
+
+
+def _ui_spec():
+    return Spec({"stages": [{"name": "done", "type": "terminal", "message": "完"}]})
+
+
+def test_set_agent_ui_is_incremental():
+    """元 agent 分几轮逐步完善界面文案是常态（先起标题，后补输入提示）。
+    每次都要求它把整块重发一遍的话，必然会有一轮把之前写好的冲掉。"""
+    spec = _ui_spec()
+    spec.set_agent_ui(title="客服工单处理")
+    spec.set_agent_ui(inputs={"customer_email": {"label": "客户邮件"}})
+    spec.set_agent_ui(inputs={"customer_email": {"multiline": False}})
+    spec.set_agent_ui(description="粘贴客户邮件")
+
+    ui = spec.get_current_spec()["ui"]
+    assert ui["title"] == "客服工单处理"
+    assert ui["description"] == "粘贴客户邮件"
+    assert ui["inputs"]["customer_email"] == {"label": "客户邮件", "multiline": False}
+
+
+def test_set_agent_ui_rejects_unknown_input_keys():
+    """拼错的键名不会让流程跑不起来（契约那边一律当没写），所以必须在写入时
+    就报——否则作者改了半天文案没生效，只能靠肉眼比对才发现是拼错了。"""
+    spec = _ui_spec()
+    with pytest.raises(SpecError, match="unknown keys"):
+        spec.set_agent_ui(inputs={"x": {"lable": "typo"}})
+
+
+def test_validate_rejects_a_malformed_ui_block():
+    """手写 / LLM 写出来的 spec 也要挡住，不只是走 set_agent_ui 那条路。"""
+    with pytest.raises(SpecError, match="unknown keys"):
+        Spec(
+            {
+                "stages": [{"name": "done", "type": "terminal", "message": "完"}],
+                "ui": {"titel": "typo"},
+            }
+        ).validate()
+
+    with pytest.raises(SpecError, match="must be an object"):
+        Spec(
+            {
+                "stages": [{"name": "done", "type": "terminal", "message": "完"}],
+                "ui": "chat",
+            }
+        ).validate()
+
+
+def test_validate_accepts_a_spec_without_a_ui_block():
+    """ui 是可选的——绝大多数 spec 用默认文案就够了。"""
+    _ui_spec().validate()
