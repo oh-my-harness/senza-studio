@@ -98,6 +98,11 @@ export function useProjectSocket(projectId: string | null) {
         // 跑完了（成功或失败）不自动退出 playing——留给用户自己看完结果
         // 再点 Stop。真正回到 editing 由下面的 play_stopped 触发。
         setRunFinished(event.state);
+        // 终态意味着任何挂起的审批卡片都不再可操作（典型：执行时间护栏
+        // 在 HITL 等待期间到期并取消了引擎）。不清掉的话，过期的审批按钮
+        // 会留在界面上，点下去会被后端当作过期决定忽略。
+        setPausedStep(null);
+        setEnginePaused(false);
         if (event.state === "succeeded") {
           addLog("info", "✅ 运行成功完成");
         }
