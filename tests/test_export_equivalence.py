@@ -33,6 +33,7 @@ SPEC = {
     "ui": {
         "title": "退款审批",
         "description": "确认之后自动退款",
+        "theme": {"accent": "#7c3aed"},
         "inputs": {"reason": {"label": "退款理由", "multiline": False}},
     },
     "stages": [
@@ -282,6 +283,10 @@ def test_studio_and_export_serve_the_same_agent_contract(tmp_path):
     # 顺带确认这份契约确实带着作者写的文案，而不是两边同样地回了默认值
     assert from_studio["title"] == "退款审批"
     assert from_studio["description"] == "确认之后自动退款"
+    # 形态和主题也必须是同一份：Game view 里预览的是深色紧凑看板、导出出来
+    # 却是浅色表单，那预览就白做了
+    assert from_studio["layout"] == "form"  # 没有 table/chart，推导成表单
+    assert from_studio["theme"]["accent"] == "#7c3aed"
     _reset_state()
 
 

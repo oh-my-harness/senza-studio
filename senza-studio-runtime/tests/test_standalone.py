@@ -205,3 +205,134 @@ def test_event_poll_keeps_the_same_silence_budget():
     assert budget_seconds >= 4800, "静默预算被缩短了，慢的 LLM step 会被误杀"
     # 终态发现延迟直接就是这个间隔；超过 1s 用户就能感觉到按钮"卡"在上一个状态
     assert stream.POLL_INTERVAL_MS <= 500
+
+
+# ── 形态推导与主题 ──────────────────────────────────────
+
+
+def _stage(name, display, terminal=False, **extra):
+    stage = {"name": name, "ui": {"display": display}, **extra}
+    stage["type"] = "terminal" if terminal else extra.pop("type", "tool")
+    if terminal:
+        stage["message"] = "完"
+    return stage
+
+
+def test_layout_inference_ignores_terminal_steps():
+    """每个 spec 都必须有终点，而终点通常没配 ui（默认就是 chat）。把它算进去
+    的话，"有面板且没有正文"这条规则几乎永远不会命中——数据看板也会被判成
+    表单。"""
+    from senza_studio_runtime.contract import describe_steps, infer_layout
+
+    dashboard = {
+        "stages": [
+            _stage("pull", "table", next_on_success="trend"),
+            _stage("trend", "chart", next_on_success="done"),
+            {"name": "done", "type": "terminal", "message": "完"},  # 没配 ui
+        ]
+    }
+    assert infer_layout(describe_steps(dashboard)) == "dashboard"
+
+
+def test_layout_inference_treats_prose_as_a_form_signal():
+    """有一段要读的正文就不是看板——看板是用来一眼扫完的。"""
+    from senza_studio_runtime.contract import describe_steps, infer_layout
+
+    mixed = {
+        "stages": [
+            _stage("pull", "table", next_on_success="summary"),
+            _stage("summary", "chat", next_on_success="done"),
+            {"name": "done", "type": "terminal", "message": "完"},
+        ]
+    }
+    assert infer_layout(describe_steps(mixed)) == "form"
+
+
+def test_layout_inference_is_neutral_about_status_and_approval():
+    """status 是进度提示，approval_form 是审批门——数据看板一样可以有这两样，
+    它们不该把形态推回表单。"""
+    from senza_studio_runtime.contract import describe_steps, infer_layout
+
+    spec = {
+        "stages": [
+            _stage("fetching", "status", next_on_success="gate"),
+            {
+                "name": "gate",
+                "type": "checker",
+                "ui": {"display": "approval_form"},
+                "next_on_approve": "pull",
+                "next_on_reject": "done",
+            },
+            _stage("pull", "table", next_on_success="done"),
+            {"name": "done", "type": "terminal", "message": "完"},
+        ]
+    }
+    assert infer_layout(describe_steps(spec)) == "dashboard"
+
+
+def test_unconfigured_agents_stay_on_the_default_layout():
+    """一个 ui 都没配过的 agent 不该突然变成一屏看板。猜错的代价是作者去
+    Inspector 里改一下，比"看起来完全不是我做的那个东西"轻得多。"""
+    from senza_studio_runtime.contract import describe_steps, infer_layout
+
+    bare = {
+        "stages": [
+            {"name": "a", "type": "agent", "prompt_template": "x", "next_on_success": "done"},
+            {"name": "done", "type": "terminal", "message": "完"},
+        ]
+    }
+    assert infer_layout(describe_steps(bare)) == "form"
+
+
+def test_explicit_layout_beats_inference():
+    from senza_studio_runtime.contract import describe_agent
+
+    spec = {
+        "ui": {"layout": "form"},
+        "stages": [
+            _stage("pull", "table", next_on_success="done"),
+            {"name": "done", "type": "terminal", "message": "完"},
+        ],
+    }
+    assert describe_agent(spec)["layout"] == "form"
+    del spec["ui"]["layout"]
+    assert describe_agent(spec)["layout"] == "dashboard"
+
+
+def test_theme_fills_defaults_and_ignores_nonsense():
+    """spec 是人和 LLM 一起编辑的。一个拼错的键名、一个不认识的取值，最多是
+    那一项不生效，不该让整个界面白屏——所以运行时这一层是宽松的（编辑时由
+    Spec.validate 报错，见 tests/test_spec.py）。"""
+    from senza_studio_runtime.contract import DEFAULT_THEME, describe_theme
+
+    assert describe_theme({}) == DEFAULT_THEME
+    theme = describe_theme(
+        {"ui": {"theme": {"accent": "#0f766e", "mode": "sepia", "bogus": 1}}}
+    )
+    assert theme["accent"] == "#0f766e"
+    assert theme["mode"] == DEFAULT_THEME["mode"]  # 不认的取值退回默认
+    assert "bogus" not in theme
+
+    # ui 整个写成一个字符串也不能炸
+    assert describe_theme({"ui": "chat"}) == DEFAULT_THEME
+
+
+def test_entry_inputs_cover_tool_steps():
+    """以 tool step 开头的流程（数据看板那一类：先拉数，参数是"查哪个区域"）
+    也要能问出参数。render_tool_args 本来就认 {{var}}，只是发现的那一侧漏了，
+    结果是界面不问、参数永远是空字符串。"""
+    from senza_studio_runtime.play import get_entry_inputs
+
+    spec = {
+        "stages": [
+            {
+                "name": "pull",
+                "type": "tool",
+                "tool": "sales",
+                "tool_args": {"region": "{{region}}", "limit": 10},
+                "next_on_success": "done",
+            },
+            {"name": "done", "type": "terminal", "message": "完"},
+        ]
+    }
+    assert get_entry_inputs(spec) == ["region"]

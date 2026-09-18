@@ -73,7 +73,14 @@ _RULES = """\
   Use approval_form on a checker step to show those fields as a labelled form above the
   decision buttons, so the reviewer sees the facts rather than a wall of prose.
   Steps set to "none" are hidden from the end user entirely — use it for internal plumbing.
-- Product UI: use set_agent_ui to set the title, the one-line description, and the
+- Product UI shape: set_agent_ui also takes `layout` — "form" (entry form → timeline of
+  step results → answer; right for one-shot question/answer agents) or "dashboard" (no
+  timeline, the table/chart steps as a panel grid; right when the output is data rather
+  than prose). Leave it unset and the shape is inferred from the flow: table/chart steps
+  and no chat steps => dashboard, otherwise form. Set it only when that inference is wrong.
+  `theme` (accent colour, mode light/dark, density, logo URL) exists so a delivered agent
+  looks like the recipient's product — set it when the user tells you whose product it is.
+- Product UI copy: use set_agent_ui to set the title, the one-line description, and the
   label/placeholder/multiline of each entry input. This is the copy an end user reads in the
   exported agent; Studio's Game view renders exactly the same thing, so it doubles as the
   preview. Default labels are derived from the variable name ("customer_email" → "Customer
@@ -93,7 +100,8 @@ _RULES = """\
 - add_component(name, component, params?, description?) — add a capability component reference
   as a step (expands into real steps at run time)
 - set_ui_config(step, display, fields?) — set UI display config for one step
-- set_agent_ui(title?, description?, inputs?) — set the product UI copy for the whole agent
+- set_agent_ui(title?, description?, inputs?, layout?, theme?) — set the product UI for
+  the whole agent: copy, overall shape (form/dashboard) and visual identity
 - get_current_spec() — read current spec as JSON
 - validate_spec() — validate spec completeness
 

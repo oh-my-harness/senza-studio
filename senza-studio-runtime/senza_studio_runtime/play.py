@@ -138,12 +138,23 @@ def get_entry_inputs(spec_dict: dict) -> list[str]:
     stages = preprocess_spec(spec_dict).get("stages", [])
     if not stages:
         return []
-    template = stages[0].get("prompt_template", "")
+    entry = stages[0]
+
+    # prompt_template（agent/checker step）和 tool_args（tool step）——入口
+    # step 声明自己需要什么输入，就这两个地方。只扫前者的话，以 tool step 开
+    # 头的流程（数据看板那一类：先拉数，参数是"查哪个区域"）永远问不出参数，
+    # 而 render_tool_args 那边其实是认 {{var}} 的，等于输入永远是空字符串。
+    sources = [entry.get("prompt_template", "")]
+    tool_args = entry.get("tool_args")
+    if isinstance(tool_args, dict):
+        sources.extend(v for v in tool_args.values() if isinstance(v, str))
+
     seen: list[str] = []
-    for match in _TEMPLATE_VAR_RE.finditer(template):
-        key = match.group(1)
-        if key not in seen:
-            seen.append(key)
+    for source in sources:
+        for match in _TEMPLATE_VAR_RE.finditer(source):
+            key = match.group(1)
+            if key not in seen:
+                seen.append(key)
     return seen
 
 

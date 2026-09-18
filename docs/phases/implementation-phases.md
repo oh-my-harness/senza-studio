@@ -306,6 +306,7 @@ Phase 被标成了已实现而实际上点不到。补成 2 + 2b 两行，免得
 | 5. 导出产物改成 Agent 本身 | 独立的 Agent 界面（`studio_frontend/agent/` → `dist-agent/`，另一次 vite build）、runtime 的接口换成产品契约（`GET /api/agent` + `WS /ws/run`）、Studio 前端里的 export 模式代码删干净 | 已实现 |
 | 6. 一条命令跑起来 | 生成 `run.sh`：找 Python、建 venv、按指纹装依赖、生成并校验 `.env`、挑空闲端口、起服务并开浏览器；重新导出保留 `.env` / `.venv` | 已实现 |
 | 7. Game view = 导出产品的预览 | 界面契约（`contract.describe_agent`）两边共用；`src/player/AgentRunView` 一个组件两个宿主；入口表单搬进 Game view；spec 顶层 `ui` 块 + Inspector 编辑 + `set_agent_ui` 工具；实现 `approval_form` | 已实现 |
+| 8. 多种产品形态 | `ui.layout`（form / dashboard，不写就按流程推导）+ `ui.theme`（主色/明暗/密度/logo，落成 CSS 变量）；`src/player/layouts/` 一种形态一个文件，收同一份 LayoutProps | 已实现 |
 
 切片 1 之所以对外看不出变化：它是纯重构，原有 411 个测试一个不改地全绿，
 用户可见的 Export 功能在切片 2/3。切片 4 是这一阶段真正的验收，跑通了才算完。
@@ -335,6 +336,40 @@ DAG、Inspector、Play / Play Paused / Stop / Pause / Step、工具调用面板�
   展示）——作者在 Studio 里看到的效果就是最终用户看到的效果。
 - Studio 前端里的 export 模式代码（`/api/mode` 探测、`isExport`、Inspector
   `readOnly`）全部删除：导出包已经不跑这份前端了，留着只会误导。
+
+### 切片 8：不同的 agent 该长成不同的产品
+
+一问一答的 agent 和数据复盘的 agent 没有共同的"正确布局"：前者要顺着读下来，
+后者要一眼扫完。所以形态做成**有名字的预设**，不做可自由拼版的 DSL——那是一门
+要设计、要校验、还要让元 agent 写得好的新语言，而现在连第三种形态都还没出现。
+
+- `ui.layout`：`form`（填表 → 时间线 → 结果）或 `dashboard`（无时间线，
+  table/chart 铺成面板网格，status 收成顶上一条进度，chat 和结果占满整行）。
+  不写就由 `contract.infer_layout` 按流程形态推导：**非终点** step 里有
+  table/chart 且没有 chat → dashboard，否则 form。排除终点是因为每个 spec 都
+  必须有终点而终点通常没配 ui（默认 chat），算进去这条规则几乎永远不命中；
+  status / none / approval_form 一律中立——进度提示、作者明说不给人看的管道、
+  审批门，都不能决定形态。保守是故意的：一个 ui 都没配过的 agent 不该突然变成
+  一屏看板。
+- `ui.theme`：主色 / 明暗 / 密度 / logo，前端落成 CSS 变量。所有 layout、所有
+  卡片只认变量，不认具体颜色——换主题不用碰任何组件，加形态也自动就是对的配色。
+  accent 上的文字按感知亮度自动选黑白（作者填一个浅色品牌色时白字会糊掉）。
+- `src/player/layouts/` 一种形态一个文件，收**同一份** `LayoutProps`。形态之间
+  因此不可能对同一次运行给出不一致的说法。
+- 谁来选：元 agent 在建 agent 时按流程形态设，作者在 Inspector 里覆盖（下拉框
+  里有"自动"一项，选它就是不写这个键——写死一个跟推导结果相同的值看着没差别，
+  但流程改了之后它就不会跟着变了）。
+
+顺带补了两个洞：step 的 `ui.title`（看板里每块面板顶上就是它，以前只能用
+step 名推；Inspector 里现在可以改），以及 `get_entry_inputs` 只扫
+`prompt_template`——以 tool step 开头的流程（数据看板那一类：先拉数，参数是
+"查哪个区域"）永远问不出参数，而 `render_tool_args` 那边其实是认 `{{var}}` 的，
+等于输入永远是空字符串。这个洞是搭第一个看板 demo 时当场撞上的。
+
+**没做的部分**（提问时一并摆出来了，这一轮明确不做）：评审队列（需要运行记录
+持久化 + 可被另一个人接手）、对话与流程中途追问（需要跨轮上下文，以及让暂停的
+step 能收数据而不只是选一条分支——`submit_decision` 现在只写一个路由名）。
+后两样不是排版问题，是引擎能力问题，做之前任何"聊天界面"都只是个壳。
 
 ### 切片 7：Game view 就是导出产品的预览
 
