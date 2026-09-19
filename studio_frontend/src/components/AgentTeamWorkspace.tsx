@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { api } from "../api";
 import {
   connectAgentTeamEvents,
@@ -8,12 +8,17 @@ import {
 import type {
   AgentTeamProject,
   AgentTeamPulse,
+  AgentTeamMember,
   AgentTeamStartupRecovery,
   AgentTeamSettings,
   AgentTeamTemplate,
 } from "../types";
 
 const TEAM_ID_PATTERN = /^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$/;
+
+type AgentTeamMemberDraft = Omit<AgentTeamMember, "toolkits"> & {
+  toolkits: string;
+};
 
 const RECOVERY_REASONS: Record<string, string> = {
   invalid_spec: "配置无效",
@@ -30,6 +35,12 @@ function agentStatusClass(status: string) {
 }
 
 function eventSummary(event: AgentTeamEvent) {
+  if (event.type === "team_message") {
+    return `${event.from ?? "unknown"} → ${event.to ?? "unknown"}: ${event.text ?? ""}`;
+  }
+  if (event.type === "agent_thought") {
+    return `${event.agent ?? "unknown"} thinking: ${event.text ?? ""}`;
+  }
   if (event.type === "operator_msg") {
     return `${event.from ?? "unknown"} → ${event.to ?? "unknown"}: ${event.text ?? ""}`;
   }
@@ -42,6 +53,13 @@ function eventSummary(event: AgentTeamEvent) {
   return event.type;
 }
 
+function parseToolkits(value: string) {
+  return value
+    .split(",")
+    .map((toolkit) => toolkit.trim())
+    .filter(Boolean);
+}
+
 export default function AgentTeamWorkspace() {
   const [teams, setTeams] = useState<AgentTeamProject[]>([]);
   const [templates, setTemplates] = useState<AgentTeamTemplate[]>([]);
@@ -51,6 +69,7 @@ export default function AgentTeamWorkspace() {
   const [selectedTeamId, setSelectedTeamId] = useState<string | null>(null);
   const [selectedAgentId, setSelectedAgentId] = useState<string | null>(null);
   const [pulse, setPulse] = useState<AgentTeamPulse | null>(null);
+  const [members, setMembers] = useState<AgentTeamMember[]>([]);
   const [events, setEvents] = useState<AgentTeamEvent[]>([]);
   const [connectionState, setConnectionState] =
     useState<AgentTeamEventConnectionState>("connecting");
@@ -68,10 +87,30 @@ export default function AgentTeamWorkspace() {
   const [settingsScoutInterval, setSettingsScoutInterval] = useState("0");
   const [settingsApiKey, setSettingsApiKey] = useState("");
   const [messageText, setMessageText] = useState("");
+  const [messageTarget, setMessageTarget] = useState("team");
+  const [memberDraft, setMemberDraft] = useState<AgentTeamMemberDraft | null>(null);
+  const [newMember, setNewMember] = useState({
+    id: "",
+    persona: "",
+    role_label: "",
+    model: "main",
+    toolkits: "",
+  });
+  const chatEndRef = useRef<HTMLDivElement | null>(null);
 
   const selectedTeam = useMemo(
     () => teams.find((team) => team.id === selectedTeamId) ?? null,
     [teams, selectedTeamId]
+  );
+
+  const selectedMember = useMemo(
+    () => members.find((member) => member.id === selectedAgentId) ?? null,
+    [members, selectedAgentId]
+  );
+
+  const pulseByAgentId = useMemo(
+    () => new Map((pulse?.agents ?? []).map((agent) => [agent.id, agent])),
+    [pulse]
   );
 
   const loadTeams = useCallback(async () => {
@@ -127,22 +166,33 @@ export default function AgentTeamWorkspace() {
     }
   }, []);
 
+  const loadMembers = useCallback(async (teamId: string) => {
+    try {
+      const loadedMembers = await api.listAgentTeamMembers(teamId);
+      setMembers(loadedMembers.members);
+    } catch (error) {
+      setActionError(error instanceof Error ? error.message : String(error));
+    }
+  }, []);
+
   useEffect(() => {
     if (!selectedTeamId) {
       setPulse(null);
+      setMembers([]);
       return;
     }
     void loadPulse(selectedTeamId);
+    void loadMembers(selectedTeamId);
     const interval = window.setInterval(() => {
       void loadPulse(selectedTeamId);
     }, 5000);
     return () => window.clearInterval(interval);
-  }, [loadPulse, selectedTeamId]);
+  }, [loadMembers, loadPulse, selectedTeamId]);
 
   useEffect(() => {
     const connection = connectAgentTeamEvents({
       onEvent: (event) => {
-        setEvents((previous) => [event, ...previous].slice(0, 50));
+        setEvents((previous) => [...previous, event].slice(-500));
         if (event.type === "issue_changed") {
           void loadTeams();
         }
@@ -152,9 +202,63 @@ export default function AgentTeamWorkspace() {
     return () => connection.close();
   }, [loadTeams]);
 
+  useEffect(() => {
+    setMemberDraft(
+      selectedMember
+        ? { ...selectedMember, toolkits: selectedMember.toolkits.join(", ") }
+        : null
+    );
+  }, [selectedMember]);
+
+  useEffect(() => {
+    if (
+      messageTarget !== "team" &&
+      !members.some((member) => member.id === messageTarget)
+    ) {
+      setMessageTarget("team");
+    }
+  }, [members, messageTarget]);
+
+  const conversationEvents = useMemo(() => {
+    if (!selectedTeamId) return [];
+    const broadcastIds = new Set<string>();
+    return events.filter((event) => {
+      if (event.project && event.project !== selectedTeamId) return false;
+      if (event.type !== "team_message" && event.type !== "agent_thought") {
+        return false;
+      }
+      if (
+        event.type === "team_message" &&
+        typeof event.broadcast_id === "string" &&
+        event.broadcast_id
+      ) {
+        if (broadcastIds.has(event.broadcast_id)) return false;
+        broadcastIds.add(event.broadcast_id);
+      }
+      return true;
+    });
+  }, [events, selectedTeamId]);
+
+  const otherEvents = useMemo(
+    () =>
+      events.filter(
+        (event) =>
+          (!event.project || event.project === selectedTeamId) &&
+          event.type !== "team_message" &&
+          event.type !== "agent_thought"
+      ),
+    [events, selectedTeamId]
+  );
+
+  useEffect(() => {
+    chatEndRef.current?.scrollIntoView({ block: "end" });
+  }, [conversationEvents.length]);
+
   const selectTeam = (teamId: string) => {
     setSelectedTeamId(teamId);
     setSelectedAgentId(null);
+    setMemberDraft(null);
+    setMessageTarget("team");
     setMessageText("");
   };
 
@@ -249,13 +353,95 @@ export default function AgentTeamWorkspace() {
     }
   };
 
+  const addMember = async () => {
+    if (!selectedTeamId) return;
+    const id = newMember.id.trim();
+    if (!TEAM_ID_PATTERN.test(id)) {
+      setActionError("成员 ID 必须以字母或数字开头，只能包含字母、数字、下划线和连字符。");
+      return;
+    }
+    if (!newMember.persona.trim()) {
+      setActionError("成员 persona 不能为空。");
+      return;
+    }
+    setBusyAction("add-member");
+    try {
+      await api.addAgentTeamMember(selectedTeamId, {
+        id,
+        persona: newMember.persona.trim(),
+        role_label: newMember.role_label.trim() || id,
+        model: newMember.model.trim() || "main",
+        toolkits: parseToolkits(newMember.toolkits),
+      });
+      setNewMember({
+        id: "",
+        persona: "",
+        role_label: "",
+        model: "main",
+        toolkits: "",
+      });
+      await Promise.all([loadMembers(selectedTeamId), loadPulse(selectedTeamId)]);
+      setSelectedAgentId(id);
+      setMessageTarget(id);
+      setActionError(null);
+    } catch (error) {
+      setActionError(error instanceof Error ? error.message : String(error));
+    } finally {
+      setBusyAction(null);
+    }
+  };
+
+  const saveMember = async () => {
+    if (!selectedTeamId || !memberDraft) return;
+    if (!memberDraft.persona.trim()) {
+      setActionError("成员 persona 不能为空。");
+      return;
+    }
+    setBusyAction(`save-member:${memberDraft.id}`);
+    try {
+      await api.updateAgentTeamMember(selectedTeamId, memberDraft.id, {
+        persona: memberDraft.persona,
+        role_label: memberDraft.role_label,
+        model: memberDraft.model,
+        toolkits: parseToolkits(memberDraft.toolkits),
+      });
+      await Promise.all([loadMembers(selectedTeamId), loadPulse(selectedTeamId)]);
+      setActionError(null);
+    } catch (error) {
+      setActionError(error instanceof Error ? error.message : String(error));
+    } finally {
+      setBusyAction(null);
+    }
+  };
+
+  const deleteMember = async (memberId: string) => {
+    if (!selectedTeamId) return;
+    if (!window.confirm(`删除成员 ${memberId}？运行时会立即停止它并更新 team.json。`)) {
+      return;
+    }
+    setBusyAction(`delete-member:${memberId}`);
+    try {
+      await api.deleteAgentTeamMember(selectedTeamId, memberId);
+      if (selectedAgentId === memberId) {
+        setSelectedAgentId(null);
+        setMessageTarget("team");
+      }
+      await Promise.all([loadMembers(selectedTeamId), loadPulse(selectedTeamId)]);
+      setActionError(null);
+    } catch (error) {
+      setActionError(error instanceof Error ? error.message : String(error));
+    } finally {
+      setBusyAction(null);
+    }
+  };
+
   const sendMessage = async () => {
-    if (!selectedTeamId || !selectedAgentId || !messageText.trim()) return;
+    if (!selectedTeamId || !messageTarget || !messageText.trim()) return;
     setBusyAction("send");
     try {
       await api.sendAgentTeamMessage(
         selectedTeamId,
-        selectedAgentId,
+        messageTarget,
         messageText.trim()
       );
       setMessageText("");
@@ -466,7 +652,7 @@ export default function AgentTeamWorkspace() {
             选择或创建一个团队
           </div>
         ) : (
-          <div className="grid min-h-0 flex-1 grid-cols-[minmax(240px,320px)_1fr] gap-4">
+          <div className="grid min-h-0 flex-1 grid-cols-[minmax(280px,340px)_minmax(360px,1fr)_minmax(260px,340px)] gap-4">
             <section className="min-h-0 overflow-y-auto rounded-xl border border-gray-200 bg-white p-4">
               <div className="flex items-center justify-between">
                 <h2 className="text-sm font-semibold text-gray-700">成员</h2>
@@ -477,36 +663,285 @@ export default function AgentTeamWorkspace() {
                   刷新
                 </button>
               </div>
-              <div className="mt-3 space-y-2" data-testid="agent-team-members">
-                {(pulse?.agents ?? []).map((agent) => (
-                  <button
-                    key={agent.id}
-                    onClick={() => setSelectedAgentId(agent.id)}
-                    className={`w-full rounded-lg border p-3 text-left ${
-                      agent.id === selectedAgentId
-                        ? "border-blue-400 bg-blue-50"
-                        : "border-gray-200 hover:bg-gray-50"
-                    }`}
-                  >
-                    <div className="flex items-center justify-between gap-2">
-                      <span className="text-sm font-medium text-gray-800">{agent.id}</span>
-                      <span
-                        className={`rounded-full px-2 py-0.5 text-xs ${agentStatusClass(agent.status)}`}
+              <form className="mt-3 space-y-2" data-testid="agent-team-add-member">
+                <input
+                  value={newMember.id}
+                  onChange={(event) =>
+                    setNewMember((current) => ({ ...current, id: event.target.value }))
+                  }
+                  placeholder="成员 ID"
+                  aria-label="新成员 ID"
+                  className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm"
+                />
+                <textarea
+                  value={newMember.persona}
+                  onChange={(event) =>
+                    setNewMember((current) => ({ ...current, persona: event.target.value }))
+                  }
+                  placeholder="性格 / persona"
+                  aria-label="新成员 persona"
+                  rows={3}
+                  className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm"
+                />
+                <input
+                  value={newMember.role_label}
+                  onChange={(event) =>
+                    setNewMember((current) => ({ ...current, role_label: event.target.value }))
+                  }
+                  placeholder="角色标签（默认使用 ID）"
+                  aria-label="新成员角色标签"
+                  className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm"
+                />
+                <input
+                  value={newMember.model}
+                  onChange={(event) =>
+                    setNewMember((current) => ({ ...current, model: event.target.value }))
+                  }
+                  placeholder="模型（strong/main/cheap）"
+                  aria-label="新成员模型"
+                  className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm"
+                />
+                <input
+                  value={newMember.toolkits}
+                  onChange={(event) =>
+                    setNewMember((current) => ({ ...current, toolkits: event.target.value }))
+                  }
+                  placeholder="工具包，逗号分隔"
+                  aria-label="新成员工具包"
+                  className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm"
+                />
+                <button
+                  type="button"
+                  onClick={addMember}
+                  disabled={busyAction === "add-member"}
+                  className="w-full rounded-lg bg-blue-500 px-3 py-2 text-sm font-medium text-white hover:bg-blue-600 disabled:opacity-50"
+                >
+                  添加成员
+                </button>
+              </form>
+
+              <div className="mt-4 space-y-2" data-testid="agent-team-members">
+                {members.map((member) => {
+                  const agent = pulseByAgentId.get(member.id);
+                  return (
+                    <div
+                      key={member.id}
+                      className={`rounded-lg border ${
+                        member.id === selectedAgentId
+                          ? "border-blue-400 bg-blue-50"
+                          : "border-gray-200 bg-white"
+                      }`}
+                    >
+                      <button
+                        onClick={() => setSelectedAgentId(member.id)}
+                        className="w-full p-3 text-left hover:bg-gray-50"
                       >
-                        {agent.status}
-                      </span>
+                        <div className="flex items-center justify-between gap-2">
+                          <span className="text-sm font-medium text-gray-800">{member.id}</span>
+                          <span
+                            className={`rounded-full px-2 py-0.5 text-xs ${agentStatusClass(
+                              agent?.status ?? "unknown"
+                            )}`}
+                          >
+                            {agent?.status ?? "unknown"}
+                          </span>
+                        </div>
+                        <p className="mt-1 truncate text-xs text-gray-500" title={member.persona}>
+                          {member.persona || "未设置 persona"}
+                        </p>
+                        <p className="mt-1 text-xs text-gray-400">
+                          {[member.role_label, member.model, member.toolkits.join(", ")]
+                            .filter(Boolean)
+                            .join(" · ")}
+                        </p>
+                        {(agent?.phase || agent?.activity?.task) && (
+                          <p className="mt-1 truncate text-xs text-gray-500">
+                            {[agent?.phase, agent?.activity?.task].filter(Boolean).join(" · ")}
+                          </p>
+                        )}
+                        {agent?.error && (
+                          <p className="mt-1 text-xs text-red-600">{agent.error}</p>
+                        )}
+                      </button>
+                      <div className="border-t border-gray-100 px-3 py-2">
+                        <button
+                          onClick={() => deleteMember(member.id)}
+                          disabled={busyAction === `delete-member:${member.id}`}
+                          className="rounded border border-red-200 px-2 py-1 text-xs text-red-600 hover:bg-red-50 disabled:opacity-50"
+                        >
+                          删除成员
+                        </button>
+                      </div>
                     </div>
-                    {(agent.phase || agent.activity?.task) && (
-                      <p className="mt-1 truncate text-xs text-gray-500">
-                        {[agent.phase, agent.activity?.task].filter(Boolean).join(" · ")}
-                      </p>
-                    )}
-                    {agent.error && <p className="mt-1 text-xs text-red-600">{agent.error}</p>}
-                  </button>
-                ))}
-                {pulse && pulse.agents.length === 0 && (
-                  <p className="text-sm text-gray-500">团队没有成员</p>
+                  );
+                })}
+                {members.length === 0 && (
+                  <p className="rounded-lg bg-gray-50 px-3 py-2 text-sm text-gray-500">
+                    团队没有成员
+                  </p>
                 )}
+              </div>
+
+              {memberDraft && (
+                <form className="mt-4 space-y-2" data-testid="agent-team-edit-member">
+                  <h3 className="text-xs font-semibold uppercase tracking-wide text-gray-500">
+                    编辑 {memberDraft.id}
+                  </h3>
+                  <input
+                    value={memberDraft.id}
+                    readOnly
+                    aria-label="成员 ID"
+                    className="w-full rounded-lg border border-gray-200 bg-gray-50 px-3 py-2 text-sm text-gray-500"
+                  />
+                  <textarea
+                    value={memberDraft.persona}
+                    onChange={(event) =>
+                      setMemberDraft((current) =>
+                        current ? { ...current, persona: event.target.value } : current
+                      )
+                    }
+                    placeholder="性格 / persona"
+                    aria-label="成员 persona"
+                    rows={4}
+                    className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm"
+                  />
+                  <input
+                    value={memberDraft.role_label}
+                    onChange={(event) =>
+                      setMemberDraft((current) =>
+                        current ? { ...current, role_label: event.target.value } : current
+                      )
+                    }
+                    placeholder="角色标签"
+                    aria-label="成员角色标签"
+                    className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm"
+                  />
+                  <input
+                    value={memberDraft.model}
+                    onChange={(event) =>
+                      setMemberDraft((current) =>
+                        current ? { ...current, model: event.target.value } : current
+                      )
+                    }
+                    placeholder="模型（strong/main/cheap）"
+                    aria-label="成员模型"
+                    className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm"
+                  />
+                  <input
+                    value={memberDraft.toolkits}
+                    onChange={(event) =>
+                      setMemberDraft((current) =>
+                        current ? { ...current, toolkits: event.target.value } : current
+                      )
+                    }
+                    placeholder="工具包，逗号分隔"
+                    aria-label="成员工具包"
+                    className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm"
+                  />
+                  <div className="flex gap-2">
+                    <button
+                      type="button"
+                      onClick={saveMember}
+                      disabled={busyAction === `save-member:${memberDraft.id}`}
+                      className="flex-1 rounded-lg bg-blue-500 px-3 py-2 text-sm font-medium text-white hover:bg-blue-600 disabled:opacity-50"
+                    >
+                      保存成员
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => deleteMember(memberDraft.id)}
+                      disabled={busyAction === `delete-member:${memberDraft.id}`}
+                      className="rounded-lg border border-red-200 px-3 py-2 text-sm text-red-600 hover:bg-red-50 disabled:opacity-50"
+                    >
+                      删除
+                    </button>
+                  </div>
+                </form>
+              )}
+            </section>
+
+            <section className="flex min-h-0 flex-col rounded-xl border border-gray-200 bg-white p-4">
+              <div className="flex items-center justify-between">
+                <h2 className="text-sm font-semibold text-gray-700">共享聊天与思考</h2>
+                <span className="text-xs text-gray-500" data-testid="agent-team-connection">
+                  {connectionState === "open" ? "已连接" : connectionState}
+                </span>
+              </div>
+              <div className="min-h-0 flex-1 overflow-y-auto rounded-xl border border-gray-200 bg-white p-4">
+                <div className="space-y-3" data-testid="agent-team-conversation">
+                  {conversationEvents.length === 0 && (
+                    <p className="text-sm text-gray-500">暂无聊天或思考过程</p>
+                  )}
+                  {conversationEvents.map((event, index) =>
+                    event.type === "team_message" ? (
+                      <article
+                        key={`${event.type}:${event.message_id ?? event.broadcast_id ?? index}`}
+                        className="rounded-lg border border-gray-200 bg-gray-50 p-3"
+                      >
+                        <div className="flex items-center justify-between gap-2 text-xs text-gray-500">
+                          <span className="font-medium text-gray-700">
+                            {event.from ?? "unknown"} → {event.to ?? "unknown"}
+                          </span>
+                          <span>{event.message_type ?? "message"}</span>
+                        </div>
+                        <p className="mt-2 whitespace-pre-wrap text-sm text-gray-800">
+                          {event.text ?? ""}
+                        </p>
+                      </article>
+                    ) : (
+                      <article
+                        key={`${event.type}:${event.message_id ?? index}`}
+                        className="rounded-lg border border-violet-200 bg-violet-50 p-3"
+                      >
+                        <div className="flex items-center justify-between gap-2 text-xs text-violet-700">
+                          <span className="font-medium">{event.agent ?? "unknown"} 思考</span>
+                          <span>thinking</span>
+                        </div>
+                        <p className="mt-2 whitespace-pre-wrap text-sm text-violet-900">
+                          {event.text ?? ""}
+                        </p>
+                      </article>
+                    )
+                  )}
+                  <div ref={chatEndRef} />
+                </div>
+              </div>
+
+              <div className="mt-4 space-y-2">
+                <select
+                  value={messageTarget}
+                  onChange={(event) => setMessageTarget(event.target.value)}
+                  aria-label="消息目标"
+                  className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm"
+                >
+                  <option value="team">发给整个团队</option>
+                  {members.map((member) => (
+                    <option key={member.id} value={member.id}>
+                      发给 {member.id}
+                    </option>
+                  ))}
+                </select>
+                <textarea
+                  value={messageText}
+                  onChange={(event) => setMessageText(event.target.value)}
+                  onKeyDown={(event) => {
+                    if (event.key === "Enter" && !event.shiftKey) {
+                      event.preventDefault();
+                      void sendMessage();
+                    }
+                  }}
+                  placeholder="输入消息；Enter 发送，Shift+Enter 换行"
+                  aria-label="团队消息"
+                  rows={3}
+                  className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm"
+                />
+                <button
+                  onClick={sendMessage}
+                  disabled={busyAction === "send" || !messageText.trim()}
+                  className="w-full rounded-lg bg-blue-500 px-4 py-2 text-sm font-medium text-white hover:bg-blue-600 disabled:opacity-50"
+                >
+                  发送
+                </button>
               </div>
             </section>
 
@@ -533,15 +968,12 @@ export default function AgentTeamWorkspace() {
               </div>
 
               <div className="min-h-0 flex-1 overflow-y-auto rounded-xl border border-gray-200 bg-white p-4">
-                <div className="flex items-center justify-between">
-                  <h2 className="text-sm font-semibold text-gray-700">事件流</h2>
-                  <span className="text-xs text-gray-500" data-testid="agent-team-connection">
-                    {connectionState === "open" ? "已连接" : connectionState}
-                  </span>
-                </div>
+                <h2 className="text-sm font-semibold text-gray-700">其它事件</h2>
                 <div className="mt-3 space-y-2" data-testid="agent-team-events">
-                  {events.length === 0 && <p className="text-sm text-gray-500">暂无事件</p>}
-                  {events.map((event, index) => (
+                  {otherEvents.length === 0 && (
+                    <p className="text-sm text-gray-500">暂无事件</p>
+                  )}
+                  {otherEvents.map((event, index) => (
                     <p
                       key={`${event.type}:${index}`}
                       className="rounded-lg bg-gray-50 px-3 py-2 text-sm text-gray-700"
@@ -549,32 +981,6 @@ export default function AgentTeamWorkspace() {
                       {eventSummary(event)}
                     </p>
                   ))}
-                </div>
-              </div>
-
-              <div className="rounded-xl border border-gray-200 bg-white p-4">
-                <label className="text-xs font-medium text-gray-600" htmlFor="agent-team-message">
-                  发送给 {selectedAgentId ?? "先选择成员"}
-                </label>
-                <div className="mt-2 flex gap-2">
-                  <input
-                    id="agent-team-message"
-                    value={messageText}
-                    onChange={(event) => setMessageText(event.target.value)}
-                    onKeyDown={(event) => {
-                      if (event.key === "Enter") void sendMessage();
-                    }}
-                    disabled={!selectedAgentId}
-                    placeholder="输入任务或消息"
-                    className="flex-1 rounded-lg border border-gray-300 px-3 py-2 text-sm disabled:bg-gray-100"
-                  />
-                  <button
-                    onClick={sendMessage}
-                    disabled={!selectedAgentId || busyAction === "send" || !messageText.trim()}
-                    className="rounded-lg bg-blue-500 px-4 py-2 text-sm font-medium text-white hover:bg-blue-600 disabled:opacity-50"
-                  >
-                    发送
-                  </button>
                 </div>
               </div>
             </section>

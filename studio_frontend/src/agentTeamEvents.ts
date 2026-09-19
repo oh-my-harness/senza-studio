@@ -5,6 +5,9 @@ export interface AgentTeamEvent {
   to?: string;
   agent?: string;
   text?: string;
+  message_type?: string;
+  message_id?: string;
+  broadcast_id?: string | null;
   [key: string]: unknown;
 }
 

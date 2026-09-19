@@ -132,6 +132,22 @@ export interface AgentTeamAgent {
   } | null;
 }
 
+export interface AgentTeamMember {
+  id: string;
+  persona: string;
+  role_label: string;
+  model: string;
+  toolkits: string[];
+}
+
+export interface AgentTeamMemberInput {
+  id: string;
+  persona: string;
+  role_label: string;
+  model: string;
+  toolkits: string[];
+}
+
 export interface AgentTeamPendingMessage {
   from?: string;
   to: string;

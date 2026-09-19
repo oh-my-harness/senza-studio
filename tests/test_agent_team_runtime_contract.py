@@ -102,8 +102,9 @@ def test_real_runtime_http_and_event_contract(tmp_path):
             agent_team_descriptor=str(descriptor_path),
             api_token=STUDIO_TOKEN,
         )
+        app = create_app(config)
         with TestClient(
-            create_app(config),
+            app,
             headers={"Authorization": f"Bearer {STUDIO_TOKEN}"},
         ) as client:
             startup = client.get("/api/team/startup")
@@ -126,6 +127,30 @@ def test_real_runtime_http_and_event_contract(tmp_path):
             )
             team_list = client.get("/api/team/projects")
             pulse = client.get("/api/team/pulse?project=ui-contract")
+            initial_members = client.get("/api/team/members?project=ui-contract")
+            added_member = client.post(
+                "/api/team/members",
+                json={
+                    "project": "ui-contract",
+                    "id": "reviewer",
+                    "persona": "严谨、直接，重视可验证结果。",
+                    "role_label": "Reviewer",
+                    "model": "main",
+                    "toolkits": ["memory"],
+                },
+            )
+            members_after_add = client.get("/api/team/members?project=ui-contract")
+            updated_member = client.put(
+                "/api/team/agent/config",
+                json={
+                    "project": "ui-contract",
+                    "agent": "reviewer",
+                    "persona": "严谨、耐心，优先给出可执行建议。",
+                    "role_label": "Senior Reviewer",
+                    "model": "strong",
+                    "toolkits": ["memory", "knowledge"],
+                },
+            )
             chat = client.post(
                 "/api/team/chat",
                 json={
@@ -134,9 +159,29 @@ def test_real_runtime_http_and_event_contract(tmp_path):
                     "text": "runtime contract smoke",
                 },
             )
+            team_chat = client.post(
+                "/api/team/chat",
+                json={
+                    "project": "ui-contract",
+                    "target": "team",
+                    "text": "team broadcast contract",
+                },
+            )
+            with client.websocket_connect("/ws/team") as events:
+                team_event = None
+                for _ in range(50):
+                    event = events.receive_json()
+                    if event.get("text") == "team broadcast contract":
+                        team_event = event
+                        break
+            deleted_member = client.delete(
+                "/api/team/members?project=ui-contract&agent=reviewer"
+            )
+            members_after_delete = client.get("/api/team/members?project=ui-contract")
             restarted = client.post("/api/team/projects/restart?id=ui-contract")
             deleted = client.delete("/api/team/projects?id=ui-contract")
             final_projects = client.get("/api/team/projects")
+
             with client.websocket_connect("/ws/team"):
                 pass
 
@@ -158,8 +203,42 @@ def test_real_runtime_http_and_event_contract(tmp_path):
         assert pulse.status_code == 200
         pulse_agents = pulse.json()["agents"]
         assert "planner" in {agent["id"] for agent in pulse_agents}
+        assert initial_members.status_code == 200
+        assert "reviewer" not in {
+            member["id"] for member in initial_members.json()["members"]
+        }
+        assert added_member.status_code == 201, added_member.text
+        assert added_member.json() == {"ok": True}
+        assert members_after_add.status_code == 200
+        members_after_add_map = {
+            member["id"]: member for member in members_after_add.json()["members"]
+        }
+        assert members_after_add_map["reviewer"] == {
+            "id": "reviewer",
+            "persona": "严谨、直接，重视可验证结果。",
+            "role_label": "Reviewer",
+            "model": "main",
+            "toolkits": ["memory"],
+        }
+        assert updated_member.status_code == 200, updated_member.text
+        assert updated_member.json()["ok"] is True
         assert chat.status_code == 202
         assert chat.json() == {"ok": True}
+        assert team_chat.status_code == 202
+        assert team_chat.json() == {"ok": True}
+        assert team_event is not None
+        assert team_event["type"] == "team_message"
+        assert team_event["project"] == "ui-contract"
+        assert team_event["from"] == "operator"
+        assert team_event["message_type"] == "broadcast"
+        assert team_event["text"] == "team broadcast contract"
+        assert isinstance(team_event["broadcast_id"], str)
+        assert deleted_member.status_code == 200
+        assert deleted_member.json() == {"ok": True}
+        assert members_after_delete.status_code == 200
+        assert "reviewer" not in {
+            member["id"] for member in members_after_delete.json()["members"]
+        }
         assert restarted.status_code == 200
         assert restarted.json() == {"ok": True}
         assert deleted.status_code == 200
@@ -167,5 +246,5 @@ def test_real_runtime_http_and_event_contract(tmp_path):
         assert final_projects.json() == {"projects": []}
         assert token not in startup.text
         assert token not in projects.text
-        assert token not in templates.text
+    assert token not in templates.text
     _reset_state()
