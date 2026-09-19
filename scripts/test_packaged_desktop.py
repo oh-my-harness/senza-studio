@@ -707,10 +707,10 @@ def set_input_value(session, aria_label, value):
             `[aria-label=${selector}], [placeholder=${selector}]`
           );
           if (!input) return false;
-          const setter = Object.getOwnPropertyDescriptor(
-            window.HTMLInputElement.prototype,
-            'value'
-          ).set;
+          const prototype = input instanceof HTMLTextAreaElement
+            ? window.HTMLTextAreaElement.prototype
+            : window.HTMLInputElement.prototype;
+          const setter = Object.getOwnPropertyDescriptor(prototype, 'value').set;
           setter.call(input, arguments[1]);
           input.dispatchEvent(new Event('input', {bubbles: true}));
           return true;
@@ -842,18 +842,17 @@ def select_team(session, team_id):
     )
 
 
-def select_planner_and_send_message(session, message):
-    click_button(session, "planner")
+def send_team_message(session, message):
     wait_for_ui(
         session,
-        "document.querySelector('#agent-team-message').disabled === false",
-        "planner selected and message input enabled",
+        "document.querySelector('[aria-label=\"团队消息\"]') !== null",
+        "team message input visible",
     )
-    set_input_value(session, "输入任务或消息", message)
+    set_input_value(session, "团队消息", message)
     click_button(session, "发送")
     wait_for_ui(
         session,
-        "document.querySelector('#agent-team-message').value === ''",
+        "document.querySelector('[aria-label=\"团队消息\"]').value === ''",
         "chat message accepted",
         timeout=20.0,
     )
@@ -874,7 +873,9 @@ def select_planner_and_send_message(session, message):
         session,
         f"""
         (() => {{
-          const text = document.querySelector('[data-testid="agent-team-events"]').textContent;
+          const text = document.querySelector(
+            '[data-testid="agent-team-conversation"]'
+          ).textContent;
           return text.includes({json.dumps(message)}) ? true : text;
         }})()
         """,
@@ -937,7 +938,7 @@ def drive_agent_team_workspace(port, team_id, message, configure, create, restar
             create_agent_team(session, team_id)
         else:
             select_team(session, team_id)
-        select_planner_and_send_message(session, message)
+        send_team_message(session, message)
         if restart:
             restart_agent_team(session, team_id)
         if delete:
