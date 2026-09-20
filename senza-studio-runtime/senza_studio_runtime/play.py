@@ -16,6 +16,7 @@ step_name -> {route_label: target} 两张表。
 """
 from __future__ import annotations
 
+import enum
 import importlib.util
 import inspect
 import json
@@ -24,6 +25,7 @@ import sys
 import threading
 import time
 import uuid
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
 
@@ -170,11 +172,41 @@ def decision_context_key(step_id: str) -> str:
     return f"__decision_{step_id}__"
 
 
-def make_judge(routes_by_name: dict[str, dict[str, str]]) -> Callable[[dict], str]:
-    """路由回调：把 executor 返回的 route_key 翻成 senza judge 的 transition 字符串。"""
+def make_judge(
+    routes_by_name: dict[str, dict[str, str]],
+    engine_ref: dict[str, Any] | None = None,
+) -> Callable[[dict], str]:
+    """路由回调：把 executor 返回的 route_key 翻成 senza judge 的 transition 字符串。
+
+    engine_ref 是晚绑定容器（跟 make_executor 的同一个约定）：V1 验证失败时
+    judge 要往共享 context 写/清 step-scoped 的修正反馈，没有 engine 写不进去。
+    """
+    _validation_engine_ref = engine_ref if engine_ref is not None else {}
 
     def play_judge(ctx: dict) -> str:
+        step_id = ctx["step_id"]
         structured = ctx.get("structured") or {}
+
+        # V1 不变量：结构化验证失败优先于一切正常路由匹配。没有这个前置
+        # 处理，失败的验证会退化成 route_key="error" → "no route for
+        # 'error'"——用户可读的诊断必须在 execute 路由匹配之前给出。
+        validation = structured.get("_validation") or {}
+        if validation.get("status") == "failed":
+            detail = str(validation.get("detail", ""))
+            feedback_key = validation_feedback_key(step_id=ctx["step_id"])
+            engine = _validation_engine_ref.get("engine")
+            if ctx.get("retry_count", 0) == 0:
+                # 第一次失败：把修正反馈写进共享 context（step-scoped），
+                # 只对紧接着的那一次重试生效（重试 attempt 开头即读+清）。
+                if engine is not None:
+                    engine.set_context_variable(feedback_key, detail)
+                return "retry"
+            # 连续第二次失败（或引擎重试上限兜底）：显式失败——不再静默
+            # 合成 "no route for 'error'"。清掉反馈，防止终态后残留。
+            if engine is not None:
+                engine.set_context_variable(feedback_key, None)
+            return f"fail:structured_output_validation_failed ({validation.get('code')}): {detail}"
+
         route_key = structured.get("route_key")
         if route_key == PENDING_APPROVAL:
             return f"pause:waiting for approval on '{ctx['step_id']}'"
@@ -396,8 +428,103 @@ def _extract_json_fields(output: str) -> tuple[dict, str]:
     return fields, clean_output
 
 
+class StructuredValidationCode(enum.Enum):
+    """结构化输出验证失败码——每个码都是一类可单独诊断的模型输出缺陷。"""
+
+    INVALID_JSON = "invalid_json"  # 没有可解析的顶层 JSON object（含截断）
+    MISSING_ROUTE = "missing_route"  # 解析成 dict 了，但没有顶层 "route"
+    ROUTE_NOT_STRING = "route_not_string"  # "route" 存在但不是字符串
+    UNKNOWN_ROUTE = "unknown_route"  # "route" 是字符串，但不在合法枚举里
+
+
+@dataclass(frozen=True)
+class StructuredValidation:
+    """结构化输出验证结果。OK 时 code == None；失败时携带人类可读的 detail。"""
+
+    code: StructuredValidationCode | None
+    detail: str = ""
+    attempt: int = 1
+    raw_head: str = ""
+
+    @property
+    def ok(self) -> bool:
+        return self.code is None
+
+    def to_dict(self) -> dict:
+        """序列化成 structured["_validation"] 的 payload。成功时不产生条目。"""
+        if self.ok:
+            return {}
+        return {
+            "status": "failed",
+            "code": self.code.value,
+            "detail": self.detail,
+            "attempt": self.attempt,
+            "raw_head": self.raw_head,
+        }
+
+
+def validation_feedback_key(step_id: str) -> str:
+    """验证失败修正反馈在共享 context 里的 key——按 step 隔离，只在该 step
+    的下一次（重试）prompt 组装时被读取并立刻清除。命名空间化是刻意的：
+    引擎的 context 是整个 workflow 生命周期共享的 Arc（Transition::Retry 不
+    重置、resume 也不清），裸的全局 key 会在重放/其它 step 间泄漏。"""
+    return f"_validation_feedback::{step_id}"
+
+
+def _validate_structured(
+    fields: Any, output: str, routes: list[str], attempt: int
+) -> StructuredValidation:
+    """对 _extract_json_fields 的产物做确定性验证。只查结构化路由契约：
+    顶层 dict、"route" 键存在且为字符串、值在合法枚举内。字段类型/额外
+    字段不验证——V1 只关心平台结构性消费的部分。"""
+    raw_head = output[:200]
+    span = _last_top_level_json_object(output)
+    if not isinstance(fields, dict) or span is None:
+        # fields 不是 dict，或解析器根本没找到可解析的顶层对象（纯散文/截断
+        # 到不可恢复）——两类都是"没有合法 JSON object"。
+        return StructuredValidation(
+            StructuredValidationCode.INVALID_JSON,
+            "response does not contain a parseable top-level JSON object",
+            attempt, raw_head,
+        )
+    if not fields:
+        # 扫描器定位到了对象 span，但 json.loads 失败（提取返回空 dict）——
+        # 结构存在但内容不是合法 JSON（比如尾逗号）。
+        try:
+            json.loads(output[span[0] : span[1]])
+        except (json.JSONDecodeError, ValueError):
+            return StructuredValidation(
+                StructuredValidationCode.INVALID_JSON,
+                "top-level JSON object found but not valid JSON",
+                attempt, raw_head,
+            )
+    if "route" not in fields:
+        return StructuredValidation(
+            StructuredValidationCode.MISSING_ROUTE,
+            f"no top-level \"route\" field (expected one of: {', '.join(routes)})",
+            attempt, raw_head,
+        )
+    route = fields["route"]
+    if not isinstance(route, str):
+        return StructuredValidation(
+            StructuredValidationCode.ROUTE_NOT_STRING,
+            f"\"route\" must be a string, got {type(route).__name__}",
+            attempt, raw_head,
+        )
+    if route not in routes:
+        return StructuredValidation(
+            StructuredValidationCode.UNKNOWN_ROUTE,
+            f"route '{route}' not in [{', '.join(routes)}]",
+            attempt, raw_head,
+        )
+    return StructuredValidation(None, attempt=attempt)
+
+
 def _append_routing_instruction(prompt: str, routes: list[str]) -> str:
     """多路由时，要求 LLM 在回答末尾用一行 JSON 声明选中的路由。
+
+    routes 来自 routes_by_name（next_on_* 派生）——V1 起这就是验证器的
+    合法枚举，prompt 里的措辞和代码验证用同一份来源，不再有两处各写各的。
 
     如果 prompt_template 本身已经要求了别的 JSON 字段（比如给 output_key
     用的 summary），这条指令必须显式提醒"保留原有字段"——否则模型会把
@@ -411,11 +538,27 @@ def _append_routing_instruction(prompt: str, routes: list[str]) -> str:
         f"After your response, end with exactly one line containing a single JSON "
         f"object with a \"route\" field, choosing whichever option best applies: "
         f'{{"route": "<one of: {options}>"}}. '
+        f"The \"route\" value MUST be exactly one of: {options} — no other value "
+        f"will be accepted. "
         f"If your instructions above already asked for other JSON fields (e.g. a "
         f"summary), keep them in this same JSON object alongside \"route\" — "
         f"do not drop them."
     )
 
+
+def _append_validation_feedback(prompt: str, feedback: str) -> str:
+    """重试 prompt 追加上一次验证失败的修正反馈。
+
+    反馈只在重试这一次的 prompt 组装时出现：executor 在读取反馈变量的同时
+    把它从共享 context 清掉，生命周期恰好覆盖一次 prompt——不会泄漏到后续
+    step 或更晚的重入。
+    """
+    return (
+        f"{prompt}\n\n---\n"
+        f"Your previous answer was rejected because it was not a valid routing "
+        f"response: {feedback}\n"
+        f"Fix this and follow the routing JSON rules above exactly."
+    )
 
 
 
@@ -770,22 +913,67 @@ def make_executor(
         prompt = render_prompt_template(prompt_template, ctx["context"])
 
         # 单一路由（或没声明路由，比如直接接 terminal）不用 LLM 决策，
-        # 直接走那条边；多路由才要求 LLM 在回答末尾声明选中哪条。
+        # 直接走那条边；多路由（结构化路由 step）才要求 LLM 在回答末尾声明
+        # 选中哪条，并且 V1 起要经过确定性验证。
         routes = sorted(routes_by_name.get(step_id, {}).keys())
-        if len(routes) > 1:
+        is_structured = len(routes) > 1
+        if is_structured:
+            # 重试反馈：只读自己的 step-scoped key，读完立刻清除——生命周期
+            # 恰好覆盖这一次（重试）prompt，不会泄漏到其它 step 或更晚的重入。
+            feedback_key = validation_feedback_key(step_id)
+            feedback = ctx["context"].get(feedback_key)
+            if feedback is not None:
+                engine = engine_ref.get("engine")
+                if engine is not None:
+                    engine.set_context_variable(feedback_key, None)
+                prompt = _append_validation_feedback(prompt, str(feedback))
             prompt = _append_routing_instruction(prompt, routes)
 
         # 项目插件集（设计文档 §7 的"插件集隔离"）：只装当前项目 plugins/
         # 里的插件，不注入 Studio 元 agent 那一套。装的是项目自己的东西，
         # 所以导出之后 agent step 的行为跟在 Studio 里跑是一致的。
-        builder = senza.HarnessBuilder(model).provider("*", provider).env(env)
-        for plugin in plugins or []:
-            builder = builder.plugin(plugin)
-        harness = builder.build()
-        try:
-            raw_output, tool_calls_count = _run_agent_step(harness, prompt, ctx["emit"])
-        except Exception as exc:  # noqa: BLE001
-            return {"output": f"Error: {exc}", "structured": {"route_key": "error"}}
+        #
+        # 结构化路由 step 的请求期 fallback（有界，恰好 1 次额外请求）：
+        # 有的 OpenAI 兼容端点会对 {"type":"json_object"} 返回 400（invalid
+        # request）。这类错误在 harness 里走 error_message → RuntimeError
+        # （类型上无法与其它 provider 错误区分），只能按错误文本识别：包含
+        # "invalid request" 且提到 "response_format" 才触发。命中则重建不带
+        # response_format 的 harness 重跑一次。任何其它异常原样上抛——绝不
+        # 吞掉无关的 provider/model 错误。这与"模型输出验证失败"的一次修正
+        # 重试是两个独立机制，互不消耗。单路由 step 不设 response_format，
+        # 单次运行，行为与从前一致。
+        attempts = (True, False) if is_structured else (False,)
+        for use_response_format in attempts:
+            builder = senza.HarnessBuilder(model).provider("*", provider).env(env)
+            for plugin in plugins or []:
+                builder = builder.plugin(plugin)
+            if use_response_format:
+                # 强化，不是正确性来源：response_format 只影响请求约束，
+                # 正确性由提示词 + 解析 + 验证保证。
+                try:
+                    builder = builder.response_format(
+                        senza.create_json_object_format()
+                    )
+                except Exception:  # noqa: BLE001
+                    pass
+            harness = builder.build()
+            try:
+                raw_output, tool_calls_count = _run_agent_step(
+                    harness, prompt, ctx["emit"]
+                )
+                break
+            except Exception as exc:  # noqa: BLE001
+                text = str(exc)
+                is_format_rejection = (
+                    "invalid request" in text.lower()
+                    and "response_format" in text
+                )
+                if not is_format_rejection or not use_response_format:
+                    return {
+                        "output": f"Error: {exc}",
+                        "structured": {"route_key": "error"},
+                    }
+                # 命中 format 拒绝 → 落到第二趟（不带 response_format）。
 
         # usage() 是 harness 累计值，但这是个一次性、单轮 prompt 用完就扔的
         # harness（每个 agent step 一个新的），累计值就是这一轮的值。
@@ -799,13 +987,47 @@ def make_executor(
         # 的字段，即使这个 step 本身只有一条路由也一样。
         fields, output = _extract_json_fields(raw_output)
 
-        if len(routes) > 1:
-            route_key = fields.get("route")
-            if route_key not in routes:
-                route_key = "error"
-        else:
+        if len(routes) <= 1:
+            # 单路由/对话 step：不验证、不重试——现有行为原样保留。
             route_key = routes[0] if routes else "success"
+            _write_context(stage.get("output_key"), {**fields, "_output": output})
+            return {
+                "output": output,
+                "structured": {
+                    "route_key": route_key,
+                    "fields": fields,
+                    "_debug": {
+                        "prompt": prompt,
+                        "tool_calls_count": tool_calls_count,
+                        "usage": usage,
+                    },
+                },
+            }
 
+        # 结构化路由 step（V1）：确定性验证先于路由选择。
+        attempt = 1 if ctx["context"].get(validation_feedback_key(step_id)) is None else 2
+        validation = _validate_structured(fields, raw_output, routes, attempt)
+        if not validation.ok:
+            # 失败：任何模型产物都不进共享 context（提取的字段、route、
+            # output_key 一律不写）——被拒绝的输出只能出现在本次返回值的
+            # _debug.prompt / structured 之外，重试的修正提示由 judge 写入
+            # step-scoped 的 _validation_feedback key。route_key="error" 仅
+            # 是引擎路由兼容用的内部值，真正的诊断在 _validation 里。
+            return {
+                "output": output,
+                "structured": {
+                    "route_key": "error",
+                    "fields": {},
+                    "_validation": validation.to_dict(),
+                    "_debug": {
+                        "prompt": prompt,
+                        "tool_calls_count": tool_calls_count,
+                        "usage": usage,
+                    },
+                },
+            }
+
+        route_key = fields["route"]
         _write_context(stage.get("output_key"), {**fields, "_output": output})
 
         return {
@@ -940,7 +1162,7 @@ class PlaySession:
             tools_load_error,
             plugins,
         )
-        judge = make_judge(routes_by_name)
+        judge = make_judge(routes_by_name, self._engine_ref)
 
         # 平台护栏 1：引擎级 step_history 上限（含所有 Retry 重跑），超过 →
         # Failed("max_steps (75) exceeded")。必须在此处、首次 run() 之前
