@@ -16,6 +16,13 @@ import pytest
 # 影响运行时内部的全局查找。下面 from studio_backend.play import ... 的
 # 公开 API 照旧走 Studio 那一层（PlaySession 在那里翻译 Project/Config）。
 import senza_studio_runtime.play as play
+from senza_studio_runtime.play import (  # noqa: F401 — V1 内部符号直接从
+    # 运行时模块 import，不经过 studio_backend 转发层。
+    StructuredValidationCode,
+    _append_validation_feedback,
+    _validate_structured,
+    validation_feedback_key,
+)
 from studio_backend.config import StudioConfig
 from studio_backend.play import (
     PENDING_APPROVAL,
@@ -2510,3 +2517,683 @@ def test_submit_decision_vs_concurrent_cancel_does_not_raise(monkeypatch):
 
     assert session.state() == "cancelled"
     assert started == []  # 引擎已终态，绝不能重启
+
+
+# ── Structured Output V1 ─────────────────────────────────
+
+
+def test_validate_structured_ok_and_four_failure_codes():
+    """四个失败码互不混淆，且成功路径 code=None。"""
+    routes = ["sufficient", "insufficient"]
+
+    ok = _validate_structured({"route": "sufficient"}, '{"route":"sufficient"}', routes, 1)
+    assert ok.ok and ok.code is None
+
+    v = _validate_structured({}, "no json here", routes, 1)
+    assert v.code is StructuredValidationCode.INVALID_JSON
+
+    v = _validate_structured({"summary": "x"}, '{"summary":"x"}', routes, 1)
+    assert v.code is StructuredValidationCode.MISSING_ROUTE
+    assert "sufficient, insufficient" in v.detail
+
+    v = _validate_structured({"route": 123}, '{"route":123}', routes, 1)
+    assert v.code is StructuredValidationCode.ROUTE_NOT_STRING
+
+    v = _validate_structured({"route": "bananas"}, '{"route":"bananas"}', routes, 1)
+    assert v.code is StructuredValidationCode.UNKNOWN_ROUTE
+    assert "'bananas'" in v.detail
+
+    assert ok.to_dict() == {}
+    d = v.to_dict()
+    assert d["status"] == "failed" and d["code"] == "unknown_route" and d["attempt"] == 1
+    assert d["raw_head"] == '{"route":"bananas"}'
+
+
+def test_validate_structured_truncated_outer_is_invalid_json():
+    """aef22b5 截断外层场景：内层 route 不可提升 → invalid_json，绝不发明路由。"""
+    output = '{"wrapper":{"route":"sufficient"}'
+    fields, _ = _extract_json_fields(output)
+    v = _validate_structured(fields, output, ["sufficient", "insufficient"], 1)
+    assert v.code is StructuredValidationCode.INVALID_JSON
+
+
+def test_validate_structured_located_but_unparseable_object():
+    """扫描器定位到对象但 json.loads 失败（尾逗号）→ invalid_json。"""
+    output = '{"route": "sufficient",,}'
+    fields, _ = _extract_json_fields(output)
+    v = _validate_structured(fields, output, ["sufficient", "insufficient"], 1)
+    assert v.code is StructuredValidationCode.INVALID_JSON
+
+
+def test_append_routing_instruction_contains_derived_enum():
+    prompt = _append_routing_instruction("classify this", ["sufficient", "insufficient"])
+    assert '"sufficient"' in prompt and '"insufficient"' in prompt
+    assert "MUST be exactly one of" in prompt
+
+
+def test_append_validation_feedback_wraps_detail():
+    out = _append_validation_feedback("base prompt", "route 'x' not in [a, b]")
+    assert out.startswith("base prompt")
+    assert "route 'x' not in [a, b]" in out
+    assert "previous answer was rejected" in out
+
+
+def _make_builder_factory(monkeypatch, seen_formats=None):
+    """构造 FakeBuilder 类：response_format 调用记录到 seen_formats；
+    build() 返回带 _tag=(tag, has_fmt) 的 FakeHarness 对象。"""
+
+    def make_builder(model):
+        builder = _Builder(seen_formats)
+        return builder
+
+    return make_builder
+
+
+class _FakeHarness:
+    """build() 产物：tag=(name, has_fmt)；_run_agent_step 按 has_fmt 模拟
+    provider 请求期 400 拒绝 json_object。"""
+
+    def __init__(self, tag):
+        self._tag = tag
+
+    def usage(self):
+        return None
+
+
+class _FakeBuilder:
+    def __init__(self, seen_formats=None):
+        self._seen = seen_formats
+        self._has_fmt = False
+
+    def provider(self, *a, **k):
+        return self
+
+    def env(self, *a, **k):
+        return self
+
+    def response_format(self, fmt):
+        self._has_fmt = True
+        return self
+
+    def build(self):
+        if self._seen is not None:
+            self._seen.append(self._has_fmt)
+        return _FakeHarness(("*", self._has_fmt))
+
+
+def _setup_executor(monkeypatch, fake_run, routes, outputs=None, seen_formats=None):
+    """通用多路由 executor 搭建。fake_run 按 harness._tag 分支模拟 provider。"""
+
+    class FakeBuilder:
+        def __init__(self):
+            self._seen = seen_formats
+            self._has_fmt = False
+
+        def provider(self, *a, **k):
+            return self
+
+        def env(self, *a, **k):
+            return self
+
+        def response_format(self, fmt):
+            self._has_fmt = True
+            return self
+
+        def build(self):
+            return _FakeHarness(("evaluate", self._has_fmt))
+
+    monkeypatch.setattr(play.senza, "HarnessBuilder", lambda model: FakeBuilder())
+    monkeypatch.setattr(play.senza, "create_json_object_format", lambda: "fmt")
+    monkeypatch.setattr(play, "_run_agent_step", fake_run)
+    engine = FakeEngine()
+    executor = make_executor(
+        {"evaluate": {"name": "evaluate", "type": "agent", "prompt_template": "e"}},
+        routes, "m", provider=None, env=None, engine_ref={"engine": engine},
+    )
+    return executor, engine
+
+
+_ROUTES = {"evaluate": {"sufficient": "compare", "insufficient": "refine"}}
+
+
+def test_validate_structured_truncated_outer_blocking():
+    """aef22b5 blocker 形状：截断外层 → invalid_json（内层 route 不可提升）。"""
+    output = '{"wrapper":{"route":"sufficient"}'
+    fields, _ = _extract_json_fields(output)
+    v = _validate_structured(fields, output, list(_ROUTES), 1)
+    assert v.code is StructuredValidationCode.INVALID_JSON
+
+
+def test_append_routing_instruction_contains_derived_enum():
+    prompt = _append_routing_instruction("classify this", ["sufficient", "insufficient"])
+    for r in ("sufficient", "insufficient"):
+        assert f'"{r}"' in prompt
+    assert "MUST be exactly one of" in prompt
+
+
+def test_append_validation_feedback_wraps_detail():
+    out = _append_validation_feedback("base prompt", "route 'x' not in [a, b]")
+    assert out.startswith("base prompt")
+    assert "route 'x' not in [a, b]" in out
+
+
+def test_executor_validation_ok_writes_fields_and_route(monkeypatch):
+    raw = 'Thoughts.\n{"route": "sufficient", "candidates": [{"title": "A"}]}'
+    executor, engine = _setup_executor(
+        monkeypatch, lambda h, p_, e: (raw, 0), _ROUTES
+    )
+    result = executor({"step_id": "evaluate", "context": {}, "emit": None})
+    assert result["structured"]["route_key"] == "sufficient"
+    assert engine.written["candidates"] == [{"title": "A"}]
+    assert "_validation" not in result["structured"]
+
+
+@pytest.mark.parametrize(
+    "raw,code",
+    [
+        ('{"route": "sufficient",,}', "invalid_json"),
+        ("no json at all", "invalid_json"),
+        ('{"wrapper":{"route":"sufficient"}', "invalid_json"),
+        ('{"summary": "x"}', "missing_route"),
+        ('{"route": 123}', "route_not_string"),
+        ('{"route": "bananas"}', "unknown_route"),
+    ],
+)
+def test_executor_validation_failures_diagnosed_and_context_clean(monkeypatch, raw, code):
+    executor, engine = _setup_executor(monkeypatch, lambda h, p_, e: (raw, 0), _ROUTES)
+    result = executor({"step_id": "evaluate", "context": {}, "emit": None})
+    v = result["structured"]["_validation"]
+    assert v["status"] == "failed" and v["code"] == code and v["attempt"] == 1
+    assert result["structured"]["route_key"] == "error"
+    assert result["structured"]["fields"] == {}
+    assert engine.written == {}  # blocker 1: 零写入
+
+
+def test_single_route_conversational_step_unchanged(monkeypatch):
+    raw = "Just chatting, no JSON at all."
+    seen = []
+
+    class FakeBuilder:
+        def __init__(self):
+            self._has_fmt = False
+
+        def provider(self, *a, **k):
+            return self
+
+        def env(self, *a, **k):
+            return self
+
+        def response_format(self, fmt):  # 不该被调用
+            raise AssertionError("single-route step must not set response_format")
+
+        def build(self):
+            return _FakeHarness(("chat", self._has_fmt))
+
+    monkeypatch.setattr(play.senza, "HarnessBuilder", lambda model: FakeBuilder())
+    monkeypatch.setattr(
+        play, "_run_agent_step", lambda harness, prompt, emit: (raw, 0)
+    )
+    engine = FakeEngine()
+    executor = make_executor(
+        {"chat": {"name": "chat", "type": "agent", "prompt_template": "chat"}},
+        {"chat": {"success": "end"}}, "m", provider=None, env=None,
+        engine_ref={"engine": engine},
+    )
+    result = executor({"step_id": "chat", "context": {}, "emit": None})
+    assert result["structured"]["route_key"] == "success"
+    assert "_validation" not in result["structured"]
+    assert seen == []  # 单路由不设 response_format
+
+
+def test_validation_failure_writes_nothing_to_shared_context(monkeypatch):
+    """修复 blocker 1 的回归：带 output_key 的多路由 agent 在验证失败时必须
+    零写入——output_key、提取字段、route 一律不进共享 context。
+
+    旧实现失败路径调用 engine.set_context_variable(output_key, ...)，把被
+    拒绝的输出写进 output_key 污染共享 context。本测试直接对着这个形状：
+    非法输出 + 配置了 output_key 的 executor，断言 written 里既没有
+    output_key 也没有任何模型产物。
+    """
+    raw = '{"route": "bananas", "candidates": [{"title": "junk"}]}'
+    stage = {
+        "evaluate": {
+            "name": "evaluate",
+            "type": "agent",
+            "prompt_template": "e",
+            "output_key": "evaluate_reply",
+        }
+    }
+
+    class FakeBuilder:
+        def __init__(self):
+            self._has_fmt = False
+
+        def provider(self, *a, **k):
+            return self
+
+        def env(self, *a, **k):
+            return self
+
+        def response_format(self, fmt):
+            self._has_fmt = True
+            return self
+
+        def build(self):
+            return _FakeHarness(("*", self._has_fmt))
+
+    monkeypatch.setattr(play.senza, "HarnessBuilder", lambda model: FakeBuilder())
+    monkeypatch.setattr(play, "_run_agent_step", lambda h, p_, e: (raw, 0))
+    engine = FakeEngine()
+    executor = make_executor(
+        stage_by_name=stage,
+        routes_by_name=_ROUTES,
+        model="m",
+        provider=None,
+        env=None,
+        engine_ref={"engine": engine},
+    )
+    result = executor({"step_id": "evaluate", "context": {}, "emit": None})
+
+    assert result["structured"]["_validation"]["code"] == "unknown_route"
+    assert engine.written == {}  # output_key "evaluate_reply" 绝不能出现
+    assert "evaluate_reply" not in engine.written
+    assert "candidates" not in engine.written
+    assert "route" not in engine.written
+    assert "_output" not in engine.written
+    assert result["structured"]["fields"] == {}
+    assert result["structured"]["route_key"] == "error"
+    assert result["structured"]["_validation"]["raw_head"] == raw[:200]
+
+
+def _make_shared_context_engine():
+    """带真实快照语义的假引擎：executor 的 ctx["context"] 是
+    set_context_variable 时点的 variables 快照（pyworkflow.rs 在进入
+    spawn_blocking 前 clone variables），set_context_variable 落进同一本
+    KV 黑板。跟 FakeEngine 的差别：这里 executor 读的 context 就是从这份
+    黑板来的——judge 写的反馈，executor 的下一轮 prompt 组装真的消费。
+    """
+
+    class SharedContextEngine:
+        def __init__(self):
+            self.variables: dict = {}
+
+        def set_context_variable(self, key, value):
+            self.variables[key] = value
+
+        def snapshot(self):
+            return dict(self.variables)
+
+    return SharedContextEngine()
+
+
+def _make_scripted_executor(monkeypatch, engine, stage, routes, script):
+    """带 output_key 的 executor + judge + 可编程 LLM 脚本。script 里每个
+    元素是 (输出文本, 是否抛 response_format 拒绝)。_run_agent_step 每被
+    调一次按顺序消费一项。"""
+
+    class FakeBuilder:
+        def __init__(self):
+            self._has_fmt = False
+
+        def provider(self, *a, **k):
+            return self
+
+        def env(self, *a, **k):
+            return self
+
+        def response_format(self, fmt):
+            self._has_fmt = True
+            return self
+
+        def build(self):
+            return _FakeHarness(("*", self._has_fmt))
+
+    calls = {"n": 0, "prompts": []}
+
+    def fake_run(harness, prompt, emit):
+        i = calls["n"]
+        calls["n"] += 1
+        calls["prompts"].append(prompt)
+        output, reject = script[i]
+        if reject:
+            raise RuntimeError(
+                'llm provider error: invalid request: {"error": {"message": '
+                '"response_format json_object is not supported"}}'
+            )
+        return output, 0
+
+    monkeypatch.setattr(play.senza, "HarnessBuilder", lambda model: FakeBuilder())
+    monkeypatch.setattr(play.senza, "create_json_object_format", lambda: "fmt")
+    monkeypatch.setattr(play, "_run_agent_step", fake_run)
+    executor = make_executor(
+        stage_by_name=stage,
+        routes_by_name=routes,
+        model="m",
+        provider=None,
+        env=None,
+        engine_ref={"engine": engine},
+    )
+    judge = make_judge(routes, {"engine": engine})
+    return executor, judge, calls
+
+
+_OUTPUT_KEY_STAGE = {
+    "evaluate": {
+        "name": "evaluate",
+        "type": "agent",
+        "prompt_template": "evaluate the submission",
+        "output_key": "evaluate_reply",
+    },
+}
+
+
+def _run_executor_step(executor, engine, step_id):
+    """从共享 KV 黑板取快照调 executor（真引擎给回调的 context 就是这个
+    快照），返回 (executor 结果, 本轮写回黑板后的变量表)。"""
+    ctx = {"step_id": step_id, "context": engine.snapshot(), "emit": None}
+    result = executor(ctx)
+    return result
+
+
+def test_connected_lifecycle_retry_then_success_writes_valid_output(monkeypatch):
+    """连接生命周期（attempt 1 非法 → judge Retry → attempt 2 消费反馈修正
+    → 合法输出正常写 context）。executor 与 judge 共用同一份 FakeEngine
+    KV 黑板——反馈的写入/消费/清除全部走真实共享 context 状态，不用无关
+    的空 dict 手工替换。
+
+    attempt 1（非法）：零 context 写入（blocker 1 形状，含 output_key）。
+    attempt 2（修正）：修正 prompt 含验证反馈、绝不含被拒输出；反馈读后
+    即清；合法输出按正常路径写 output_key + 提取字段。"""
+    engine = _make_shared_context_engine()
+    executor, judge, calls = _make_scripted_executor(
+        monkeypatch,
+        engine,
+        _OUTPUT_KEY_STAGE,
+        _ROUTES,
+        script=[
+            # attempt 1: 非法路由
+            ('{"route": "bananas", "candidates": [{"title": "junk"}]}', False),
+            # attempt 2: 修正后的合法输出
+            (
+                'Thoughts.\n{"route": "sufficient", "summary": "clean"}',
+                False,
+            ),
+        ],
+    )
+    feedback_key = validation_feedback_key("evaluate")
+
+    # ── attempt 1：executor 产出非法结构化输出 ──
+    result1 = _run_executor_step(executor, engine, "evaluate")
+    assert result1["structured"]["route_key"] == "error"
+    assert result1["structured"]["_validation"]["code"] == "unknown_route"
+    assert result1["structured"]["fields"] == {}
+    # 非法输出一个字都不进共享 context（output_key / 提取字段 / route）
+    assert engine.variables == {}
+
+    # ── judge：第一次失败 → Retry，反馈写进共享 context ──
+    assert judge(
+        {
+            "step_id": "evaluate",
+            "structured": result1["structured"],
+            "output": result1["output"],
+        }
+    ) == "retry"
+    assert engine.variables[feedback_key] == (
+        "route 'bananas' not in [insufficient, sufficient]"
+    )
+
+    # ── attempt 2：executor 从共享黑板拿到反馈，组装修正 prompt ──
+    result2 = _run_executor_step(executor, engine, "evaluate")
+    prompt2 = calls["prompts"][1]
+    assert "previous answer was rejected" in prompt2
+    assert "route 'bananas' not in [insufficient, sufficient]" in prompt2
+    # 被拒的输出 payload 绝不能通过 output_key 或其它路径回到 prompt
+    # （反馈 detail 本身合法地点名了坏路由值 "bananas"，不在此列）
+    assert "junk" not in prompt2
+    # 反馈读后即清（None 表示 key 还在但值已清空——KV 黑板语义）
+    assert engine.variables[feedback_key] is None
+
+    # ── judge：合法路由 → 正常路由成功 step ──
+    assert judge(
+        {
+            "step_id": "evaluate",
+            "structured": result2["structured"],
+            "output": result2["output"],
+        }
+    ) == "to:compare"
+    # 合法输出正常写共享 context：output_key + 提取字段（route 不写）
+    assert engine.variables["evaluate_reply"] == "Thoughts."
+    assert engine.variables["summary"] == "clean"
+    assert "route" not in engine.variables
+    assert "_validation" not in result2["structured"]
+
+
+def test_connected_lifecycle_two_invalid_attempts_fail_with_clean_context(monkeypatch):
+    """连续两次非法：attempt 1 → Retry（写反馈）；attempt 2 仍非法 →
+    fail:structured_output_validation_failed；反馈清除，被拒输出（含
+    output_key）始终不进共享 context。"""
+    engine = _make_shared_context_engine()
+    bad = '{"route": "bananas", "candidates": [{"title": "junk"}]}'
+    executor, judge, calls = _make_scripted_executor(
+        monkeypatch,
+        engine,
+        _OUTPUT_KEY_STAGE,
+        _ROUTES,
+        script=[(bad, False), (bad, False)],
+    )
+    feedback_key = validation_feedback_key("evaluate")
+
+    result1 = _run_executor_step(executor, engine, "evaluate")
+    assert result1["structured"]["_validation"]["code"] == "unknown_route"
+    assert engine.variables == {}
+    assert judge(
+        {
+            "step_id": "evaluate",
+            "structured": result1["structured"],
+            "output": result1["output"],
+        }
+    ) == "retry"
+    assert engine.variables[feedback_key] == (
+        "route 'bananas' not in [insufficient, sufficient]"
+    )
+
+    result2 = _run_executor_step(executor, engine, "evaluate")
+    assert result2["structured"]["_validation"]["code"] == "unknown_route"
+    assert result2["structured"]["_validation"]["attempt"] == 2
+    # executor 在 prompt 组装时已读走反馈并清空（None），非法输出零写入
+    assert engine.variables == {feedback_key: None}
+
+    final = judge(
+        {
+            "step_id": "evaluate",
+            "structured": result2["structured"],
+            "output": result2["output"],
+            "retry_count": 1,
+        }
+    )
+    assert final.startswith("fail:structured_output_validation_failed")
+    assert "unknown_route" in final
+    # 终态：反馈清掉，被拒输出从头到尾没碰过共享 context
+    assert engine.variables[feedback_key] is None
+    assert set(engine.variables.keys()) == {feedback_key}
+    assert "evaluate_reply" not in engine.variables
+    assert "junk" not in result2["output"]  # 被拒输出只在返回值里
+
+
+def test_real_configured_error_route_validates_and_routes(monkeypatch):
+    routes = {"evaluate": {"error": "handle_error", "sufficient": "compare"}}
+    executor, engine = _setup_executor(
+        monkeypatch, lambda h, p_, e: ('{"route": "error"}', 0), routes
+    )
+    result = executor({"step_id": "evaluate", "context": {}, "emit": None})
+    assert result["structured"]["route_key"] == "error"
+    assert "_validation" not in result["structured"]
+    judge = make_judge(routes, {"engine": {"engine": engine}})
+    assert judge({"step_id": "evaluate", "structured": result["structured"], "output": ""}) == "to:handle_error"
+
+
+def test_judge_validation_failure_retries_then_fails():
+    judge = make_judge({"a": {"sufficient": "s1", "insufficient": "s2"}}, {"engine": None})
+    for code in ("invalid_json", "missing_route", "route_not_string", "unknown_route"):
+        ctx = {
+            "step_id": "a",
+            "structured": {"route_key": "error", "_validation": {"status": "failed", "code": code, "detail": "d"}},
+            "output": "raw",
+        }
+        out = judge(dict(ctx))
+        assert out == "retry" and "no route for 'error'" not in out
+        out2 = judge({**ctx, "retry_count": 1})
+        assert out2.startswith("fail:structured_output_validation_failed") and code in out2
+        assert "no route for 'error'" not in out2
+
+
+def test_judge_ignores_validation_ok_marker():
+    judge = make_judge({"a": {"sufficient": "s1"}}, {"engine": None})
+    assert judge({"step_id": "a", "structured": {"route_key": "sufficient"}}) == "to:s1"
+    assert judge({"step_id": "a", "structured": {"route_key": "sufficient", "_validation": {"status": "ok"}}}) == "to:s1"
+
+
+def test_judge_retry_writes_step_scoped_feedback_and_clears_on_final():
+    engine = FakeEngine()
+    judge = make_judge({"a": {"x": "s1", "y": "s2"}}, {"engine": engine})
+    fail = {"status": "failed", "code": "unknown_route", "detail": "bad route"}
+    ctx = {"step_id": "a", "structured": {"route_key": "error", "_validation": fail}, "output": "raw"}
+    assert judge(dict(ctx)) == "retry"
+    assert engine.written[validation_feedback_key("a")] == "bad route"
+    assert judge({**ctx, "retry_count": 1}) == (
+        "fail:structured_output_validation_failed (unknown_route): bad route"
+    )
+    assert engine.written[validation_feedback_key("a")] is None
+
+
+def test_judge_feedback_is_step_scoped():
+    engine = FakeEngine()
+    judge = make_judge(
+        {"a": {"x": "s1", "y": "s2"}, "b": {"p": "s3", "q": "s4"}},
+        {"engine": engine},
+    )
+    fail = {"status": "failed", "code": "missing_route", "detail": "no route field"}
+    assert judge({"step_id": "a", "structured": {"route_key": "error", "_validation": fail}}) == "retry"
+    assert engine.written[validation_feedback_key("a")] == "no route field"
+    assert validation_feedback_key("b") not in engine.written
+    assert judge({"step_id": "b", "structured": {"route_key": "p"}}) == "to:s3"
+
+
+def test_executor_reads_and_clears_own_feedback_on_retry(monkeypatch):
+    captured = {}
+
+    def fake_run(harness, prompt, emit):
+        captured["prompt"] = prompt
+        return '{"route": "sufficient"}', 0
+
+    key = validation_feedback_key("evaluate")
+    executor, engine = _setup_executor(monkeypatch, fake_run, _ROUTES)
+    result = executor({"step_id": "evaluate", "context": {key: "route 'bananas' not in [sufficient, insufficient]"}, "emit": None})
+    assert result["structured"]["route_key"] == "sufficient"
+    assert "previous answer was rejected" in captured["prompt"]
+    assert engine.written[key] is None
+
+
+def test_retry_success_clears_feedback(monkeypatch):
+    executor, engine = _setup_executor(
+        monkeypatch, lambda h, p_, e: ('{"route": "sufficient"}', 0), _ROUTES
+    )
+    key = validation_feedback_key("evaluate")
+    result = executor({"step_id": "evaluate", "context": {key: "stale"}, "emit": None})
+    assert result["structured"]["route_key"] == "sufficient"
+    assert "route" not in engine.written
+    assert engine.written[key] is None
+
+
+def test_later_reentry_has_no_stale_feedback(monkeypatch):
+    captured = {}
+
+    def fake_run(harness, prompt, emit):
+        captured["p"] = prompt
+        return '{"route": "sufficient"}', 0
+
+    executor, engine = _setup_executor(monkeypatch, fake_run, _ROUTES)
+    key = validation_feedback_key("evaluate")
+    executor({"step_id": "evaluate", "context": {key: "old"}, "emit": None})
+    captured.clear()
+    executor({"step_id": "evaluate", "context": {}, "emit": None})
+    assert "previous answer was rejected" not in captured["p"]
+
+
+def test_request_time_response_format_rejection_falls_back(monkeypatch):
+    """请求期 400（json_object 不支持）→ 恰好一次无 format 重跑；成功后仍过
+    完整 V1 验证。与模型输出修正重试互不消耗。"""
+    seen = []
+
+    def fake_run(harness, prompt, emit):
+        _, has_fmt = harness._tag
+        seen.append(has_fmt)
+        if has_fmt:
+            raise RuntimeError(
+                'llm provider error: invalid request: {"error": {"message": '
+                '"response_format json_object is not supported"}}'
+            )
+        return '{"route": "sufficient"}', 0
+
+    executor, engine = _setup_executor(monkeypatch, fake_run, _ROUTES, seen_formats=seen)
+    result = executor({"step_id": "evaluate", "context": {}, "emit": None})
+    assert seen == [True, False]
+    assert result["structured"]["route_key"] == "sufficient"
+
+
+def test_unrelated_provider_errors_surface_unchanged(monkeypatch):
+    """非 response_format 的 provider 错误原样上抛——不被当成 format 不兼容。"""
+    seen = []
+
+    def fake_run(harness, prompt, emit):
+        _, has_fmt = harness._tag
+        seen.append(has_fmt)
+        raise RuntimeError('llm provider error: invalid request: {"error": {"message": "model does not exist"}}')
+
+    executor, _ = _setup_executor(monkeypatch, fake_run, _ROUTES, seen_formats=seen)
+    result = executor({"step_id": "evaluate", "context": {}, "emit": None})
+    assert seen == [True]  # 只跑了一趟，没有静默 fallback
+    assert result["output"].startswith("Error: llm provider error")
+    assert result["structured"]["route_key"] == "error"
+
+
+def test_format_rejection_fallback_then_validation_still_applies(monkeypatch):
+    """fallback 成功后的响应仍经过完整 V1 验证——fallback 不是绕过验证的旁路。"""
+
+    def fake_run(harness, prompt, emit):
+        _, has_fmt = harness._tag
+        if has_fmt:
+            raise RuntimeError(
+                'llm provider error: invalid request: {"error": {"message": '
+                '"response_format json_object is not supported"}}'
+            )
+        return '{"route": "bananas"}', 0  # fallback 成功但输出非法
+
+    executor, engine = _setup_executor(monkeypatch, fake_run, _ROUTES)
+    result = executor({"step_id": "evaluate", "context": {}, "emit": None})
+    assert result["structured"]["_validation"]["code"] == "unknown_route"
+    assert result["structured"]["route_key"] == "error"
+    assert engine.written == {}
+
+
+def test_format_rejection_fallback_failure_is_terminal(monkeypatch):
+    """fallback 两趟都失败：恰好两次 harness 运行（带 format → 无 format），
+    绝无第三趟；第二趟失败按普通错误处理原样上抛到返回值，不触发模型输出
+    修正重试（两个机制互不消耗）。"""
+    seen = []
+
+    def fake_run(harness, prompt, emit):
+        _, has_fmt = harness._tag
+        seen.append(has_fmt)
+        raise RuntimeError(
+            'llm provider error: invalid request: {"error": {"message": '
+            '"response_format json_object is not supported"}}'
+        )
+
+    executor, engine = _setup_executor(monkeypatch, fake_run, _ROUTES, seen_formats=seen)
+    result = executor({"step_id": "evaluate", "context": {}, "emit": None})
+    assert seen == [True, False]  # 恰好一次 fallback，无第三趟
+    assert result["output"].startswith("Error: llm provider error")
+    assert result["structured"]["route_key"] == "error"
+    assert "_validation" not in result["structured"]  # 走普通错误路径，不是验证失败
+    assert engine.written == {}  # 失败不写共享 context（含 output_key 语义）
