@@ -252,10 +252,148 @@ def _run_agent_step(harness: Any, prompt: str, emit: Any) -> tuple[str, int]:
     return "".join(text_parts), tool_calls_count
 
 
-# 匹配回答里的扁平 JSON 对象（不支持嵌套花括号）——LLM 按我们的指示只会
-# 在末尾吐一个简单对象，比如 {"route": "complaint", "summary": "..."}。
-# 用来既提取路由标记，也提取其它想传给下游 step 的结构化字段。
-_JSON_BLOB_RE = re.compile(r"\{[^{}]*\}")
+# 顶层 JSON 对象提取器（替代旧的扁平正则 \{[^{}]*\}）：从 LLM 回答里找最后
+# 一个**完整顶层**对象——支持嵌套（比如 evaluate_results 的 route + candidates
+# 数组），字符串里的花括号/转义引号不算结构。用来既提取路由标记，也提取
+# 其它想传给下游 step 的结构化字段。
+
+
+def _inside_abandoned_value(output: str, start: int) -> bool:
+    """判断 output[start] 处的候选是否是外层对象的**属性值/数组元素**。
+
+    从候选起点向前跳过空白，紧邻的非空白字符是 ``:``（属性值）或 ``[``
+    （数组元素）即视为外层结构的子值。散文里候选前的普通字符（``.``、
+    ``\n`` 等）不会命中，所以散文 ``{`` 后面的合法对象不受影响。
+    """
+    k = start - 1
+    while k >= 0 and output[k] in " \t\r\n":
+        k -= 1
+    return k >= 0 and output[k] in ":["
+
+
+def _last_top_level_json_object(output: str) -> tuple[int, int] | None:
+    """扫描 output，返回最后一个完整顶层 ``{...}`` 对象的 (start, end)。
+
+    单趟扫描，带**有界候选恢复**：遇到 ``{`` 就开启一个候选对象，只有
+    候选激活期间才把 ``"`` 当 JSON 字符串处理（转义对 \\"、\\\\ 不结束
+    字符串）；深度归零即得到一个完整对象，继续向后找更靠后的。
+
+    恢复规则防止普通散文与截断输出破坏后面的 JSON 发现：
+    - 散文里的引号（``The size is 12"``）不影响候选状态——因为字符串
+      处理只在候选激活时生效，散文里的引号永远不会吞掉后面的 ``{``。
+    - 候选开启后若先碰到一个不属于候选内字符串的 ``"``（散文引号混进
+      候选内部）或扫描到尾部仍未闭合（截断/散文 ``{``），丢弃该候选并
+      从候选 start+1 重新扫描——后面的完整对象仍能被发现。
+    - **作废候选的子结构不得提升为顶层对象**：落在作废候选扫描范围内、
+      紧邻非空白前缀是 ``:`` 或 ``[`` 的候选（截断外层对象的属性值 /
+      数组元素）一律作废——否则截断的 ``{"wrapper":{"route":...}`` 会
+      泄漏内层 route，造成意外的工作流跳转。散文 ``{`` 后面的合法对象
+      不受影响（其前缀是普通散文字符，不是 ``:``/``[``）。
+
+    复杂度：正常输出接近 O(n)；最坏情况（大量互相嵌套的截断候选，
+    每次作废都从 start+1 重扫）为 O(n²)——对 LLM 输出规模足够，且
+    确定、有界、绝不 hang。合法嵌套不受影响：完整的外层对象闭合时
+    整体返回，内层候选永远不会被单独考虑。
+    """
+    best: tuple[int, int] | None = None
+    i = 0
+    n = len(output)
+    # 被作废的候选 (start, scan 结束位置)：候选作废（截断未闭合、散文 }
+    # 提前结束）时记录它的扫描范围。落在作废候选扫描范围内、且紧邻的
+    # 非空白前缀是 ``:`` 或 ``[`` 的后续候选，是作废对象的**子结构**
+    # （属性值 / 数组元素）——必须拒绝，否则截断的
+    # ``{"wrapper":{"route":"sufficient"}`` 会把内层
+    # ``{"route":"sufficient"}`` 提升成路由对象，造成意外的工作流跳转。
+    abandoned: list[tuple[int, int]] = []
+    while i < n:
+        # 找下一个候选起点。
+        while i < n and output[i] != "{":
+            i += 1
+        if i >= n:
+            break
+        start = i
+        depth = 0
+        arr_depth = 0
+        in_string = False
+        escaped = False
+        j = i
+        failed = False
+        closed = None
+        while j < n:
+            ch = output[j]
+            if in_string:
+                if escaped:
+                    escaped = False
+                elif ch == "\\":
+                    escaped = True
+                elif ch == '"':
+                    in_string = False
+            elif ch == '"':
+                in_string = True
+            elif ch == "{":
+                depth += 1
+            elif ch == "[":
+                arr_depth += 1
+            elif ch == "]":
+                if arr_depth > 0:
+                    arr_depth -= 1
+            elif ch == "}":
+                depth -= 1
+                if depth == 0:
+                    closed = j + 1
+                    break
+                if depth < 0:
+                    # 散文的 } 比候选的 { 先到——候选不成立。
+                    failed = True
+                    break
+            j += 1
+        if in_string or failed or depth > 0:
+            # 截断/未闭合候选（散文 { 把深度垫高，或散文 } 提前结束）：
+            # 整个候选作废。记录扫描范围，用于拒绝落在作废对象结构里的
+            # 内层候选。重扫从 start+1 开始（而不是从 j 继续，那样会把
+            # 后面的完整对象吞进死候选里）。
+            abandoned.append((start, j))
+            i = start + 1
+        else:
+            # depth==0 自然闭合：若此候选是某个作废候选扫描范围内的
+            # **子结构**（紧邻的非空白前缀是 ``:`` ——作废对象的属性值，
+            # 或 ``[`` ——作废对象的数组元素），它不是顶层对象，不能
+            # 提升为路由对象——作废并继续往后找。
+            in_abandoned = False
+            for a_start, a_end in abandoned:
+                if a_start < start < a_end and _inside_abandoned_value(
+                    output, start
+                ):
+                    in_abandoned = True
+                    break
+            if in_abandoned:
+                i = start + 1
+                continue
+            # 合法的顶层对象：记录，并从候选结束处继续找更晚的对象。
+            best = (start, closed)
+            i = j
+    return best
+
+
+def _extract_json_fields(output: str) -> tuple[dict, str]:
+    """找输出里最后一个完整顶层 JSON 对象，解析出字段，并从展示文本里去掉这段。
+
+    找不到、解析失败、或解析出来不是 dict，都原样返回（fields={}）——不是
+    每个 agent step 都会吐 JSON，纯文字回复（比如草拟的客服回信）应该
+    完全不受影响。
+    """
+    span = _last_top_level_json_object(output)
+    if span is None:
+        return {}, output
+    start, end = span
+    try:
+        fields = json.loads(output[start:end])
+    except (json.JSONDecodeError, ValueError):
+        return {}, output
+    if not isinstance(fields, dict):
+        return {}, output
+    clean_output = (output[:start] + output[end:]).strip()
+    return fields, clean_output
 
 
 def _append_routing_instruction(prompt: str, routes: list[str]) -> str:
@@ -279,26 +417,6 @@ def _append_routing_instruction(prompt: str, routes: list[str]) -> str:
     )
 
 
-def _extract_json_fields(output: str) -> tuple[dict, str]:
-    """找输出里最后一个扁平 JSON 对象，解析出字段，并从展示文本里去掉这段。
-
-    找不到、解析失败、或解析出来不是 dict，都原样返回（fields={}）——不是
-    每个 agent step 都会吐 JSON，纯文字回复（比如草拟的客服回信）应该
-    完全不受影响。
-    """
-    last_match = None
-    for m in _JSON_BLOB_RE.finditer(output):
-        last_match = m
-    if last_match is None:
-        return {}, output
-    try:
-        fields = json.loads(last_match.group(0))
-    except (json.JSONDecodeError, ValueError):
-        return {}, output
-    if not isinstance(fields, dict):
-        return {}, output
-    clean_output = (output[: last_match.start()] + output[last_match.end() :]).strip()
-    return fields, clean_output
 
 
 def _load_prefab_tools() -> dict[str, Callable]:
