@@ -301,6 +301,214 @@ def test_append_routing_instruction_mentions_all_routes():
     assert '"complaint"' in prompt
     assert '"question"' in prompt
 
+# 嵌套 JSON 回归（evaluate_results 的 route + candidates 形状）：
+# 提取器必须取最后一个**完整顶层**对象，而不是最深处的内层对象。
+
+
+def test_extract_json_fields_nested_candidates_multi_route():
+    output = (
+        "Kept 4 strong candidates.\n"
+        '{"route": "sufficient", "candidates": ['
+        '{"title": "AllRecipes", "url": "https://a", "price": null},'
+        '{"title": "EatThis", "url": "https://b", "price": "$120"}]}'
+    )
+    fields, clean = _extract_json_fields(output)
+    assert fields["route"] == "sufficient"
+    assert len(fields["candidates"]) == 2
+    assert fields["candidates"][0]["title"] == "AllRecipes"
+    assert clean == "Kept 4 strong candidates."
+
+
+def test_extract_json_fields_nested_single_route_reaches_context():
+    output = (
+        "Summarized.\n"
+        '{"candidates": [{"title": "A", "relevance": 8}, {"title": "B", "relevance": 9}],'
+        ' "data_quality": "good"}'
+    )
+    fields, clean = _extract_json_fields(output)
+    assert fields == {
+        "candidates": [{"title": "A", "relevance": 8}, {"title": "B", "relevance": 9}],
+        "data_quality": "good",
+    }
+    assert clean == "Summarized."
+
+
+def test_extract_json_fields_nested_surrounding_prose():
+    output = (
+        'Here is my analysis.\n'
+        'The candidates look strong.\n'
+        '{"route": "sufficient", "candidates": [{"title": "K2", "note": "hot swap"}]}'
+    )
+    fields, clean = _extract_json_fields(output)
+    assert fields["route"] == "sufficient"
+    assert fields["candidates"] == [{"title": "K2", "note": "hot swap"}]
+    assert clean == "Here is my analysis.\nThe candidates look strong."
+
+
+def test_extract_json_fields_braces_inside_strings():
+    output = '{"text": "example { not structure }", "route": "ok"}'
+    fields, clean = _extract_json_fields(output)
+    assert fields == {"text": "example { not structure }", "route": "ok"}
+    assert clean == ""
+
+
+def test_extract_json_fields_nested_braces_inside_strings():
+    output = (
+        '{"route": "sufficient", "candidates": ['
+        '{"title": "brace { in title", "note": "and } here"}]}'
+    )
+    fields, clean = _extract_json_fields(output)
+    assert fields["route"] == "sufficient"
+    assert fields["candidates"] == [{"title": "brace { in title", "note": "and } here"}]
+    assert clean == ""
+
+
+def test_extract_json_fields_escaped_quotes_and_backslashes():
+    output = r'{"text": "she said \"hi\"", "path": "C:\\tmp", "route": "ok"}'
+    fields, clean = _extract_json_fields(output)
+    assert fields == {
+        "text": 'she said "hi"',
+        "path": "C:\\tmp",
+        "route": "ok",
+    }
+    assert clean == ""
+
+
+def test_extract_json_fields_last_top_level_object_wins_nested():
+    output = (
+        '{"route": "insufficient", "candidates": [{"title": "old"}]}\n'
+        'On reflection there is enough data.\n'
+        '{"route": "sufficient", "candidates": [{"title": "new"}]}'
+    )
+    fields, clean = _extract_json_fields(output)
+    assert fields["route"] == "sufficient"
+    assert fields["candidates"] == [{"title": "new"}]
+    assert clean == (
+        '{"route": "insufficient", "candidates": [{"title": "old"}]}\n'
+        "On reflection there is enough data."
+    )
+
+
+def test_extract_json_fields_incomplete_trailing_object_fails_safe():
+    # 截断的嵌套对象：安全契约是 fields={} + 原文返回（纯文本 fallback）。
+    output = 'Working on it.\n{"route": "sufficient", "candidates": [{"title": "A"}'
+    fields, clean = _extract_json_fields(output)
+    assert fields == {}
+    assert clean == output
+
+
+def test_extract_json_fields_deep_nesting():
+    output = '{"route": "ok", "data": {"items": [[1, {"x": 2}], {"y": {"z": 3}}]}}'
+    fields, clean = _extract_json_fields(output)
+    assert fields == {"route": "ok", "data": {"items": [[1, {"x": 2}], {"y": {"z": 3}}]}}
+    assert clean == ""
+
+
+
+def test_extract_json_fields_prose_quote_before_valid_json():
+    """回归：散文里的未闭合引号不得干扰后面的 JSON 发现。"""
+    output = 'The size is 12".\n{"route":"sufficient"}'
+    fields, clean = _extract_json_fields(output)
+    assert fields == {"route": "sufficient"}
+    assert clean == "The size is 12\"."
+
+
+def test_extract_json_fields_prose_quote_between_two_routes():
+    """回归：前一个有效 route + 散文引号 + 后一个有效 route——后者必须胜出。"""
+    output = '{"route":"insufficient"}\nThe size is 12".\n{"route":"sufficient"}'
+    fields, clean = _extract_json_fields(output)
+    assert fields == {"route": "sufficient"}
+    assert clean == '{"route":"insufficient"}\nThe size is 12".'
+
+
+def test_extract_json_fields_stray_prose_brace_before_valid_json():
+    """回归：散文里未闭合的 ``{`` 不得吞掉后面的完整对象。"""
+    output = 'The token starts with {.\n{"route":"sufficient"}'
+    fields, clean = _extract_json_fields(output)
+    assert fields == {"route": "sufficient"}
+    assert clean == "The token starts with {."
+
+
+def test_extract_json_fields_backslash_parity_before_closing_quote():
+    """回归：闭合引号前的反斜杠奇偶性——``\\\\`` 是转义反斜杠（字符串在此
+    闭合），``\\"`` 是转义引号（字符串继续）。扫描器必须与 json.loads 一致。"""
+    output = r'{"a": "ends with \\", "b": "has \" inside", "route": "ok"}'
+    fields, clean = _extract_json_fields(output)
+    assert fields["a"] == "ends with \\"
+    assert fields["b"] == 'has " inside'
+    assert fields["route"] == "ok"
+    assert clean == ""
+
+
+def test_extract_json_fields_markdown_code_fence():
+    output = "```json\n{\"route\": \"sufficient\"}\n```"
+    fields, clean = _extract_json_fields(output)
+    assert fields == {"route": "sufficient"}
+    # JSON 被摘走后围栏骨架仍在（保留换行）——展示文本不为空即可。
+    assert clean == "```json\n\n```"
+
+
+def test_extract_json_fields_trailing_prose_after_json():
+    output = '{"route": "sufficient"}\nThat is my final answer.'
+    fields, clean = _extract_json_fields(output)
+    assert fields == {"route": "sufficient"}
+    assert clean == "That is my final answer."
+
+
+def test_extract_json_fields_complete_then_truncated_object():
+    """契约固定：完整对象在前、截断对象在后——截断对象不产生有效 span，
+    因此最后有效对象仍是前面的完整对象（"最后完整对象胜出"语义）。
+    截断对象自身（"trailing 截断" 用例）才走 failsafe 返回 {}。"""
+    output = '{"route": "sufficient"}\n{"summary": "partial", "candidates": [{"title"'
+    fields, clean = _extract_json_fields(output)
+    assert fields == {"route": "sufficient"}
+    assert clean == '{"summary": "partial", "candidates": [{"title"'
+
+
+
+def test_extract_json_fields_truncated_outer_does_not_leak_inner_route():
+    """回归（blocker）：截断的外层对象不得把内层对象提升为路由对象。"""
+    output = '{"wrapper":{"route":"sufficient"}'
+    fields, clean = _extract_json_fields(output)
+    assert fields == {}
+    assert clean == output
+
+
+def test_extract_json_fields_deep_truncated_nesting_no_inner_route():
+    """回归：更深的嵌套同理——每层内层对象都不能逃逸截断的外层。"""
+    output = '{"a":{"b":{"route":"sufficient"}'
+    fields, clean = _extract_json_fields(output)
+    assert fields == {}
+    assert clean == output
+    output3 = '{"a":{"b":{"c":{"route":"sufficient"}'
+    fields, clean = _extract_json_fields(output)
+    assert fields == {}
+
+
+def test_extract_json_fields_truncated_candidates_array_still_safe():
+    """既有契约：截断的 candidates 数组不得泄漏内层对象，failsafe 返回 {}。"""
+    output = 'Working on it.\n{"route": "sufficient", "candidates": [{"title": "A"}'
+    fields, clean = _extract_json_fields(output)
+    assert fields == {}
+    assert clean == output
+
+
+def test_extract_json_fields_nested_route_with_complete_outer():
+    """完整的外层对象里的合法嵌套照常提取——截断修复不影响合法嵌套。"""
+    output = '{"wrapper":{"route":"sufficient"}}'
+    fields, clean = _extract_json_fields(output)
+    assert fields == {"wrapper": {"route": "sufficient"}}
+    assert clean == ""
+
+
+def test_extract_json_fields_earlier_complete_route_beats_later_truncated_outer():
+    """契约固定：前面完整 route + 后面截断外层（内层 route 不可提升）——
+    "最后完整对象胜出"：前面的完整对象保留，截断外层不泄漏任何 route。"""
+    output = '{"route":"insufficient"}\n{"wrapper":{"route":"sufficient"}'
+    fields, clean = _extract_json_fields(output)
+    assert fields == {"route": "insufficient"}
+    assert clean == '{"wrapper":{"route":"sufficient"}'
+
 
 def test_executor_multi_route_extracts_from_llm_output(monkeypatch):
     """端到端验证 play_executor 的多路由分支实际调用了 _extract_json_fields——
@@ -397,6 +605,94 @@ def test_executor_writes_extra_json_fields_to_context(monkeypatch):
 
     assert fake_engine.written["summary"] == "customer is upset"
     assert "route" not in fake_engine.written  # route 只用来路由，不污染 context
+
+
+def test_integrated_nested_output_executor_context_judge(monkeypatch):
+    """集成回归：嵌套模型输出 -> make_executor -> 共享 context -> route_key
+    -> make_judge。
+
+    用例覆盖两个回归的端到端影响：嵌套模型输出（route + candidates 数组）
+    夹在含散文引号和散文花括号的输出里：
+    - "sufficient" 被选中（不是被散文引号破坏、也不是取到旧 route）
+    - transition 是 to:compare_candidates
+    - 嵌套 candidates 进入共享 context
+    - route 本身不写入共享 context
+    """
+    stage_by_name = {
+        "evaluate_results": {
+            "name": "evaluate_results",
+            "type": "agent",
+            "prompt_template": "evaluate the results",
+        },
+    }
+    routes_by_name = {
+        "evaluate_results": {"sufficient": "compare_candidates", "insufficient": "refine"}
+    }
+
+    class FakeBuilder:
+        def provider(self, *a, **k):
+            return self
+
+        def env(self, *a, **k):
+            return self
+
+        def build(self):
+            return "fake-harness"
+
+    # 模型原始输出：散文引号 + 散文花括号 + 前一个 insufficient + 最终嵌套 JSON。
+    raw_output = (
+        'The size is 12". The token starts with {.\n'
+        '{"route": "insufficient"}\n'
+        "On reflection there is enough data.\n"
+        '{"route": "sufficient", "candidates": ['
+        '{"title": "K2", "relevance": 9}, {"title": "Annapurna", "relevance": 7}]}'
+    )
+    monkeypatch.setattr(play.senza, "HarnessBuilder", lambda model: FakeBuilder())
+    monkeypatch.setattr(
+        play, "_run_agent_step", lambda harness, prompt, emit: (raw_output, 0)
+    )
+
+    stage_by_name = {
+        "evaluate_results": {
+            "name": "evaluate_results",
+            "type": "agent",
+            "prompt_template": "evaluate",
+        },
+    }
+    routes_by_name = {"evaluate_results": {"sufficient": "compare_candidates", "insufficient": "refine"}}
+
+    fake_engine = FakeEngine()
+    engine_ref = {"engine": fake_engine}
+    executor = make_executor(
+        stage_by_name,
+        routes_by_name,
+        "test-model",
+        provider=None,
+        env=None,
+        engine_ref=engine_ref,
+    )
+    result = executor({"step_id": "evaluate_results", "context": {}, "emit": None})
+
+    # 1. sufficient 被选中。
+    assert result["structured"]["route_key"] == "sufficient"
+    # 2. 嵌套 candidates 进入共享 context。
+    assert fake_engine.written["candidates"] == [
+        {"title": "K2", "relevance": 9},
+        {"title": "Annapurna", "relevance": 7},
+    ]
+    # 3. route 本身不写入共享 context。
+    assert "route" not in fake_engine.written
+
+    # 4. make_judge 把 route_key 翻成 to:compare_candidates。
+    judge = make_judge(routes_by_name)
+    transition = judge(
+        {
+            "step_id": "evaluate_results",
+            "structured": result["structured"],
+            "output": result["output"],
+        }
+    )
+    assert transition == "to:compare_candidates"
 
 
 def test_executor_writes_output_key_to_context(monkeypatch):
