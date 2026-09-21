@@ -290,120 +290,75 @@ def _run_agent_step(harness: Any, prompt: str, emit: Any) -> tuple[str, int]:
 # 其它想传给下游 step 的结构化字段。
 
 
-def _inside_abandoned_value(output: str, start: int) -> bool:
-    """判断 output[start] 处的候选是否是外层对象的**属性值/数组元素**。
+def _looks_like_json_container(output: str, start: int) -> bool:
+    """Return whether ``output[start]`` plausibly begins a JSON container.
 
-    从候选起点向前跳过空白，紧邻的非空白字符是 ``:``（属性值）或 ``[``
-    （数组元素）即视为外层结构的子值。散文里候选前的普通字符（``.``、
-    ``\n`` 等）不会命中，所以散文 ``{`` 后面的合法对象不受影响。
+    This small guard lets the structural scanner ignore prose punctuation such as
+    ``"starts with {."`` without attempting to validate the entire JSON value.
+    Final validation remains ``json.loads``' responsibility.
     """
-    k = start - 1
-    while k >= 0 and output[k] in " \t\r\n":
-        k -= 1
-    return k >= 0 and output[k] in ":["
+    opener = output[start]
+    k = start + 1
+    while k < len(output) and output[k] in " \t\r\n":
+        k += 1
+    if k == len(output):
+        return True
+    if opener == "{":
+        return output[k] in '\"}'
+    return output[k] in '[{\"]-0123456789tfn'
 
 
 def _last_top_level_json_object(output: str) -> tuple[int, int] | None:
     """扫描 output，返回最后一个完整顶层 ``{...}`` 对象的 (start, end)。
 
-    单趟扫描，带**有界候选恢复**：遇到 ``{`` 就开启一个候选对象，只有
-    候选激活期间才把 ``"`` 当 JSON 字符串处理（转义对 \\"、\\\\ 不结束
-    字符串）；深度归零即得到一个完整对象，继续向后找更靠后的。
+    单趟维护对象/数组栈。只有栈为空时开始的对象才是顶层候选；因此截断
+    外层中的属性对象和数组 sibling 都始终保留嵌套身份，不能在恢复扫描时
+    被提升。字符串里的括号和转义字符不参与结构计数。
 
-    恢复规则防止普通散文与截断输出破坏后面的 JSON 发现：
-    - 散文里的引号（``The size is 12"``）不影响候选状态——因为字符串
-      处理只在候选激活时生效，散文里的引号永远不会吞掉后面的 ``{``。
-    - 候选开启后若先碰到一个不属于候选内字符串的 ``"``（散文引号混进
-      候选内部）或扫描到尾部仍未闭合（截断/散文 ``{``），丢弃该候选并
-      从候选 start+1 重新扫描——后面的完整对象仍能被发现。
-    - **作废候选的子结构不得提升为顶层对象**：落在作废候选扫描范围内、
-      紧邻非空白前缀是 ``:`` 或 ``[`` 的候选（截断外层对象的属性值 /
-      数组元素）一律作废——否则截断的 ``{"wrapper":{"route":...}`` 会
-      泄漏内层 route，造成意外的工作流跳转。散文 ``{`` 后面的合法对象
-      不受影响（其前缀是普通散文字符，不是 ``:``/``[``）。
-
-    复杂度：正常输出接近 O(n)；最坏情况（大量互相嵌套的截断候选，
-    每次作废都从 start+1 重扫）为 O(n²)——对 LLM 输出规模足够，且
-    确定、有界、绝不 hang。合法嵌套不受影响：完整的外层对象闭合时
-    整体返回，内层候选永远不会被单独考虑。
+    散文中的引号在容器外被忽略；明显不是 JSON 起点的 ``{`` / ``[`` 也
+    被忽略，保留 ``The token starts with {.`` 后仍能发现合法 JSON 的行为。
+    完整顶层对象闭合后继续扫描，从而保持“最后一个完整顶层对象胜出”。
     """
     best: tuple[int, int] | None = None
-    i = 0
-    n = len(output)
-    # 被作废的候选 (start, scan 结束位置)：候选作废（截断未闭合、散文 }
-    # 提前结束）时记录它的扫描范围。落在作废候选扫描范围内、且紧邻的
-    # 非空白前缀是 ``:`` 或 ``[`` 的后续候选，是作废对象的**子结构**
-    # （属性值 / 数组元素）——必须拒绝，否则截断的
-    # ``{"wrapper":{"route":"sufficient"}`` 会把内层
-    # ``{"route":"sufficient"}`` 提升成路由对象，造成意外的工作流跳转。
-    abandoned: list[tuple[int, int]] = []
-    while i < n:
-        # 找下一个候选起点。
-        while i < n and output[i] != "{":
-            i += 1
-        if i >= n:
-            break
-        start = i
-        depth = 0
-        arr_depth = 0
-        in_string = False
-        escaped = False
-        j = i
-        failed = False
-        closed = None
-        while j < n:
-            ch = output[j]
-            if in_string:
-                if escaped:
-                    escaped = False
-                elif ch == "\\":
-                    escaped = True
-                elif ch == '"':
-                    in_string = False
+    stack: list[str] = []
+    root_start: int | None = None
+    root_is_object = False
+    in_string = False
+    escaped = False
+
+    for i, ch in enumerate(output):
+        if in_string:
+            if escaped:
+                escaped = False
+            elif ch == "\\":
+                escaped = True
             elif ch == '"':
-                in_string = True
-            elif ch == "{":
-                depth += 1
-            elif ch == "[":
-                arr_depth += 1
-            elif ch == "]":
-                if arr_depth > 0:
-                    arr_depth -= 1
-            elif ch == "}":
-                depth -= 1
-                if depth == 0:
-                    closed = j + 1
-                    break
-                if depth < 0:
-                    # 散文的 } 比候选的 { 先到——候选不成立。
-                    failed = True
-                    break
-            j += 1
-        if in_string or failed or depth > 0:
-            # 截断/未闭合候选（散文 { 把深度垫高，或散文 } 提前结束）：
-            # 整个候选作废。记录扫描范围，用于拒绝落在作废对象结构里的
-            # 内层候选。重扫从 start+1 开始（而不是从 j 继续，那样会把
-            # 后面的完整对象吞进死候选里）。
-            abandoned.append((start, j))
-            i = start + 1
-        else:
-            # depth==0 自然闭合：若此候选是某个作废候选扫描范围内的
-            # **子结构**（紧邻的非空白前缀是 ``:`` ——作废对象的属性值，
-            # 或 ``[`` ——作废对象的数组元素），它不是顶层对象，不能
-            # 提升为路由对象——作废并继续往后找。
-            in_abandoned = False
-            for a_start, a_end in abandoned:
-                if a_start < start < a_end and _inside_abandoned_value(
-                    output, start
-                ):
-                    in_abandoned = True
-                    break
-            if in_abandoned:
-                i = start + 1
+                in_string = False
+            continue
+
+        if stack and ch == '"':
+            in_string = True
+        elif ch in "{[":
+            if stack or _looks_like_json_container(output, i):
+                if not stack:
+                    root_start = i
+                    root_is_object = ch == "{"
+                stack.append(ch)
+        elif ch in "}]" and stack:
+            expected = "{" if ch == "}" else "["
+            if stack[-1] != expected:
+                stack.clear()
+                root_start = None
+                root_is_object = False
+                in_string = False
+                escaped = False
                 continue
-            # 合法的顶层对象：记录，并从候选结束处继续找更晚的对象。
-            best = (start, closed)
-            i = j
+            stack.pop()
+            if not stack:
+                if root_is_object and root_start is not None:
+                    best = (root_start, i + 1)
+                root_start = None
+                root_is_object = False
     return best
 
 
