@@ -536,6 +536,23 @@ def test_extract_json_fields_malformed_truncated_nested_siblings_do_not_escape()
     assert clean == output
 
 
+def test_extract_json_fields_mismatched_closer_does_not_promote_sibling_route():
+    output = '{"items":[{"bad": ]},{"route":"sufficient"}'
+    fields, clean = _extract_json_fields(output)
+    assert fields == {}
+    assert clean == output
+
+
+def test_extract_json_fields_mismatched_closer_preserves_previous_complete_route():
+    output = (
+        '{"route":"insufficient"}\n'
+        '{"items":[{"bad": ]},{"route":"sufficient"}'
+    )
+    fields, clean = _extract_json_fields(output)
+    assert fields == {"route": "insufficient"}
+    assert clean == '{"items":[{"bad": ]},{"route":"sufficient"}'
+
+
 def test_extract_json_fields_last_genuine_top_level_object_wins_after_nested_data():
     output = (
         '{"route":"insufficient","items":[{"route":"nested"}]}\n'
