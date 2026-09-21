@@ -500,6 +500,52 @@ def test_extract_json_fields_truncated_candidates_array_still_safe():
     assert clean == output
 
 
+def test_extract_json_fields_truncated_candidates_sibling_route_does_not_escape():
+    """Reviewer regression: a later array element remains nested after a comma."""
+    output = 'Working.\n{"summary":"x","candidates":[{"title":"A"},{"route":"sufficient"}'
+    fields, clean = _extract_json_fields(output)
+    assert fields == {}
+    assert clean == output
+
+
+def test_extract_json_fields_reviewer_exact_truncated_candidates_regression():
+    output = '{"summary":"x","candidates":[{"title":"A"},{"route":"sufficient"}'
+    fields, clean = _extract_json_fields(output)
+    assert fields == {}
+    assert clean == output
+
+
+def test_extract_json_fields_sibling_objects_in_truncated_array_do_not_escape():
+    output = '[{"title":"A"},{"route":"sufficient"}'
+    fields, clean = _extract_json_fields(output)
+    assert fields == {}
+    assert clean == output
+
+
+def test_extract_json_fields_nested_object_after_comma_in_truncated_outer_object():
+    output = '{"first":{"title":"A"},"second":{"route":"sufficient"}'
+    fields, clean = _extract_json_fields(output)
+    assert fields == {}
+    assert clean == output
+
+
+def test_extract_json_fields_malformed_truncated_nested_siblings_do_not_escape():
+    output = 'Analysis.\n{"items":[{"bad": tru},{"route":"sufficient"}'
+    fields, clean = _extract_json_fields(output)
+    assert fields == {}
+    assert clean == output
+
+
+def test_extract_json_fields_last_genuine_top_level_object_wins_after_nested_data():
+    output = (
+        '{"route":"insufficient","items":[{"route":"nested"}]}\n'
+        '{"route":"sufficient"}'
+    )
+    fields, clean = _extract_json_fields(output)
+    assert fields == {"route": "sufficient"}
+    assert clean == '{"route":"insufficient","items":[{"route":"nested"}]}'
+
+
 def test_extract_json_fields_nested_route_with_complete_outer():
     """完整的外层对象里的合法嵌套照常提取——截断修复不影响合法嵌套。"""
     output = '{"wrapper":{"route":"sufficient"}}'
