@@ -344,15 +344,10 @@ def _last_top_level_json_object(output: str) -> tuple[int, int] | None:
                     root_start = i
                     root_is_object = ch == "{"
                 stack.append(ch)
-        elif ch in "}]" and stack:
-            expected = "{" if ch == "}" else "["
+        elif ch in '}]' and stack:
+            expected = '{' if ch == '}' else '['
             if stack[-1] != expected:
-                stack.clear()
-                root_start = None
-                root_is_object = False
-                in_string = False
-                escaped = False
-                continue
+                return best
             stack.pop()
             if not stack:
                 if root_is_object and root_start is not None:
