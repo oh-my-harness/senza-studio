@@ -8,6 +8,10 @@ export interface AgentTeamEvent {
   message_type?: string;
   message_id?: string;
   broadcast_id?: string | null;
+  view_kind?: "group_message" | "group_reply" | "direct_message";
+  conversation?: string;
+  sequence?: number | null;
+  created_at?: string | null;
   [key: string]: unknown;
 }
 

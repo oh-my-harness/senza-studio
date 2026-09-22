@@ -12,6 +12,7 @@ import type {
   SettingsField,
   Spec,
 } from "./types";
+import type { AgentTeamEvent } from "./agentTeamEvents";
 import type { AgentInfo } from "./player/types";
 
 const BASE = "/api";
@@ -58,6 +59,13 @@ export const api = {
       `${BASE}/team/projects/restart?id=${encodeURIComponent(id)}`,
       { method: "POST" }
     ),
+  abortAgentTeam: (project: string, agent: string) =>
+    fetchJson<{ ok: boolean; interrupted?: string[] }>(
+      `${BASE}/team/agent/abort?project=${encodeURIComponent(
+        project
+      )}&agent=${encodeURIComponent(agent)}`,
+      { method: "POST" }
+    ),
   deleteAgentTeam: (id: string) =>
     fetchJson<{ ok: boolean }>(
       `${BASE}/team/projects?id=${encodeURIComponent(id)}`,
@@ -100,6 +108,17 @@ export const api = {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ project, target, text }),
     }),
+  getAgentTeamChatHistory: (
+    project: string,
+    agent: string,
+    limit = 50,
+    before?: number
+  ) =>
+    fetchJson<{ messages: AgentTeamEvent[] }>(
+      `${BASE}/team/chat?project=${encodeURIComponent(project)}&agent=${encodeURIComponent(
+        agent
+      )}&limit=${limit}${typeof before === "number" ? `&before=${before}` : ""}`
+    ),
   listAgentTeamTemplates: () =>
     fetchJson<{ templates: AgentTeamTemplate[] }>(`${BASE}/team/templates`),
   getAgentTeamStartup: () =>
