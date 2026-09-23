@@ -657,7 +657,10 @@ def click_button(session, text, timeout=15.0):
     expression = """
     (() => {
       const button = Array.from(document.querySelectorAll('button'))
-        .find((candidate) => candidate.textContent.includes(arguments[0]));
+        .find((candidate) =>
+          candidate.textContent.includes(arguments[0]) ||
+          candidate.getAttribute('aria-label') === arguments[0]
+        );
       if (!button || button.disabled) return false;
       button.click();
       return true;
@@ -922,7 +925,7 @@ def restart_agent_team(session, team_id):
 
 def delete_agent_team(session, team_id):
     session.evaluate("window.confirm = () => true")
-    click_button(session, "删除")
+    click_button(session, "删除团队")
     wait_for_ui(
         session,
         "Array.from(document.querySelector('[aria-label=\"选择团队\"]').options).length === 1",
