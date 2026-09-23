@@ -746,7 +746,7 @@ def open_agent_teams(session):
     click_button(session, "打开 Agent Teams")
     wait_for_ui(
         session,
-        "Boolean(document.querySelector('[data-testid=\"agent-team-list\"]'))",
+        "Boolean(document.querySelector('[aria-label=\"选择团队\"]'))",
         "Agent Team workspace visible",
     )
 
@@ -801,7 +801,7 @@ def create_agent_team(session, team_id):
     click_button(session, "创建团队")
     wait_for_ui(
         session,
-        f"document.querySelector('[data-testid=\"agent-team-list\"]').textContent.includes({json.dumps(team_id)})",
+        f"Array.from(document.querySelector('[aria-label=\"选择团队\"]').options).some((option) => option.value === {json.dumps(team_id)})",
         "created team visible",
         timeout=20.0,
     )
@@ -816,11 +816,14 @@ def create_agent_team(session, team_id):
 def select_team(session, team_id):
     expression = """
     (() => {
-      const list = document.querySelector('[data-testid="agent-team-list"]');
-      const button = Array.from(list.querySelectorAll('button'))
-        .find((candidate) => candidate.textContent.trim() === arguments[0]);
-      if (!button) return false;
-      button.click();
+      const select = document.querySelector('[aria-label="选择团队"]');
+      if (!Array.from(select.options).some((option) => option.value === arguments[0])) {
+        return false;
+      }
+      const prototype = window.HTMLSelectElement.prototype;
+      const setter = Object.getOwnPropertyDescriptor(prototype, 'value').set;
+      setter.call(select, arguments[0]);
+      select.dispatchEvent(new Event('change', {bubbles: true}));
       return true;
     })()
     """.replace(
@@ -905,7 +908,7 @@ def restart_agent_team(session, team_id):
     )
     wait_for_ui(
         session,
-        f"document.querySelector('[data-testid=\"agent-team-list\"]').textContent.includes({json.dumps(team_id)})",
+        f"Array.from(document.querySelector('[aria-label=\"选择团队\"]').options).some((option) => option.value === {json.dumps(team_id)})",
         "team remains after restart",
         timeout=20.0,
     )
@@ -922,7 +925,7 @@ def delete_agent_team(session, team_id):
     click_button(session, "删除")
     wait_for_ui(
         session,
-        "document.querySelector('[data-testid=\"agent-team-list\"]').textContent.trim() === '暂无团队'",
+        "Array.from(document.querySelector('[aria-label=\"选择团队\"]').options).length === 1",
         "team deleted",
         timeout=20.0,
     )
