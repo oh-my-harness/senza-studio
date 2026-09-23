@@ -863,10 +863,10 @@ def send_team_message(session, message):
         session,
         """
         (() => {
-          const state = document.querySelector(
+          const element = document.querySelector(
             '[data-testid="agent-team-connection"]'
-          ).textContent.trim();
-          return state === '已连接' ? true : state;
+          );
+          return element?.title === '已连接' ? true : element?.textContent.trim();
         })()
         """,
         "Agent Team event stream connected",
