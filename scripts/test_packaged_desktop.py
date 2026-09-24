@@ -416,6 +416,8 @@ def remove_tree_with_retry(path, timeout=15.0):
         try:
             shutil.rmtree(path)
             return
+        except FileNotFoundError:
+            return
         except PermissionError as error:
             last_error = error
             time.sleep(0.25)
