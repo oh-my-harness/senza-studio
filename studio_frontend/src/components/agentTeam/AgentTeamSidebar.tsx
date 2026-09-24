@@ -131,9 +131,11 @@ export default function AgentTeamSidebar({
                         className="absolute -bottom-0.5 -right-0.5 h-3 w-3 animate-spin rounded-full border-2 border-blue-500 border-t-transparent"
                       />
                     )}
-                    <span
-                      className={`absolute -bottom-0.5 -right-0.5 h-3 w-3 rounded-full border-2 border-white ${agentStatusDotClass(conversation.status)}`}
-                    />
+                    {conversation.status !== "busy" && (
+                      <span
+                        className={`absolute -bottom-0.5 -right-0.5 h-3 w-3 rounded-full border-2 border-white ${agentStatusDotClass(conversation.status)}`}
+                      />
+                    )}
                   </>
                 )}
               </div>

@@ -1,5 +1,5 @@
 import type { AgentTeamPulse, AgentTeamProject, AgentTeamMember } from "../../types";
-import type { ChatItem } from "../../hooks/useAgentTeamWorkspace";
+import type { AgentTeamChatItem } from "../../agentTeamChatItems";
 import type { AgentTeamEventConnectionState } from "../../agentTeamEvents";
 
 function avatarColor(seed: string) {
@@ -58,15 +58,7 @@ export default function AgentTeamChatPanel({
   actionNotice: string | null;
   busyAction: string | null;
   chatEndRef: React.RefObject<HTMLDivElement>;
-  chatItems: {
-    key: string;
-    kind: "message" | "thought" | "system";
-    from: string;
-    text: string;
-    mine: boolean;
-    time?: string;
-    count?: number;
-  }[];
+  chatItems: AgentTeamChatItem[];
   chatFilter: string;
   setChatFilter: (value: string) => void;
   messageText: string;
