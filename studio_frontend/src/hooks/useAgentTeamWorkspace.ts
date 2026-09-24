@@ -2,15 +2,14 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { api } from "../api";
 import {
   chatMessagesForConversation,
-  chatMessageKey,
-  deleteProjectChatMessages,
   isAgentTeamChatMessage,
+  deleteProjectChatMessages,
   emptyChatStore,
-  OPERATOR_ID,
   TEAM_CONVERSATION_ID,
   upsertChatMessages,
   type ChatStore,
 } from "../agentTeamChat";
+import { buildAgentTeamChatItems, type AgentTeamChatItem } from "../agentTeamChatItems";
 import {
   connectAgentTeamEvents,
   type AgentTeamEvent,
@@ -31,35 +30,12 @@ export type AgentTeamMemberDraft = Omit<AgentTeamMember, "toolkits"> & {
   toolkits: string;
 };
 
-export interface ChatItem {
-  key: string;
-  kind: "message" | "thought" | "system";
-  from: string;
-  to?: string;
-  text: string;
-  mine: boolean;
-  messageType?: string;
-  time?: string;
-  count?: number;
-}
-
 export interface ConversationItem {
   id: string;
   name: string;
   preview?: string;
   persona?: string;
   status?: string;
-}
-
-function eventTime(event: AgentTeamEvent) {
-  return typeof event.ts === "string" ? event.ts : undefined;
-}
-
-function formatTime(value?: string) {
-  if (!value) return "";
-  const date = new Date(value);
-  if (Number.isNaN(date.getTime())) return "";
-  return date.toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit" });
 }
 
 function parseToolkits(value: string) {
@@ -273,78 +249,13 @@ export function useAgentTeamWorkspace() {
     [chatStore, selectedTeamId, activeConversation, events]
   );
 
-  const chatItems = useMemo<ChatItem[]>(() => {
-    if (!selectedTeamId) return [];
-    const items: ChatItem[] = [];
-    for (const event of conversationEvents) {
-      if (isAgentTeamChatMessage(event)) {
-        if (event.conversation !== activeConversation) continue;
-        items.push({
-          key: chatMessageKey(event),
-          kind: "message",
-          from: event.from ?? "unknown",
-          to: event.to,
-          text: event.text ?? "",
-          mine: event.from === OPERATOR_ID,
-          messageType: event.message_type,
-          time: formatTime(eventTime(event)),
-        });
-      } else if (event.type === "agent_thought") {
-        if (
-          activeConversation !== "team" &&
-          event.agent !== activeConversation &&
-          event.agent !== activeConversation
-        ) {
-          continue;
-        }
-        const last = items[items.length - 1];
-        if (
-          last &&
-          last.kind === "thought" &&
-          last.from === (event.agent ?? "unknown")
-        ) {
-          last.text += event.text ?? "";
-        } else {
-          items.push({
-            key: `thought:${event.agent ?? "unknown"}:${items.length}`,
-            kind: "thought",
-            from: event.agent ?? "unknown",
-            text: event.text ?? "",
-            mine: false,
-            time: formatTime(eventTime(event)),
-          });
-        }
-      } else if (event.type === "agent_error") {
-        if (
-          activeConversation !== "team" &&
-          event.agent !== activeConversation &&
-          event.agent !== activeConversation
-        ) {
-          continue;
-        }
-        const from = event.agent ?? "unknown";
-        const text = event.text ?? "";
-        const last = items[items.length - 1];
-        if (last && last.kind === "system" && last.from === from && last.text === text) {
-          last.count = (last.count ?? 1) + 1;
-          last.time = formatTime(eventTime(event));
-          continue;
-        }
-        items.push({
-          key: `sys:${from}:${items.length}`,
-          kind: "system",
-          from,
-          text,
-          mine: false,
-          time: formatTime(eventTime(event)),
-          count: 1,
-        });
-      }
-    }
-    return chatFilter === "all"
-      ? items
-      : items.filter((item) => item.from === chatFilter);
-  }, [conversationEvents, selectedTeamId, activeConversation, chatFilter]);
+  const chatItems = useMemo<AgentTeamChatItem[]>(
+    () =>
+      selectedTeamId
+        ? buildAgentTeamChatItems(conversationEvents, activeConversation, chatFilter)
+        : [],
+    [conversationEvents, selectedTeamId, activeConversation, chatFilter]
+  );
 
   const lastMessages = useMemo(() => {
     const previews = new Map<string, string>();
