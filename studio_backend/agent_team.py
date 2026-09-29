@@ -324,6 +324,7 @@ def install_agent_team_proxy(
                 ping_timeout=20,
                 max_size=MAX_EVENT_BYTES,
                 proxy=None,
+                origin=runtime.base_url,
             ) as upstream:
 
                 async def relay_events() -> None:
@@ -361,6 +362,8 @@ def install_agent_team_proxy(
                     task.cancel()
                 await asyncio.gather(*pending, return_exceptions=True)
 
+                if relay_task.cancelled():
+                    return
                 relay_error = relay_task.exception()
                 if relay_error is None:
                     try:

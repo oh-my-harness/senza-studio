@@ -416,6 +416,8 @@ def remove_tree_with_retry(path, timeout=15.0):
         try:
             shutil.rmtree(path)
             return
+        except FileNotFoundError:
+            return
         except PermissionError as error:
             last_error = error
             time.sleep(0.25)
@@ -657,7 +659,10 @@ def click_button(session, text, timeout=15.0):
     expression = """
     (() => {
       const button = Array.from(document.querySelectorAll('button'))
-        .find((candidate) => candidate.textContent.includes(arguments[0]));
+        .find((candidate) =>
+          candidate.textContent.includes(arguments[0]) ||
+          candidate.getAttribute('aria-label') === arguments[0]
+        );
       if (!button || button.disabled) return false;
       button.click();
       return true;
@@ -707,10 +712,10 @@ def set_input_value(session, aria_label, value):
             `[aria-label=${selector}], [placeholder=${selector}]`
           );
           if (!input) return false;
-          const setter = Object.getOwnPropertyDescriptor(
-            window.HTMLInputElement.prototype,
-            'value'
-          ).set;
+          const prototype = input instanceof HTMLTextAreaElement
+            ? window.HTMLTextAreaElement.prototype
+            : window.HTMLInputElement.prototype;
+          const setter = Object.getOwnPropertyDescriptor(prototype, 'value').set;
           setter.call(input, arguments[1]);
           input.dispatchEvent(new Event('input', {bubbles: true}));
           return true;
@@ -746,7 +751,7 @@ def open_agent_teams(session):
     click_button(session, "打开 Agent Teams")
     wait_for_ui(
         session,
-        "Boolean(document.querySelector('[data-testid=\"agent-team-list\"]'))",
+        "Boolean(document.querySelector('[aria-label=\"选择团队\"]'))",
         "Agent Team workspace visible",
     )
 
@@ -801,7 +806,7 @@ def create_agent_team(session, team_id):
     click_button(session, "创建团队")
     wait_for_ui(
         session,
-        f"document.querySelector('[data-testid=\"agent-team-list\"]').textContent.includes({json.dumps(team_id)})",
+        f"Array.from(document.querySelector('[aria-label=\"选择团队\"]').options).some((option) => option.value === {json.dumps(team_id)})",
         "created team visible",
         timeout=20.0,
     )
@@ -816,11 +821,14 @@ def create_agent_team(session, team_id):
 def select_team(session, team_id):
     expression = """
     (() => {
-      const list = document.querySelector('[data-testid="agent-team-list"]');
-      const button = Array.from(list.querySelectorAll('button'))
-        .find((candidate) => candidate.textContent.trim() === arguments[0]);
-      if (!button) return false;
-      button.click();
+      const select = document.querySelector('[aria-label="选择团队"]');
+      if (!Array.from(select.options).some((option) => option.value === arguments[0])) {
+        return false;
+      }
+      const prototype = window.HTMLSelectElement.prototype;
+      const setter = Object.getOwnPropertyDescriptor(prototype, 'value').set;
+      setter.call(select, arguments[0]);
+      select.dispatchEvent(new Event('change', {bubbles: true}));
       return true;
     })()
     """.replace(
@@ -842,18 +850,17 @@ def select_team(session, team_id):
     )
 
 
-def select_planner_and_send_message(session, message):
-    click_button(session, "planner")
+def send_team_message(session, message):
     wait_for_ui(
         session,
-        "document.querySelector('#agent-team-message').disabled === false",
-        "planner selected and message input enabled",
+        "document.querySelector('[aria-label=\"团队消息\"]') !== null",
+        "team message input visible",
     )
-    set_input_value(session, "输入任务或消息", message)
+    set_input_value(session, "团队消息", message)
     click_button(session, "发送")
     wait_for_ui(
         session,
-        "document.querySelector('#agent-team-message').value === ''",
+        "document.querySelector('[aria-label=\"团队消息\"]').value === ''",
         "chat message accepted",
         timeout=20.0,
     )
@@ -861,10 +868,10 @@ def select_planner_and_send_message(session, message):
         session,
         """
         (() => {
-          const state = document.querySelector(
+          const element = document.querySelector(
             '[data-testid="agent-team-connection"]'
-          ).textContent.trim();
-          return state === '已连接' ? true : state;
+          );
+          return element?.title === '已连接' ? true : element?.textContent.trim();
         })()
         """,
         "Agent Team event stream connected",
@@ -874,7 +881,9 @@ def select_planner_and_send_message(session, message):
         session,
         f"""
         (() => {{
-          const text = document.querySelector('[data-testid="agent-team-events"]').textContent;
+          const text = document.querySelector(
+            '[data-testid="agent-team-conversation"]'
+          ).textContent;
           return text.includes({json.dumps(message)}) ? true : text;
         }})()
         """,
@@ -904,7 +913,7 @@ def restart_agent_team(session, team_id):
     )
     wait_for_ui(
         session,
-        f"document.querySelector('[data-testid=\"agent-team-list\"]').textContent.includes({json.dumps(team_id)})",
+        f"Array.from(document.querySelector('[aria-label=\"选择团队\"]').options).some((option) => option.value === {json.dumps(team_id)})",
         "team remains after restart",
         timeout=20.0,
     )
@@ -918,10 +927,10 @@ def restart_agent_team(session, team_id):
 
 def delete_agent_team(session, team_id):
     session.evaluate("window.confirm = () => true")
-    click_button(session, "删除")
+    click_button(session, "删除团队")
     wait_for_ui(
         session,
-        "document.querySelector('[data-testid=\"agent-team-list\"]').textContent.trim() === '暂无团队'",
+        "Array.from(document.querySelector('[aria-label=\"选择团队\"]').options).length === 1",
         "team deleted",
         timeout=20.0,
     )
@@ -937,7 +946,7 @@ def drive_agent_team_workspace(port, team_id, message, configure, create, restar
             create_agent_team(session, team_id)
         else:
             select_team(session, team_id)
-        select_planner_and_send_message(session, message)
+        send_team_message(session, message)
         if restart:
             restart_agent_team(session, team_id)
         if delete:

@@ -11,7 +11,7 @@ export interface Step {
   tool?: string;
   component?: string;
   message?: string;
-  ui?: { display: DisplayType; fields?: string[] };
+  ui?: { display: DisplayType; fields?: string[]; title?: string; choice_labels?: Record<string, string> };
   [key: string]: unknown; // next_on_* edges, _component, etc.
 }
 
@@ -181,6 +181,22 @@ export interface AgentTeamAgent {
     task?: string | null;
     tools?: string[];
   } | null;
+}
+
+export interface AgentTeamMember {
+  id: string;
+  persona: string;
+  role_label: string;
+  model: string;
+  toolkits: string[];
+}
+
+export interface AgentTeamMemberInput {
+  id: string;
+  persona: string;
+  role_label: string;
+  model: string;
+  toolkits: string[];
 }
 
 export interface AgentTeamPendingMessage {

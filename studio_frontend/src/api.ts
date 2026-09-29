@@ -5,11 +5,14 @@ import type {
   AgentTeamSettings,
   AgentTeamStartupRecovery,
   AgentTeamTemplate,
+  AgentTeamMember,
+  AgentTeamMemberInput,
   ChatMessage,
   ProjectMeta,
   SettingsField,
   Spec,
 } from "./types";
+import type { AgentTeamEvent } from "./agentTeamEvents";
 import type { AgentInfo } from "./player/types";
 
 const BASE = "/api";
@@ -56,6 +59,13 @@ export const api = {
       `${BASE}/team/projects/restart?id=${encodeURIComponent(id)}`,
       { method: "POST" }
     ),
+  abortAgentTeam: (project: string, agent: string) =>
+    fetchJson<{ ok: boolean; interrupted?: string[] }>(
+      `${BASE}/team/agent/abort?project=${encodeURIComponent(
+        project
+      )}&agent=${encodeURIComponent(agent)}`,
+      { method: "POST" }
+    ),
   deleteAgentTeam: (id: string) =>
     fetchJson<{ ok: boolean }>(
       `${BASE}/team/projects?id=${encodeURIComponent(id)}`,
@@ -65,12 +75,50 @@ export const api = {
     fetchJson<AgentTeamPulse>(
       `${BASE}/team/pulse?project=${encodeURIComponent(id)}`
     ),
+  listAgentTeamMembers: (project: string) =>
+    fetchJson<{ members: AgentTeamMember[] }>(
+      `${BASE}/team/members?project=${encodeURIComponent(project)}`
+    ),
+  addAgentTeamMember: (project: string, input: AgentTeamMemberInput) =>
+    fetchJson<{ ok: boolean }>(`${BASE}/team/members`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ project, ...input }),
+    }),
+  updateAgentTeamMember: (
+    project: string,
+    id: string,
+    input: Omit<AgentTeamMemberInput, "id">
+  ) =>
+    fetchJson<{ ok: boolean; rebuilt: boolean }>(`${BASE}/team/agent/config`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ project, agent: id, ...input }),
+    }),
+  deleteAgentTeamMember: (project: string, id: string) =>
+    fetchJson<{ ok: boolean }>(
+      `${BASE}/team/members?project=${encodeURIComponent(
+        project
+      )}&agent=${encodeURIComponent(id)}`,
+      { method: "DELETE" }
+    ),
   sendAgentTeamMessage: (project: string, target: string, text: string) =>
     fetchJson<{ ok: boolean }>(`${BASE}/team/chat`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ project, target, text }),
     }),
+  getAgentTeamChatHistory: (
+    project: string,
+    agent: string,
+    limit = 50,
+    before?: number
+  ) =>
+    fetchJson<{ messages: AgentTeamEvent[] }>(
+      `${BASE}/team/chat?project=${encodeURIComponent(project)}&agent=${encodeURIComponent(
+        agent
+      )}&limit=${limit}${typeof before === "number" ? `&before=${before}` : ""}`
+    ),
   listAgentTeamTemplates: () =>
     fetchJson<{ templates: AgentTeamTemplate[] }>(`${BASE}/team/templates`),
   getAgentTeamStartup: () =>

@@ -133,6 +133,8 @@ def make_spec_callbacks(spec: Spec) -> dict[str, Callable[[dict, Any], str]]:
                 title=args.get("title"),
                 description=args.get("description"),
                 inputs=args.get("inputs"),
+                layout=args.get("layout"),
+                theme=args.get("theme"),
             )
             return "Agent UI updated."
         except SpecError as e:
@@ -303,6 +305,41 @@ _SCHEMAS: dict[str, dict] = {
                 "description": {
                     "type": "string",
                     "description": "One line under the title saying what it does",
+                },
+                "layout": {
+                    "type": "string",
+                    "enum": ["form", "dashboard"],
+                    "description": (
+                        "Overall shape of the product UI. 'form' = entry form, then a "
+                        "timeline of step results, then the answer — right for one-shot "
+                        "question/answer agents. 'dashboard' = no timeline, the "
+                        "table/chart steps laid out as a panel grid — right for agents "
+                        "whose output is data rather than prose. Omit it and the shape "
+                        "is inferred from the flow (table/chart steps and no chat steps "
+                        "=> dashboard); only set it when the inference is wrong."
+                    ),
+                },
+                "theme": {
+                    "type": "object",
+                    "description": (
+                        "Visual identity, so a delivered agent looks like the "
+                        "recipient's product rather than Studio's."
+                    ),
+                    "properties": {
+                        "accent": {
+                            "type": "string",
+                            "description": "CSS colour for buttons and highlights, e.g. #0f766e",
+                        },
+                        "mode": {"type": "string", "enum": ["light", "dark"]},
+                        "density": {
+                            "type": "string",
+                            "enum": ["comfortable", "compact"],
+                        },
+                        "logo": {
+                            "type": "string",
+                            "description": "Image URL or data: URI shown in the header",
+                        },
+                    },
                 },
                 "inputs": {
                     "type": "object",

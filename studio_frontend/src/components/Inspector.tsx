@@ -154,7 +154,7 @@ export default function Inspector({ projectId }: { projectId: string }) {
     setDraft((d) => (d ? { ...d, [key]: value } : d));
   };
 
-  const updateUi = (key: "display" | "fields", value: unknown) => {
+  const updateUi = (key: "display" | "fields" | "title", value: unknown) => {
     setDraft((d) =>
       d ? { ...d, ui: { ...(d.ui || { display: "none" }), [key]: value } } : d
     );
@@ -241,6 +241,20 @@ export default function Inspector({ projectId }: { projectId: string }) {
           </div>
         )}
         <div className="pt-2 border-t border-gray-100">
+          <label className="block text-xs text-gray-500 mb-1">ui.title</label>
+          <input
+            value={(draft.ui?.title as string) || ""}
+            onChange={(e) => updateUi("title", e.target.value)}
+            placeholder={draft.name}
+            className="w-full rounded border border-gray-200 px-2 py-1 text-sm"
+          />
+          <p className="mt-1 mb-2 text-xs text-gray-400">
+            这一步在产品界面上的标题。留空就用 step 名推出来的
+            （draft_refund_response → Draft refund response）——看板布局里每块
+            面板顶上就是它，值得认真起个名。
+          </p>
+        </div>
+        <div>
           <label className="block text-xs text-gray-500 mb-1">ui.display</label>
           <select
             value={draft.ui?.display || "none"}

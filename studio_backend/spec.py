@@ -10,6 +10,13 @@ from typing import Any
 
 import yaml
 
+from senza_studio_runtime.contract import (
+    LAYOUTS,
+    THEME_DENSITIES,
+    THEME_KEYS,
+    THEME_MODES,
+)
+
 
 class SpecError(Exception):
     """Spec 操作错误。"""
@@ -20,8 +27,33 @@ _EDGE_PREFIX = "next_on_"
 
 # spec 顶层 ui 块：导出产品（和 Game view，它就是那个产品的预览）的界面文案。
 # 不放进 stages 里——这些是整个 agent 的属性，不属于任何一个 step。
-_AGENT_UI_KEYS = {"title", "description", "inputs"}
+_AGENT_UI_KEYS = {"title", "description", "inputs", "layout", "theme"}
 _AGENT_UI_INPUT_KEYS = {"label", "placeholder", "multiline"}
+# 形态和主题的合法取值由 runtime 的契约模块定义——那边是唯一的真相来源
+# （前端和导出项目都从它拿），这里 import 过来校验，不另抄一份枚举。
+_AGENT_UI_THEME_KEYS = set(THEME_KEYS)
+
+
+def _check_theme(theme: dict) -> None:
+    """主题只有四个键，取值也只有几种。运行时对写错的一律忽略（界面不该因为
+    一个拼错的键名白屏），所以必须在编辑时报出来，否则作者改了半天没生效。"""
+    unknown = set(theme) - _AGENT_UI_THEME_KEYS
+    if unknown:
+        raise SpecError(
+            f"ui.theme has unknown keys: {sorted(unknown)} "
+            f"(expected {sorted(_AGENT_UI_THEME_KEYS)})"
+        )
+    mode = theme.get("mode")
+    if mode is not None and mode not in THEME_MODES:
+        raise SpecError(
+            f"unknown ui.theme.mode {mode!r} (expected one of {sorted(THEME_MODES)})"
+        )
+    density = theme.get("density")
+    if density is not None and density not in THEME_DENSITIES:
+        raise SpecError(
+            f"unknown ui.theme.density {density!r} "
+            f"(expected one of {sorted(THEME_DENSITIES)})"
+        )
 
 
 class Spec:
@@ -161,6 +193,8 @@ class Spec:
         title: str | None = None,
         description: str | None = None,
         inputs: dict[str, dict] | None = None,
+        layout: str | None = None,
+        theme: dict | None = None,
     ) -> None:
         """设置整个 agent 的界面文案（顶层 ui 块）。
 
@@ -176,6 +210,19 @@ class Spec:
             ui["title"] = title
         if description is not None:
             ui["description"] = description
+        if layout is not None:
+            if layout not in LAYOUTS:
+                raise SpecError(
+                    f"unknown layout {layout!r} (expected one of {sorted(LAYOUTS)})"
+                )
+            ui["layout"] = layout
+        if theme is not None:
+            merged_theme = ui.setdefault("theme", {})
+            if not isinstance(merged_theme, dict):
+                merged_theme = {}
+                ui["theme"] = merged_theme
+            _check_theme(theme)
+            merged_theme.update(theme)
         if inputs is not None:
             merged = ui.setdefault("inputs", {})
             if not isinstance(merged, dict):
@@ -250,6 +297,16 @@ class Spec:
                     f"top-level 'ui' has unknown keys: {sorted(unknown)} "
                     f"(expected {sorted(_AGENT_UI_KEYS)})"
                 )
+            layout = ui.get("layout")
+            if layout is not None and layout not in LAYOUTS:
+                raise SpecError(
+                    f"unknown layout {layout!r} (expected one of {sorted(LAYOUTS)})"
+                )
+            theme = ui.get("theme")
+            if theme is not None:
+                if not isinstance(theme, dict):
+                    raise SpecError("ui.theme must be an object")
+                _check_theme(theme)
             inputs = ui.get("inputs")
             if inputs is not None:
                 if not isinstance(inputs, dict):

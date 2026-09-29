@@ -147,7 +147,7 @@ returns `201`; accepted mutation conflicts and invalid requests use `409` and
 
 | Method | Path | Purpose |
 | --- | --- | --- |
-| `POST` | `/api/team/chat` | Submit operator text to one member. |
+| `POST` | `/api/team/chat` | Submit operator text to one member or the whole team. |
 | `POST` | `/api/team/agent/inject?project={id}&agent={id}` | Steer a member's current or next turn. |
 | `POST` | `/api/team/agent/abort?project={id}&agent={id}` | Abort a member's current run. |
 
@@ -164,6 +164,9 @@ Chat request:
 Chat returns `202` after enqueueing the message. It does not wait for model
 completion. Injection has the same body shape without `project` and `target`,
 and returns `{ "ok": true }`.
+
+Use `target: "team"` to broadcast from the operator to every current member.
+Any other target must name an existing member.
 
 ### 4.4 Issues
 
@@ -259,6 +262,9 @@ for runtime execution.
 | `GET` | `/api/team/agent/session?project={id}&agent={id}` | Return active session message history. |
 | `GET` | `/api/team/agent/config?project={id}&agent={id}` | Return member config projection. |
 | `PUT` | `/api/team/agent/config` | Update member config. |
+| `GET` | `/api/team/members?project={id}` | List declarative member specs for editing. |
+| `POST` | `/api/team/members` | Add and immediately start a member. |
+| `DELETE` | `/api/team/members?project={id}&agent={id}` | Stop and remove a member. |
 
 Pulse includes `agents`, pending traffic, pending timers, and issue counts. The
 exact agent fields are runtime observability data and may gain additive fields;
@@ -302,6 +308,40 @@ changes rebuild the member. The response includes:
 ```json
 { "ok": true, "rebuilt": true }
 ```
+
+Member list response:
+
+```json
+{
+  "members": [
+    {
+      "id": "planner",
+      "persona": "careful and pragmatic",
+      "role_label": "Planner",
+      "model": "main",
+      "toolkits": ["fs"]
+    }
+  ]
+}
+```
+
+Add-member request:
+
+```json
+{
+  "project": "example",
+  "id": "reviewer",
+  "persona": "rigorous and direct",
+  "role_label": "Reviewer",
+  "model": "main",
+  "toolkits": ["memory"]
+}
+```
+
+Adding a member establishes contacts with existing members, starts its runner,
+and persists `team.json`. Deleting a member stops its runner, unregisters its
+observability state, and removes its spec. The Studio UI treats member specs as
+editable configuration and sends every mutation through these endpoints.
 
 ### 4.8 Templates and upgrades
 
@@ -350,8 +390,41 @@ its own frontend WebSocket without forwarding the runtime token.
 
 The protocol sends one JSON object per text frame and first replays recent
 events before streaming live events. Unknown event types must be ignored.
-Current event families include operator messages, issue changes, and agent
-errors; producers may add new types or additive fields.
+Current event families include team messages, agent thinking deltas, operator
+messages, issue changes, and agent errors; producers may add new types or
+additive fields.
+
+`team_message` covers operator-to-member, operator-to-team, and member-to-member
+traffic. A team broadcast repeats the same `broadcast_id` for every recipient;
+consumers should deduplicate by that ID when presenting one shared chat.
+
+```json
+{
+  "type": "team_message",
+  "project": "example",
+  "from": "operator",
+  "to": "planner",
+  "message_type": "broadcast",
+  "text": "operator message",
+  "broadcast_id": "uuid",
+  "ts": "2026-09-19T00:00:00Z"
+}
+```
+
+`agent_thought` is a live thinking delta for the shared process stream. It is
+intended for operator-visible process inspection and must not be injected into
+another member's model context.
+
+```json
+{
+  "type": "agent_thought",
+  "project": "example",
+  "agent": "planner",
+  "message_id": "message-id",
+  "text": "thinking delta",
+  "ts": "2026-09-19T00:00:00Z"
+}
+```
 
 ## 6. Compatibility policy
 
@@ -374,8 +447,9 @@ tests for:
 4. team list, create, restart, and delete;
 5. workspace grant add/list/remove and unauthorized path denial;
 6. directory browsing and symlink escape denial;
-7. chat enqueue and member not-found errors;
-8. pulse and session projections;
-9. settings redaction and member API-key redaction;
-10. event replay and live forwarding;
-11. desktop launch, backend exit, and clean shutdown.
+7. chat enqueue, team broadcast, and member not-found errors;
+8. member list, add, update, and delete;
+9. pulse and session projections;
+10. settings redaction and member API-key redaction;
+11. `team_message` and `agent_thought` event replay/live forwarding;
+12. desktop launch, backend exit, and clean shutdown.

@@ -1,4 +1,5 @@
 // studio_frontend/src/player/types.ts
+import type { AgentTheme } from "./theme";
 //
 // 后端 contract.describe_agent 回的那份契约，以及一次运行的可观测状态。
 // 这两样东西 Studio 的 Game view 和导出 Agent 完全一致——它们渲染的是同一个
@@ -35,6 +36,10 @@ export interface AgentStep {
 export interface AgentInfo {
   title: string;
   description: string;
+  /** 整体形态。后端回的永远是**最终生效的那个**（作者写的，或按流程形态
+   *  猜的）——前端不该也去猜一遍，那就又是两份实现了。 */
+  layout: string;
+  theme: AgentTheme;
   inputs: AgentInput[];
   steps: Record<string, AgentStep>;
   /** 组件展不开之类——界面显示一条"这个 agent 装坏了"，而不是白屏 */
