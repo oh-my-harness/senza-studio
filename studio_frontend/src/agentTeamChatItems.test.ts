@@ -32,7 +32,7 @@ describe("buildAgentTeamChatItems", () => {
     expect(items.map((item) => item.key)).toEqual(["group"]);
   });
 
-  it("folds consecutive thoughts and repeated errors", () => {
+  it("ignores thought deltas and folds repeated errors", () => {
     const items = buildAgentTeamChatItems(
       [
         { type: "agent_thought", agent: "scout", text: "A" },
@@ -46,8 +46,6 @@ describe("buildAgentTeamChatItems", () => {
     );
 
     expect(items.map(({ kind, from, text, count }) => ({ kind, from, text, count }))).toEqual([
-      { kind: "thought", from: "scout", text: "AB", count: undefined },
-      { kind: "thought", from: "judge", text: "C", count: undefined },
       { kind: "system", from: "scout", text: "timeout", count: 2 },
     ]);
   });

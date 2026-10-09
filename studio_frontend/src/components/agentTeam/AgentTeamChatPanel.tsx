@@ -1,6 +1,7 @@
 import type { AgentTeamPulse, AgentTeamProject, AgentTeamMember } from "../../types";
 import type { AgentTeamChatItem } from "../../agentTeamChatItems";
 import type { AgentTeamEventConnectionState } from "../../agentTeamEvents";
+import Markdown from "../Markdown";
 
 function avatarColor(seed: string) {
   const palette = [
@@ -255,16 +256,11 @@ export default function AgentTeamChatPanel({
                     {item.time}
                   </p>
                   <div
-                    className={`mt-1 inline-block whitespace-pre-wrap rounded-xl px-3 py-2 text-sm ${
-                      item.kind === "thought"
-                        ? "border border-violet-100 bg-violet-50 text-xs italic text-violet-700"
-                        : item.mine
-                          ? "bg-[#95EC69] text-gray-900"
-                          : "bg-white text-gray-800"
+                    className={`mt-1 inline-block rounded-xl px-3 py-2 text-sm ${
+                      item.mine ? "bg-[#95EC69] text-gray-900" : "bg-white text-gray-800"
                     }`}
                   >
-                    {item.kind === "thought" && "💭 "}
-                    {item.text}
+                    <Markdown text={item.text} />
                   </div>
                 </div>
               </div>

@@ -8,7 +8,7 @@ import type { AgentTeamEvent } from "./agentTeamEvents";
 
 export interface AgentTeamChatItem {
   key: string;
-  kind: "message" | "thought" | "system";
+  kind: "message" | "system";
   from: string;
   to?: string;
   text: string;
@@ -58,25 +58,6 @@ export function buildAgentTeamChatItems(
         messageType: event.message_type,
         time: formatTime(eventTime(event)),
       });
-      continue;
-    }
-
-    if (event.type === "agent_thought") {
-      if (!isAgentOwnedItem(event, activeConversation)) continue;
-      const last = items[items.length - 1];
-      const from = event.agent ?? "unknown";
-      if (last && last.kind === "thought" && last.from === from) {
-        last.text += event.text ?? "";
-      } else {
-        items.push({
-          key: `thought:${from}:${items.length}`,
-          kind: "thought",
-          from,
-          text: event.text ?? "",
-          mine: false,
-          time: formatTime(eventTime(event)),
-        });
-      }
       continue;
     }
 
