@@ -15,6 +15,14 @@ import {
   type AgentTeamEvent,
   type AgentTeamEventConnectionState,
 } from "../agentTeamEvents";
+import {
+  clearUnreadConversation,
+  deleteProjectUnread,
+  loadUnreadStore,
+  saveUnreadStore,
+  trackUnreadMessages,
+  unreadCount,
+} from "../agentTeamUnread";
 import type {
   AgentTeamProject,
   AgentTeamPulse,
@@ -36,6 +44,7 @@ export interface ConversationItem {
   preview?: string;
   persona?: string;
   status?: string;
+  unreadCount: number;
 }
 
 function parseToolkits(value: string) {
@@ -58,6 +67,7 @@ export function useAgentTeamWorkspace() {
   const [members, setMembers] = useState<AgentTeamMember[]>([]);
   const [events, setEvents] = useState<AgentTeamEvent[]>([]);
   const [chatStore, setChatStore] = useState<ChatStore>(emptyChatStore);
+  const [unreadStore, setUnreadStore] = useState(loadUnreadStore);
   const [connectionState, setConnectionState] =
     useState<AgentTeamEventConnectionState>("connecting");
   const [loadError, setLoadError] = useState<string | null>(null);
@@ -89,6 +99,10 @@ export function useAgentTeamWorkspace() {
   const [showSettingsModal, setShowSettingsModal] = useState(false);
   const [showMentionMenu, setShowMentionMenu] = useState(false);
   const chatEndRef = useRef<HTMLDivElement | null>(null);
+  const activeChatRef = useRef({
+    teamId: selectedTeamId,
+    conversation: activeConversation,
+  });
 
   const selectedTeam = useMemo(
     () => teams.find((team) => team.id === selectedTeamId) ?? null,
@@ -104,6 +118,10 @@ export function useAgentTeamWorkspace() {
     () => new Map(members.map((member) => [member.id, member])),
     [members]
   );
+
+  useEffect(() => {
+    activeChatRef.current = { teamId: selectedTeamId, conversation: activeConversation };
+  }, [activeConversation, selectedTeamId]);
 
   const loadTeams = useCallback(async () => {
     try {
@@ -226,6 +244,14 @@ export function useAgentTeamWorkspace() {
           return [...previous, event].slice(-500);
         });
         if (project && isAgentTeamChatMessage(event)) {
+          const isActiveConversation =
+            project === activeChatRef.current.teamId &&
+            event.conversation === activeChatRef.current.conversation;
+          if (!isActiveConversation) {
+            setUnreadStore((previous) =>
+              trackUnreadMessages(previous, project, [event])
+            );
+          }
           setChatStore((previous) =>
             upsertChatMessages(previous, project, event.conversation, [event])
           );
@@ -276,6 +302,7 @@ export function useAgentTeamWorkspace() {
         id: TEAM_CONVERSATION_ID,
         name: "团队群聊",
         preview: lastMessages.get("team"),
+        unreadCount: unreadCount(unreadStore, selectedTeamId, TEAM_CONVERSATION_ID),
       },
       ...members.map((member) => ({
         id: member.id,
@@ -283,9 +310,21 @@ export function useAgentTeamWorkspace() {
         preview: lastMessages.get(member.id),
         persona: member.persona,
         status: pulseByAgentId.get(member.id)?.status,
+        unreadCount: unreadCount(unreadStore, selectedTeamId, member.id),
       })),
     ];
-  }, [selectedTeam, members, pulseByAgentId, lastMessages]);
+  }, [
+    selectedTeam,
+    selectedTeamId,
+    members,
+    pulseByAgentId,
+    lastMessages,
+    unreadStore,
+  ]);
+
+  useEffect(() => {
+    saveUnreadStore(unreadStore);
+  }, [unreadStore]);
 
   useEffect(() => {
     chatEndRef.current?.scrollIntoView({ block: "end" });
@@ -294,14 +333,18 @@ export function useAgentTeamWorkspace() {
   const selectTeam = useCallback((teamId: string) => {
     setSelectedTeamId(teamId);
     setActiveConversation("team");
+    setUnreadStore((current) => clearUnreadConversation(current, teamId, TEAM_CONVERSATION_ID));
     setMemberDraft(null);
     setMessageText("");
   }, []);
 
   const selectConversation = useCallback((conversationId: string) => {
     setActiveConversation(conversationId);
+    setUnreadStore((current) =>
+      clearUnreadConversation(current, selectedTeamId, conversationId)
+    );
     setMessageText("");
-  }, []);
+  }, [selectedTeamId]);
 
   const abortActive = useCallback(async () => {
     if (!selectedTeam) return;
@@ -415,6 +458,7 @@ export function useAgentTeamWorkspace() {
       await api.deleteAgentTeam(teamId);
       setEvents((previous) => previous.filter((event) => event.project !== teamId));
       setChatStore((previous) => deleteProjectChatMessages(previous, teamId));
+      setUnreadStore((previous) => deleteProjectUnread(previous, teamId));
       await loadTeams();
       setSelectedTeamId((current) => (current === teamId ? null : current));
       setActiveConversation(TEAM_CONVERSATION_ID);
