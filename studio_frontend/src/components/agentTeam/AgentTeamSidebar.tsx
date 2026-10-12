@@ -147,6 +147,15 @@ export default function AgentTeamSidebar({
                   {conversation.preview || conversation.persona}
                 </p>
               </div>
+              {conversation.unreadCount > 0 && (
+                <span
+                  aria-label={`${conversation.unreadCount} 条未读`}
+                  title={`${conversation.unreadCount} 条未读`}
+                  className="ml-1 flex h-5 min-w-5 flex-none items-center justify-center rounded-full bg-red-500 px-1.5 text-[11px] font-semibold leading-none text-white"
+                >
+                  {conversation.unreadCount > 99 ? "99+" : conversation.unreadCount}
+                </span>
+              )}
             </button>
           ))}
         </div>

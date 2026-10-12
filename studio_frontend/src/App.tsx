@@ -13,12 +13,15 @@ import BottomPanel from "./components/BottomPanel";
 import SettingsModal from "./components/SettingsModal";
 import StatusBar from "./components/StatusBar";
 import AgentTeamWorkspace from "./components/AgentTeamWorkspace";
+import { homeViewHash, parseHomeView, type HomeView } from "./homeView";
 import type { ProjectMeta } from "./types";
 import { splitToolCalls } from "./utils";
 
 export default function App() {
   const [projectId, setProjectId] = useState<string | null>(null);
-  const [homeView, setHomeView] = useState<"senza" | "agent-team">("senza");
+  const [homeView, setHomeView] = useState<HomeView>(() =>
+    parseHomeView(window.location.hash)
+  );
   const project = useStudioStore((s) => s.project);
   const setProject = useStudioStore((s) => s.setProject);
   const setSpec = useStudioStore((s) => s.setSpec);
@@ -39,6 +42,20 @@ export default function App() {
   useEffect(() => {
     api.listProjects().then(setProjects).catch(console.error);
   }, []);
+
+  useEffect(() => {
+    const syncHomeView = () => setHomeView(parseHomeView(window.location.hash));
+    window.addEventListener("hashchange", syncHomeView);
+    return () => window.removeEventListener("hashchange", syncHomeView);
+  }, []);
+
+  const switchHomeView = (view: HomeView) => {
+    setHomeView(view);
+    const nextHash = homeViewHash(view);
+    if (window.location.hash !== nextHash) {
+      window.history.replaceState(null, "", nextHash);
+    }
+  };
 
   // 打开项目
   const openProject = async (id: string) => {
@@ -92,7 +109,7 @@ export default function App() {
     api.listProjects().then(setProjects).catch(console.error);
   };
 
-  if (!projectId && homeView === "agent-team") {
+  if (homeView === "agent-team") {
     return (
       <div className="relative h-full w-full flex flex-col bg-gray-50">
         <button
@@ -121,13 +138,13 @@ export default function App() {
           <h1 className="text-2xl font-bold text-gray-700">Senza Studio</h1>
           <div className="mt-3 flex gap-2">
             <button
-              onClick={() => setHomeView("senza")}
+              onClick={() => switchHomeView("senza")}
               className="rounded-lg border border-gray-300 px-3 py-2 text-sm text-gray-600 hover:bg-gray-100"
             >
               Senza 项目
             </button>
             <button
-              onClick={() => setHomeView("agent-team")}
+              onClick={() => switchHomeView("agent-team")}
               className="rounded-lg bg-blue-500 px-3 py-2 text-sm text-white"
             >
               Agent Teams
@@ -167,7 +184,7 @@ export default function App() {
         <h1 className="text-2xl font-bold text-gray-700">Senza Studio</h1>
         <div className="flex gap-2">
           <button
-            onClick={() => setHomeView("agent-team")}
+            onClick={() => switchHomeView("agent-team")}
             className="rounded-lg border border-gray-300 px-3 py-2 text-sm text-gray-600 hover:bg-gray-100"
           >
             打开 Agent Teams
