@@ -1,5 +1,5 @@
 {
   "schema": "llm-harness.studio.agent-team-runtime.v1",
   "repository": "https://github.com/oh-my-harness/llm-harness-runtime",
-  "commit": "ee069e29b3f95e9da6909bdaf7c0a5776b82d668"
+  "commit": "cb287af4098f152c8ffcf9fe8db0a38a11e47a71"
 }
