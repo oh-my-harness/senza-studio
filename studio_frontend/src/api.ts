@@ -75,6 +75,16 @@ export const api = {
       )}&agent=${encodeURIComponent(agent)}`,
       { method: "POST" }
     ),
+  stopAgentTeamWorkflow: (project: string) =>
+    fetchJson<{
+      ok: boolean;
+      workflow_id: string;
+      phase: string;
+      terminal_reason: string | null;
+    }>(
+      `${BASE}/team/workflow/stop?project=${encodeURIComponent(project)}`,
+      { method: "POST" }
+    ),
   deleteAgentTeam: (id: string) =>
     fetchJson<{ ok: boolean }>(
       `${BASE}/team/projects?id=${encodeURIComponent(id)}`,

@@ -43,6 +43,7 @@ export default function AgentTeamChatPanel({
   onRestartTeam,
   onDeleteTeam,
   onAbort,
+  onStopWorkflow,
   onSendMessage,
 }: {
   selectedTeam: { id: string };
@@ -68,6 +69,7 @@ export default function AgentTeamChatPanel({
   onRestartTeam: (teamId: string) => void;
   onDeleteTeam: (teamId: string) => void;
   onAbort: () => void;
+  onStopWorkflow: () => void;
   onSendMessage: () => void;
 }) {
   return (
@@ -190,6 +192,16 @@ export default function AgentTeamChatPanel({
           className="flex h-8 w-8 items-center justify-center rounded-lg border border-red-200 text-sm text-red-600 hover:bg-red-50 disabled:opacity-40"
         >
           {busyAction === "abort" ? "…" : "■"}
+        </button>
+        <button
+          type="button"
+          onClick={onStopWorkflow}
+          disabled={busyAction === "abort"}
+          aria-label="停止工作流"
+          title="停止受控工作流（保留团队与已产生的证据）"
+          className="flex h-8 items-center rounded-lg border border-amber-200 px-2 text-xs text-amber-600 hover:bg-amber-50 disabled:opacity-40"
+        >
+          {busyAction === "abort" ? "停止中…" : "停止工作流"}
         </button>
         <span
           className="flex h-8 items-center text-xs text-gray-500"

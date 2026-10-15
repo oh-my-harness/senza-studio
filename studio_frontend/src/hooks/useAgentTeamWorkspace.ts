@@ -369,6 +369,23 @@ export function useAgentTeamWorkspace() {
     }
   }, [selectedTeam, activeConversation, loadPulse]);
 
+  const stopWorkflow = useCallback(async () => {
+    if (!selectedTeam) return;
+    setBusyAction("abort");
+    try {
+      const result = await api.stopAgentTeamWorkflow(selectedTeam.id);
+      setActionError(null);
+      setActionNotice(
+        `已请求停止工作流：${result.workflow_id}（${result.phase}）`
+      );
+      await loadPulse(selectedTeam.id);
+    } catch (error) {
+      setActionError(error instanceof Error ? error.message : String(error));
+    } finally {
+      setBusyAction(null);
+    }
+  }, [selectedTeam, loadPulse]);
+
   const createTeam = useCallback(async () => {
     const id = newTeamId.trim();
     if (!TEAM_ID_PATTERN.test(id)) {
@@ -646,6 +663,7 @@ export function useAgentTeamWorkspace() {
     selectTeam,
     selectConversation,
     abortActive,
+    stopWorkflow,
     createTeam,
     saveSettings,
     restartTeam,
