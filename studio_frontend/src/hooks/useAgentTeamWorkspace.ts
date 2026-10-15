@@ -11,6 +11,12 @@ import {
 } from "../agentTeamChat";
 import { buildAgentTeamChatItems, type AgentTeamChatItem } from "../agentTeamChatItems";
 import {
+  isWorkspaceUnauthorizedError,
+  workspaceGrantConfirmMessage,
+  workspacePathForCreate,
+  type CreateTeamInput,
+} from "../agentTeamWorkspaceGrant";
+import {
   connectAgentTeamEvents,
   type AgentTeamEvent,
   type AgentTeamEventConnectionState,
@@ -43,6 +49,43 @@ function parseToolkits(value: string) {
     .split(",")
     .map((toolkit) => toolkit.trim())
     .filter(Boolean);
+}
+
+/**
+ * Create Team 的授权感知封装:
+ *
+ * 1. 直接创建;工作区已授权(或未填 repo_path)时行为与原来完全一致。
+ * 2. runtime 返回权威的"工作区未授权"403 时,弹窗征求用户明确同意。
+ *    用户取消:不授权、不重试,表单保持可用。
+ *    用户确认:只授予用户输入的确切路径,然后原样重试一次。
+ * 3. 授权失败:不重试创建,把授权错误抛给调用方。
+ * 4. 授权成功但重试仍失败:重试错误原样抛出,不再进入第二次授权循环。
+ *
+ * 授权边界保持显式:绝不因为用户输入了路径就预授权,403 才是触发信号。
+ */
+export async function createAgentTeamWithWorkspaceConsent(
+  input: CreateTeamInput,
+  setActionError: (message: string | null) => void
+): Promise<void> {
+  try {
+    await api.createAgentTeam(input);
+    return;
+  } catch (error) {
+    if (!isWorkspaceUnauthorizedError(error)) throw error;
+    setActionError(null);
+    const workspacePath = workspacePathForCreate(input);
+    if (!workspacePath) {
+      // runtime 认为该请求需要授权,但请求里没有路径——无法确定要授什么,原样上报。
+      throw error;
+    }
+    if (!window.confirm(workspaceGrantConfirmMessage(workspacePath))) {
+      return;
+    }
+    // 用户显式确认:授予确切的输入路径(不是父目录)。
+    await api.addAgentTeamWorkspaceGrant(workspacePath);
+    // 授权成功后重试创建恰好一次;若失败,错误原样抛出,不会再次触发授权弹窗。
+    await api.createAgentTeam(input);
+  }
 }
 
 export function useAgentTeamWorkspace() {
@@ -332,14 +375,15 @@ export function useAgentTeamWorkspace() {
       setActionError("团队 ID 必须以字母或数字开头，只能包含字母、数字、下划线和连字符。");
       return;
     }
+    const input: CreateTeamInput = {
+      id,
+      name: newTeamName.trim() || undefined,
+      template_id: newTeamTemplate || undefined,
+      repo_path: newTeamRepo.trim() || undefined,
+    };
     setBusyAction("create");
     try {
-      await api.createAgentTeam({
-        id,
-        name: newTeamName.trim() || undefined,
-        template_id: newTeamTemplate || undefined,
-        repo_path: newTeamRepo.trim() || undefined,
-      });
+      await createAgentTeamWithWorkspaceConsent(input, setActionError);
       setNewTeamId("");
       setNewTeamName("");
       setNewTeamRepo("");

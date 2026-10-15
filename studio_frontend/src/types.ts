@@ -139,6 +139,43 @@ export interface ExecTurnMarker {
 
 export type ExecRow = ExecToolRow | ExecTurnMarker;
 
+// ---- 执行活动(前工具阶段)----------------------------------------------
+//
+// 一个执行单元(Play 的某个 step,或对话路径的 "chat" 伪 step)在工具调用
+// 之外"正在做什么"的统一模型。状态机:
+//
+//   running ──turn_start──▶ waiting_model ──text_delta──▶ model_responding
+//      │                        │  ▲
+//      │                        │  └──compaction_end──┐
+//      │                        ▼                     │
+//      └─────────────────── tool 活动 ◀──compaction_start
+//
+//   终态: done(step_finished/workflow_done/settled)、error(failed/error 事件
+//   或 finalize)。tool 事件期间 activity 保持 "running"(工具阶段由
+//   execRows 的 calling/executing 行表达,不重复建模)。
+export type ExecActivityPhase =
+  | "running"
+  | "waiting_model"
+  | "model_generating"
+  | "model_responding"
+  | "compacting"
+  | "done"
+  | "error";
+// 状态机图例见上方注释;model_generating = 已收到首 token(或消息开始),模型正在生成。
+export interface ExecActivity {
+  // "chat" 是对话路径(meta-agent)的伪 step;Play 路径用真实 step_id
+  scope: string;
+  phase: ExecActivityPhase;
+  // 进入当前状态的时间(前端 Date.now())——只表达 UI 经过时长,不是
+  // provider 延迟。
+  since: number;
+  // 错误信息(phase === "error" 时)
+  message: string | null;
+}
+
+// 活动事件的 scope key:带 step_id 的归该 step,其余归 "chat"。
+export const CHAT_ACTIVITY_SCOPE = "chat";
+
 // Play 执行事件——只有带 step_id 的才算(不带 step_id 的同名事件是对话
 // 路径 meta-agent 的工具调用,走 toolCalls 逻辑,别混进执行时间线)。
 export const EXEC_EVENT_TYPES: Record<string, true> = {
@@ -147,6 +184,13 @@ export const EXEC_EVENT_TYPES: Record<string, true> = {
   tool_execution_start: true,
   tool_execution_end: true,
   turn_end: true,
+  // 活动事件:turn_start/compaction_* 由 Play executor 桥转发(step 级);
+  // step_started/step_finished 是引擎级事件,同样驱动 step 活动状态。
+  turn_start: true,
+  compaction_start: true,
+  compaction_end: true,
+  step_started: true,
+  step_finished: true,
 };
 
 export interface AgentTeamProject {
@@ -225,3 +269,39 @@ export interface AgentTeamStartupRecovery {
   restored_teams: number;
   failed_teams: AgentTeamRecoveryFailure[];
 }
+// ---- 平台执行控制台(append-only)----------------------------------------
+//
+// 元 agent/平台 prompt 的终端式时间线。每条到达前端的事件按顺序映射成
+// 一行,只追加不回写(区别于 execRows 的"一条工具记录原地更新"模型)。
+export type ConsoleCategory =
+  | "PROMPT"
+  | "AGENT"
+  | "TURN"
+  | "MODEL"
+  | "TOOL"
+  | "SAVE"
+  | "COMPACT"
+  | "SPEC"
+  | "ERROR"
+  | "SYS";
+
+export interface ConsoleRow {
+  // 全局递增序号——展示排序用,裁剪不回退
+  seq: number;
+  // 前端收到事件的时间
+  timestamp: number;
+  category: ConsoleCategory;
+  // 单行摘要(不含换行)
+  text: string;
+  // 可展开的完整内容(args JSON / 工具结果全文 / 错误详情);null = 无
+  detail: string | null;
+  // 与 start 事件可靠关联出的耗时(ms);关联不上为 null
+  durationMs: number | null;
+  // 错误行——UI 高亮
+  isError: boolean;
+  // start/end 配对键:工具用 `${tool_use_id}`,模型响应用 `${message_id}`,
+  // savepoint/turn 无配对。
+  corrKey?: string;
+}
+
+export const CONSOLE_MAX_ROWS = 500;

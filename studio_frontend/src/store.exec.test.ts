@@ -1,8 +1,9 @@
 // studio_frontend/src/store.exec.test.ts
 // 执行可观测性 V1 的 store 行为测试。
 import { describe, it, expect, beforeEach } from "vitest";
-import { useStudioStore } from "./store";
 import type { ExecRow, ExecToolRow } from "./types";
+import { CHAT_ACTIVITY_SCOPE } from "./types";
+import { useStudioStore } from "./store";
 // 模拟后端转发的 Play 工具事件(字段与 senza-studio-runtime/play.py
 // _run_agent_step 转发 + ws.py 原样转发保持一致)
 function execEvent(
@@ -233,8 +234,93 @@ describe("exec observability store", () => {
     // ok 非布尔 -> 视为成功结束(ok ?? false)
     expect(s().execIndex["s:t"]!.phase).toBe("done");
   });
+  // ---- 执行活动(前工具阶段)------------------------------------------
+
+  it("activity: step_started -> running, turn_start -> waiting_model, text_delta -> model_responding", () => {
+    s().handleExecEvent({ type: "step_started", step_id: "step1", step_name: "step1" });
+    expect(s().execActivity["step1"]).toMatchObject({ scope: "step1", phase: "running" });
+
+    s().handleExecEvent({ type: "turn_start", step_id: "step1", index: 0 });
+    expect(s().execActivity["step1"]).toMatchObject({ phase: "waiting_model" });
+
+    s().handleExecEvent(execEvent("text_delta", "step1", "") as Record<string, unknown>);
+    expect(s().execActivity["step1"]).toMatchObject({ phase: "model_responding" });
+  });
+
+  it("activity: tool_call_start moves waiting_model to running", () => {
+    s().handleExecEvent({ type: "step_started", step_id: "step1", step_name: "step1" });
+    s().handleExecEvent({ type: "turn_start", step_id: "step1", index: 0 });
+    s().handleExecEvent(execEvent("tool_call_start", "step1", "tu_1", { name: "search" }));
+
+    expect(s().execActivity["step1"]).toMatchObject({ phase: "running" });
+  });
+
+  it("activity: compaction_start -> compacting, compaction_end -> waiting_model", () => {
+    s().handleExecEvent({ type: "step_started", step_id: "step1", step_name: "step1" });
+    s().handleExecEvent({ type: "turn_start", step_id: "step1", index: 0 });
+    s().handleExecEvent({ type: "compaction_start", step_id: "step1" });
+    expect(s().execActivity["step1"]).toMatchObject({ phase: "compacting" });
+
+    s().handleExecEvent({ type: "compaction_end", step_id: "step1" });
+    expect(s().execActivity["step1"]).toMatchObject({ phase: "waiting_model" });
+  });
+
+  it("activity: tool_call_start after compacting returns to running", () => {
+    s().handleExecEvent({ type: "step_started", step_id: "step1", step_name: "step1" });
+    s().handleExecEvent({ type: "compaction_start", step_id: "step1" });
+    s().handleExecEvent(execEvent("tool_call_start", "step1", "tu_1", { name: "search" }));
+    expect(s().execActivity["step1"]).toMatchObject({ phase: "running" });
+  });
+
+  it("activity: turn_end returns step to waiting_model for the next turn", () => {
+    s().handleExecEvent({ type: "step_started", step_id: "step1", step_name: "step1" });
+    s().handleExecEvent(execEvent("tool_call_start", "step1", "tu_1", { name: "search" }));
+    expect(s().execActivity["step1"]).toMatchObject({ phase: "running" });
+
+    s().handleExecEvent({ type: "turn_end", step_id: "step1", index: 0 });
+    expect(s().execActivity["step1"]).toMatchObject({ phase: "waiting_model" });
+  });
+
+  it("activity: step_finished finalizes step to done", () => {
+    s().handleExecEvent({ type: "step_started", step_id: "step1", step_name: "step1" });
+    s().handleExecEvent({ type: "turn_start", step_id: "step1", index: 0 });
+    s().handleExecEvent({ type: "step_finished", step_id: "step1", output: "ok" });
+    expect(s().execActivity["step1"]).toMatchObject({ phase: "done" });
+
+    // done 之后 turn_end/text_delta 不再把终态改回等待/响应
+    s().handleExecEvent({ type: "turn_end", step_id: "step1", index: 0 });
+    s().handleExecEvent(execEvent("text_delta", "step1", "") as Record<string, unknown>);
+    expect(s().execActivity["step1"]).toMatchObject({ phase: "done" });
+  });
+
+  it("activity: finalizeInFlightActivity marks non-terminal activities error, keeps terminal", () => {
+    s().setExecActivity("step1", "waiting_model");
+    s().setExecActivity("step2", "done");
+    s().finalizeInFlightActivity("工作流失败,步骤被中断");
+
+    expect(s().execActivity["step1"]).toMatchObject({ phase: "error", message: "工作流失败,步骤被中断" });
+    expect(s().execActivity["step2"]).toMatchObject({ phase: "done" });
+    // 幂等
+    s().finalizeInFlightActivity("再次调用");
+    expect(s().execActivity["step1"]).toMatchObject({ message: "工作流失败,步骤被中断" });
+  });
+
+  it("activity: resetPlay clears activity table", () => {
+    s().setExecActivity("step1", "waiting_model");
+    s().setExecActivity(CHAT_ACTIVITY_SCOPE, "model_responding");
+    s().resetPlay();
+    expect(s().execActivity).toEqual({});
+  });
+
+  it("activity: chat-scope setExecActivity / clearExecActivity round-trip", () => {
+    s().setExecActivity(CHAT_ACTIVITY_SCOPE, "waiting_model");
+    expect(s().execActivity[CHAT_ACTIVITY_SCOPE]).toMatchObject({ scope: "chat", phase: "waiting_model" });
+    s().clearExecActivity(CHAT_ACTIVITY_SCOPE);
+    expect(s().execActivity[CHAT_ACTIVITY_SCOPE]).toBeUndefined();
+  });
 });
 
 function assertTool(row: ExecRow): asserts row is ExecToolRow {
   expect(row.kind).toBe("tool");
 }
+

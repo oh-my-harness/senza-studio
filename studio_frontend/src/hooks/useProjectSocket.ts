@@ -2,8 +2,12 @@
 import { useEffect } from "react";
 import { api, createWebSocket } from "../api";
 import { useStudioStore } from "../store";
-import { PENDING_APPROVAL_ROUTE_KEY } from "../types";
-import { splitToolCalls } from "../utils";
+import {
+  PENDING_APPROVAL_ROUTE_KEY,
+  EXEC_EVENT_TYPES,
+  CHAT_ACTIVITY_SCOPE,
+} from "../types";
+import { splitToolCalls, wsCloseDiagnostics } from "../utils";
 
 /** 项目 WebSocket 的生命周期 + 事件分发。
  *
@@ -35,6 +39,15 @@ export function useProjectSocket(projectId: string | null) {
   const failRunningSteps = useStudioStore((s) => s.failRunningSteps);
   const setSessions = useStudioStore((s) => s.setSessions);
   const setActiveSession = useStudioStore((s) => s.setActiveSession);
+  // ---- 执行可观测性 ------------------------------------------------------
+  const handleExecEvent = useStudioStore((s) => s.handleExecEvent);
+  const finalizeInFlightExec = useStudioStore((s) => s.finalizeInFlightExec);
+  const finalizeInFlightActivity = useStudioStore((s) => s.finalizeInFlightActivity);
+  const setExecActivity = useStudioStore((s) => s.setExecActivity);
+  const clearExecActivity = useStudioStore((s) => s.clearExecActivity);
+  const handleConsoleEvent = useStudioStore((s) => s.handleConsoleEvent);
+  const markConsolePromptEnd = useStudioStore((s) => s.markConsolePromptEnd);
+  const addConsoleSysRow = useStudioStore((s) => s.addConsoleSysRow);
 
   // 连接 WebSocket
   useEffect(() => {
@@ -52,8 +65,16 @@ export function useProjectSocket(projectId: string | null) {
     socket.onmessage = (e) => {
       if (!isCurrent) return;
       const event = JSON.parse(e.data);
-
-      if (event.type === "text_delta" && event.step_id) {
+      // 执行可观测性:每条事件先交控制台 mapper(自己过滤哪些值得记),
+      // 再走既有分支;Play step 事件(带 step_id)先于对话路径进 execRows。
+      handleConsoleEvent(event);
+      if (
+        EXEC_EVENT_TYPES[event.type] &&
+        typeof event.step_id === "string" &&
+        event.step_id.length > 0
+      ) {
+        handleExecEvent(event);
+      } else if (event.type === "text_delta" && event.step_id) {
         // Play 事件（带 step_id）——追加到对应 step 的 Game view 卡片
         appendStepText(event.step_id, event.text || "");
       } else if (event.type === "step_started") {
@@ -92,11 +113,16 @@ export function useProjectSocket(projectId: string | null) {
         setEnginePaused(false);
         addLog("info", "▶ 已恢复运行");
       } else if (event.type === "failed") {
+        // 工作流失败:in-flight 工具记录兜底标 failed + 活动终态化。
+        finalizeInFlightExec("工作流失败,工具调用被中断");
+        finalizeInFlightActivity("工作流失败,步骤被中断");
         failRunningSteps();
         addLog("error", event.error || "工作流失败");
       } else if (event.type === "workflow_done") {
         // 跑完了（成功或失败）不自动退出 playing——留给用户自己看完结果
         // 再点 Stop。真正回到 editing 由下面的 play_stopped 触发。
+        finalizeInFlightActivity("运行结束");
+        finalizeInFlightExec("运行结束,工具调用被中断");
         setRunFinished(event.state);
         // 终态意味着任何挂起的审批卡片都不再可操作（典型：执行时间护栏
         // 在 HITL 等待期间到期并取消了引擎）。不清掉的话，过期的审批按钮
@@ -107,16 +133,31 @@ export function useProjectSocket(projectId: string | null) {
           addLog("info", "✅ 运行成功完成");
         }
       } else if (event.type === "play_stopped") {
+        finalizeInFlightActivity("用户停止运行");
+        finalizeInFlightExec("用户停止运行");
         setRunFinished(null);
         setPausedStep(null);
         setEnginePaused(false);
         setStatus("spec_ready");
       } else if (event.type === "text_delta") {
-        // 流式文本追加到最近的 assistant 消息
+        // 流式文本追加到最近的 assistant 消息。高频事件——不重置活动行
+        // (message_start 已切 model_generating,token 不重置 since)。
         appendToLastAssistant(event.text || "");
       } else if (event.type === "message_start") {
-        // 新消息开始 — 插入空 assistant 气泡，后续 text_delta 追加到它
+        // 新消息开始 — 插入空 assistant 气泡，后续 text_delta 追加到它。
+        // message_start = 请求已开出、模型正在生成——活动行切到生成中。
         addMessage({ role: "assistant", content: "", timestamp: Date.now() });
+        setExecActivity(CHAT_ACTIVITY_SCOPE, "model_generating");
+      } else if (event.type === "compaction_start" && !event.step_id) {
+        setExecActivity(CHAT_ACTIVITY_SCOPE, "compacting");
+      } else if (event.type === "compaction_end" && !event.step_id) {
+        // 压缩失败时 handleConsoleEvent 已把活动置为 error(终态)。这里只
+        // 处理成功路径——别把 error 覆盖回 waiting_model,否则失败的压缩
+        // 会伪装成"等待模型响应"挂到 prompt_terminal 才收尾。
+        const act = useStudioStore.getState().execActivity[CHAT_ACTIVITY_SCOPE];
+        if (!act || (act.phase !== "error" && act.phase !== "done")) {
+          setExecActivity(CHAT_ACTIVITY_SCOPE, "waiting_model");
+        }
       } else if (event.type === "tool_call_start") {
         // 工具调用不算对话内容，挪到底部面板的"工具调用"标签页，
         // 免得聊天记录被一堆调用/结果气泡塞满。
@@ -125,6 +166,8 @@ export function useProjectSocket(projectId: string | null) {
           toolName: event.tool_name,
           timestamp: Date.now(),
         });
+        // meta-agent 开始调工具 = 模型已响应。活动行切到 running。
+        setExecActivity(CHAT_ACTIVITY_SCOPE, "running");
       } else if (event.type === "tool_result") {
         addToolCall({
           content: `结果: ${event.result}`,
@@ -138,6 +181,27 @@ export function useProjectSocket(projectId: string | null) {
           // run_play_streaming 都会发）——统一记到日志面板，不再插进聊天
           // 记录（插的假 assistant 气泡本来也不会被真实持久化，刷新就没了）。
           addLog("error", event.message || "发生错误");
+          // 前置事件(比如 CompactionError 在任何事件之前)抛出时,"chat"
+          // 活动还没进入终态——在这里显式标 error,别让等待行永远挂着。
+          setExecActivity(CHAT_ACTIVITY_SCOPE, "error", event.message || "发生错误");
+        } else {
+          clearExecActivity(CHAT_ACTIVITY_SCOPE);
+        }
+        // 执行控制台:prompt 走到终态,追加 completed/failed/cancelled
+        // (带总耗时,run_id 去重)。Play 路径的 source:"play" error 不关
+        // chat 控制台。
+        if (event.source !== "play") {
+          markConsolePromptEnd(
+            event.type === "settled"
+              ? "run finished"
+              : event.type === "aborted"
+                ? "cancelled"
+                : event.type === "error"
+                  ? `run failed: ${event.message || "unknown"}`
+                  : event.type,
+            event.type === "error" || event.type === "aborted",
+            useStudioStore.getState().currentPromptRunId ?? undefined
+          );
         }
         // source: "play" 的 error 不该把 status 打回 spec_ready——Play 中途
         // 出错要留在 playing，让用户先看完 Game view 里的错误详情，自己点
@@ -172,10 +236,18 @@ export function useProjectSocket(projectId: string | null) {
       }
     };
 
-    socket.onclose = () => {
+    socket.onclose = (e: CloseEvent) => {
       if (!isCurrent) return;
       setStreaming(false);
       setStatus("idle");
+      // socket 断开时对话活动不可能还在进行——把还挂着的 "chat" 活动行
+      // 收掉,别让"等待模型"永远显示。
+      clearExecActivity(CHAT_ACTIVITY_SCOPE);
+      // 断开诊断:CloseEvent 给出 code/wasClean/reason(见 utils 的
+      // wsCloseDiagnostics)。断开 ≠ 取消:执行在后台继续,真结果由
+      // prompt_terminal/prompt_state 对账补上。无自动重连——如实说明。
+      const diag = wsCloseDiagnostics(e);
+      addConsoleSysRow(diag.text, diag.detail);
     };
 
     socket.onerror = () => {
@@ -183,6 +255,9 @@ export function useProjectSocket(projectId: string | null) {
       setStreaming(false);
       setStatus("idle");
       addLog("error", "WebSocket 连接断开，请刷新页面重试");
+      clearExecActivity(CHAT_ACTIVITY_SCOPE);
+      // ErrorEvent 没有诊断字段;onerror 后必然跟 onclose,控制台行只由
+      // onclose 记一次,避免重复。
     };
 
     return () => {

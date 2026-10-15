@@ -1968,6 +1968,72 @@ def test_run_agent_step_turn_end_forwards_and_continues():
     assert turn_calls == [("turn_end", (0,)), ("turn_end", (1,))]
 
 
+def test_run_agent_step_forwards_turn_start_with_index():
+    """turn_start 必须转发且携带 index——首 token 前的"等待模型"窗口靠它
+    驱动前端 waiting_model 状态。"""
+    events = [
+        {"type": "turn_start", "index": 2},
+        {"type": "text_delta", "message_id": "m1", "text": "hi"},
+    ]
+    emit = RecordingEmitter()
+    text, count = play._run_agent_step(FakeHarnessStream(events), "p", emit)
+
+    assert text == "hi"
+    assert ("turn_start", (2,)) in emit.calls
+
+
+def test_run_agent_step_forwards_compaction_lifecycle():
+    """compaction_start/compaction_end 必须转发给 emit——前端拿它驱动
+    compacting 活动状态;两个事件都无参数。"""
+    events = [
+        {"type": "turn_start", "index": 0},
+        {"type": "compaction_start"},
+        {"type": "compaction_end"},
+        {"type": "turn_end", "index": 0, "message_text": "", "tool_results": {}},
+    ]
+    emit = RecordingEmitter()
+    text, count = play._run_agent_step(FakeHarnessStream(events), "p", emit)
+
+    assert text == ""
+    assert count == 0
+    assert emit.calls == [
+        ("turn_start", (0,)),
+        ("compaction_start", ()),
+        ("compaction_end", ()),
+        ("turn_end", (0,)),
+    ]
+
+
+def test_run_agent_step_new_events_interleave_with_tool_events():
+    """新事件(turn_start/compaction_*)与既有五个事件混排时全部转发——
+    forwarding 完整性,顺序保持 harness 吐出顺序。"""
+    events = [
+        {"type": "turn_start", "index": 0},
+        {"type": "tool_call_start", "tool_use_id": "tu_1", "tool_name": "search"},
+        {"type": "tool_call_end", "tool_use_id": "tu_1", "args": {"city": "Boston"}},
+        {"type": "compaction_start"},
+        {"type": "tool_execution_start", "tool_use_id": "tu_1", "tool_name": "search"},
+        {"type": "tool_execution_end", "tool_use_id": "tu_1", "ok": True},
+        {"type": "compaction_end"},
+        {"type": "turn_end", "index": 0, "message_text": "hi", "tool_results": {}},
+    ]
+    emit = RecordingEmitter()
+    text, count = play._run_agent_step(FakeHarnessStream(events), "p", emit)
+
+    assert text == ""
+    assert count == 1
+    assert emit.calls == [
+        ("turn_start", (0,)),
+        ("tool_call_start", ("tu_1", "search")),
+        ("tool_call_end", ("tu_1", json.dumps({"city": "Boston"}))),
+        ("compaction_start", ()),
+        ("tool_execution_start", ("tu_1", "search")),
+        ("tool_execution_end", ("tu_1", True, None)),
+        ("compaction_end", ()),
+        ("turn_end", (0,)),
+    ]
+
+
 def test_run_agent_step_terminal_event_still_terminates():
     """终态事件（agent_end 等）仍然终止消费——转发行为不改变终止语义。"""
     events = [
