@@ -5,6 +5,7 @@ play.make_executor + play.create_provider so the assertions cover the actual
 production request-builder, not a mock.
 """
 import json
+import os
 import threading
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
@@ -69,12 +70,25 @@ class _Emit:
 
 @pytest.fixture
 def capture():
-    cap = _Capture()
-    srv = HTTPServer(("127.0.0.1", 0), cap.make_handler())
-    cap.base_url = f"http://127.0.0.1:{srv.server_address[1]}"
-    threading.Thread(target=srv.serve_forever, daemon=True).start()
-    yield cap
-    srv.shutdown()
+    # Reqwest (senza 的 Rust 传输层) 读取 HTTP_PROXY/HTTPS_PROXY 环境变量；
+    # 本机的 NO_PROXY 通配条目（如 127.*）reqwest 识别不了，会把回环地址
+    # 的请求转进代理，代理失败 → provider "server error"。测试环境必须
+    # 显式禁代理，保证请求真的打到这里起的 capture server。
+    proxy_vars = [k for k in os.environ
+                  if k.lower() in ("http_proxy", "https_proxy", "all_proxy")]
+    saved = {k: os.environ.pop(k) for k in proxy_vars}
+    os.environ["NO_PROXY"] = "127.0.0.1,localhost"
+    try:
+        cap = _Capture()
+        srv = HTTPServer(("127.0.0.1", 0), cap.make_handler())
+        cap.base_url = f"http://127.0.0.1:{srv.server_address[1]}"
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+        yield cap
+        srv.shutdown()
+    finally:
+        os.environ.pop("NO_PROXY", None)
+        for key, value in saved.items():
+            os.environ[key] = value
 
 
 def _make_executor(capture, stage_extra, routes=None, stage_name="gm",
