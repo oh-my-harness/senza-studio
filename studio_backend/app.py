@@ -6,6 +6,7 @@ import json
 import os
 import stat
 import sys
+import time
 from contextlib import asynccontextmanager
 from pathlib import Path
 from mimetypes import guess_type
@@ -594,6 +595,17 @@ def create_app(config: StudioConfig | None = None) -> FastAPI:
             active = project.meta.get("active_session")
             agent.start_session(active)
 
+        # 登记当前活跃 socket——prompt 终态推送（跨 run）以此为投递目标。
+        # 旧连接被新连接替换时自动覆盖；断开时清空由 finally 完成。
+        state["ws_socket"] = websocket
+        # 重连对账：把当前/最近一次 prompt run 的状态推给新连接。
+        run = state.get("prompt_run")
+        if run is not None:
+            try:
+                await websocket.send_json({"type": "prompt_state", "run": dict(run)})
+            except Exception:
+                pass
+
         streaming_task: asyncio.Task | None = None
         play_task: asyncio.Task | None = None
 
@@ -687,10 +699,23 @@ def create_app(config: StudioConfig | None = None) -> FastAPI:
                             pass
 
                     text = msg.get("text", "")
+                    # 客户端生成的 run id——终态行的关联/去重键。缺失时退化
+                    # 为后端生成（旧客户端兼容），不阻塞本次执行。
+                    run_id = msg.get("run_id")
+                    if not isinstance(run_id, str) or not run_id:
+                        run_id = f"srv-{int(time.time() * 1000)}"
+                    state["prompt_run"] = {
+                        "run_id": run_id,
+                        "prompt": text,
+                        "status": "running",
+                        "error": None,
+                        "started_at": time.time(),
+                        "ended_at": None,
+                    }
                     # 将 streaming 作为后台 task 运行，不阻塞 WS 主循环
                     streaming_task = asyncio.create_task(
                         run_prompt_streaming(
-                            websocket, agent, project, text, state
+                            websocket, agent, project, text, state, run_id
                         )
                     )
 
@@ -711,6 +736,11 @@ def create_app(config: StudioConfig | None = None) -> FastAPI:
         except WebSocketDisconnect:
             pass
         finally:
+            # 只释放本 handler 登记的 socket。A 断开后若 B 已重连并
+            # 覆盖了该槽位，A 的延迟 cleanup 不得清掉 B。prompt 收尾
+            # 仍会在发送时重新读取该槽位，所以之后接管的 B 仍能收到终态。
+            if state.get("ws_socket") is websocket:
+                state["ws_socket"] = None
             if streaming_task is not None and not streaming_task.done():
                 streaming_task.cancel()
                 try:
