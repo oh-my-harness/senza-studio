@@ -16,7 +16,12 @@ import { FALLBACK_THEME } from "../player/theme";
 import type { AgentInput, AgentInfo } from "../player/types";
 import { useStudioStore } from "../store";
 
-type InputDraft = { label: string; placeholder: string; multiline: boolean };
+type InputDraft = {
+  label: string;
+  placeholder: string;
+  multiline: boolean;
+  optional: boolean;
+};
 
 interface Draft {
   title: string;
@@ -48,7 +53,12 @@ function toDraft(info: AgentInfo, explicitLayout: string): Draft {
     inputs: Object.fromEntries(
       info.inputs.map((f: AgentInput) => [
         f.name,
-        { label: f.label, placeholder: f.placeholder, multiline: f.multiline },
+        {
+          label: f.label,
+          placeholder: f.placeholder,
+          multiline: f.multiline,
+          optional: f.optional === true,
+        },
       ])
     ),
   };
@@ -123,6 +133,8 @@ export default function AgentUiPanel({ projectId }: { projectId: string }) {
       if (options.placeholder) entry.placeholder = options.placeholder;
       // multiline 默认 true，只有关掉了才需要写
       if (!options.multiline) entry.multiline = false;
+      // optional 默认 false，只有声明了才需要写
+      if (options.optional) entry.optional = true;
       if (Object.keys(entry).length > 0) inputs[name] = entry;
     }
     if (Object.keys(inputs).length > 0) ui.inputs = inputs;
@@ -278,6 +290,14 @@ export default function AgentUiPanel({ projectId }: { projectId: string }) {
                       onChange={(e) => patchInput(name, { multiline: e.target.checked })}
                     />
                     多行输入框
+                  </label>
+                  <label className="flex items-center gap-2 text-xs text-gray-600">
+                    <input
+                      type="checkbox"
+                      checked={options.optional}
+                      onChange={(e) => patchInput(name, { optional: e.target.checked })}
+                    />
+                    可留空（选填）
                   </label>
                 </div>
               ))}
