@@ -5,17 +5,6 @@
 import { useState } from "react";
 import type { AgentInfo } from "./types";
 
-/** 开始按钮的就绪判定：字段默认必填；契约里声明了 optional 的字段允许留空。
- *  留空的语义由后端 loader 决定（默认档/自动推断），前端不编造值。 */
-export function isStartReady(
-  inputs: { name: string; optional?: boolean }[],
-  values: Record<string, string>,
-): boolean {
-  return inputs.every(
-    (field) => field.optional || (values[field.name] ?? "").trim() !== "",
-  );
-}
-
 export default function StartForm({
   info,
   disabled,
@@ -30,7 +19,7 @@ export default function StartForm({
   submitLabel?: string;
 }) {
   const [values, setValues] = useState<Record<string, string>>({});
-  const ready = isStartReady(info.inputs, values);
+  const ready = info.inputs.every((field) => (values[field.name] ?? "").trim() !== "");
   const inline = variant === "inline";
 
   const inputClass =
@@ -51,11 +40,6 @@ export default function StartForm({
             htmlFor={`input-${field.name}`}
           >
             {field.label}
-            {field.optional && (
-              <span className="ml-1 text-xs font-normal text-[var(--text-faint)]">
-                （可选）
-              </span>
-            )}
           </label>
           {field.multiline && !inline ? (
             <textarea

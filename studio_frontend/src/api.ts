@@ -54,15 +54,6 @@ export const api = {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(input),
     }),
-  addAgentTeamWorkspaceGrant: (path: string) =>
-    fetchJson<{ id: string; path: string; created_at: string }>(
-      `${BASE}/team/fs/grants`,
-      {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ path }),
-      }
-    ),
   restartAgentTeam: (id: string) =>
     fetchJson<{ ok: boolean }>(
       `${BASE}/team/projects/restart?id=${encodeURIComponent(id)}`,
@@ -73,16 +64,6 @@ export const api = {
       `${BASE}/team/agent/abort?project=${encodeURIComponent(
         project
       )}&agent=${encodeURIComponent(agent)}`,
-      { method: "POST" }
-    ),
-  stopAgentTeamWorkflow: (project: string) =>
-    fetchJson<{
-      ok: boolean;
-      workflow_id: string;
-      phase: string;
-      terminal_reason: string | null;
-    }>(
-      `${BASE}/team/workflow/stop?project=${encodeURIComponent(project)}`,
       { method: "POST" }
     ),
   deleteAgentTeam: (id: string) =>

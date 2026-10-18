@@ -28,9 +28,7 @@ _EDGE_PREFIX = "next_on_"
 # spec 顶层 ui 块：导出产品（和 Game view，它就是那个产品的预览）的界面文案。
 # 不放进 stages 里——这些是整个 agent 的属性，不属于任何一个 step。
 _AGENT_UI_KEYS = {"title", "description", "inputs", "layout", "theme"}
-# optional：入口字段是否可留空（表单不再强校验非空；后端 loader 自己决定
-# 空值的语义——比如 campaign_id 空落到默认档、input_type 空走 auto 推断）。
-_AGENT_UI_INPUT_KEYS = {"label", "placeholder", "multiline", "optional"}
+_AGENT_UI_INPUT_KEYS = {"label", "placeholder", "multiline"}
 # 形态和主题的合法取值由 runtime 的契约模块定义——那边是唯一的真相来源
 # （前端和导出项目都从它拿），这里 import 过来校验，不另抄一份枚举。
 _AGENT_UI_THEME_KEYS = set(THEME_KEYS)

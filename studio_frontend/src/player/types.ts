@@ -13,9 +13,6 @@ export interface AgentInput {
   label: string;
   placeholder: string;
   multiline: boolean;
-  /** 作者在 ui.inputs 里显式声明 optional 的字段可以留空；没写就是必填
-   *  （后端契约默认 false，前端不做任何猜测）。 */
-  optional?: boolean;
 }
 
 /** 停下来问人时的一个选项。value 是 next_on_<value> 的路由名，label 是给

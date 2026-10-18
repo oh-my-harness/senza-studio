@@ -4,7 +4,7 @@ import { useStudioStore } from "../store";
 import { createWebSocket, api } from "../api";
 import Markdown from "./Markdown";
 import { splitToolCalls } from "../utils";
-import { PENDING_APPROVAL_ROUTE_KEY, CHAT_ACTIVITY_SCOPE } from "../types";
+import { PENDING_APPROVAL_ROUTE_KEY } from "../types";
 
 const MAX_TEXTAREA_HEIGHT = 160; // px，约 6~7 行，超过就交给滚动条
 
@@ -38,9 +38,6 @@ export default function ChatPanel({ projectId }: { projectId: string }) {
   const setPausedStep = useStudioStore((s) => s.setPausedStep);
   const markAwaitingApproval = useStudioStore((s) => s.markAwaitingApproval);
   const setEnginePaused = useStudioStore((s) => s.setEnginePaused);
-  // 执行可观测性:发送侧的起点(活动行 + 控制台 PROMPT received)
-  const setExecActivity = useStudioStore((s) => s.setExecActivity);
-  const markConsolePromptStart = useStudioStore((s) => s.markConsolePromptStart);
   const scrollRef = useRef<HTMLDivElement>(null);
   const bottomRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
@@ -100,19 +97,11 @@ export default function ChatPanel({ projectId }: { projectId: string }) {
 
   const send = () => {
     if (!input.trim() || !ws || streaming) return;
-    // 客户端生成 run id:终态行的关联/去重键,后端在 prompt_state/
-    // prompt_terminal 里原样回显。活动行/控制台起点也在 store 里记录。
-    const runId =
-      typeof crypto !== "undefined" && "randomUUID" in crypto
-        ? crypto.randomUUID()
-        : `run-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
     addMessage({ role: "user", content: input, timestamp: Date.now() });
-    ws.send(JSON.stringify({ type: "prompt", text: input, run_id: runId }));
+    ws.send(JSON.stringify({ type: "prompt", text: input }));
     setInput("");
     setStreaming(true);
     setStatus("conversing");
-    setExecActivity(CHAT_ACTIVITY_SCOPE, "waiting_model");
-    markConsolePromptStart(input, runId);
   };
 
   const switchSession = (sid: string) => {
