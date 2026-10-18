@@ -61,10 +61,6 @@ export function buildAgentTeamChatItems(
       continue;
     }
 
-    // `agent_thought` events are token-level ThinkingDelta chunks. They are kept
-    // in the workspace event buffer for debug/observability surfaces but must
-    // not surface as user-facing chat rows.
-    if (event.type === "agent_thought") continue;
     if (event.type !== "agent_error") continue;
     if (!isAgentOwnedItem(event, activeConversation)) continue;
     const from = event.agent ?? "unknown";

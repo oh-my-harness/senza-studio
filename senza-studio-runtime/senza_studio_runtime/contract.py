@@ -99,9 +99,6 @@ def describe_inputs(spec_dict: dict) -> list[dict]:
                 "label": str(options.get("label") or humanize(name)),
                 "placeholder": str(options.get("placeholder") or ""),
                 "multiline": bool(options.get("multiline", DEFAULT_MULTILINE)),
-                # 作者显式声明 optional 的字段可以留空；默认必填（向后兼容：
-                # 没写 optional 的 agent 表单行为与从前一致）。
-                "optional": bool(options.get("optional", False)),
             }
         )
     return fields

@@ -62,7 +62,7 @@ if [ -n "$STUDIO_PIDS" ]; then
 fi
 
 # 杀残留的 vite dev server
-VITE_PIDS=$(pgrep -f "node.*[v]ite" 2>/dev/null || pgrep -f "$(pwd)/node_modules/.bin/vite" 2>/dev/null || true)
+VITE_PIDS=$(pgrep -f "vite" 2>/dev/null || true)
 if [ -n "$VITE_PIDS" ]; then
   echo "  杀死残留 vite: $VITE_PIDS"
   kill $VITE_PIDS 2>/dev/null || true
