@@ -748,7 +748,11 @@ def set_input_value(session, aria_label, value):
 
 
 def open_agent_teams(session):
-    click_button(session, "打开 Agent Teams")
+    workspace_visible = session.evaluate(
+        "Boolean(document.querySelector('[aria-label=\"选择团队\"]'))"
+    )
+    if not workspace_visible:
+        click_button(session, "打开 Agent Teams")
     wait_for_ui(
         session,
         "Boolean(document.querySelector('[aria-label=\"选择团队\"]'))",

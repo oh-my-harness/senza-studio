@@ -1,5 +1,5 @@
 // studio_frontend/electron/main.cjs
-const { app, BrowserWindow } = require("electron");
+const { app, BrowserWindow, Menu, Tray, nativeImage } = require("electron");
 const crypto = require("crypto");
 const fs = require("fs");
 const http = require("http");
@@ -19,6 +19,7 @@ let backendHost = null;
 let viteHost = null;
 let runtimeSupervisor = null;
 let mainWindow = null;
+let tray = null;
 let backendExit = null;
 let desktopDiagnostics = null;
 let shuttingDown = false;
@@ -77,6 +78,19 @@ function agentTeamBinaryPath(isPackaged) {
     "debug",
     process.platform === "win32" ? "agent-studio.exe" : "agent-studio"
   );
+}
+
+function agentTeamDataRoot() {
+  const configuredRoot = process.env.SENZA_STUDIO_AGENT_TEAM_DATA_ROOT;
+  if (configuredRoot) return path.resolve(configuredRoot);
+  return path.join(app.getPath("userData"), "agent-team");
+}
+
+function trayIconPath() {
+  if (app.isPackaged) {
+    return path.join(process.resourcesPath, "icon.png");
+  }
+  return path.join(frontendRoot, "build", "icon.png");
 }
 
 function formatExit(code, signal) {
@@ -148,11 +162,64 @@ async function closeDiagnostics() {
 async function startAgentTeamRuntime() {
   runtimeSupervisor = new AgentTeamRuntimeSupervisor({
     program: agentTeamBinaryPath(app.isPackaged),
-    dataRoot: path.join(app.getPath("userData"), "agent-team"),
+    dataRoot: agentTeamDataRoot(),
     useProcessGroup: false,
     onEvent: logRuntimeEvent,
   });
   return runtimeSupervisor.start();
+}
+
+function navigateMainWindow(hash) {
+  if (!mainWindow || mainWindow.isDestroyed()) return;
+  mainWindow.webContents.executeJavaScript(
+    `window.location.hash = ${JSON.stringify(hash)};`
+  );
+}
+
+function showMainWindow(hash) {
+  if (!mainWindow || mainWindow.isDestroyed()) {
+    createWindow(hash);
+    return;
+  }
+  if (mainWindow.isMinimized()) mainWindow.restore();
+  mainWindow.show();
+  mainWindow.focus();
+  if (hash) navigateMainWindow(hash);
+}
+
+function createTray() {
+  const icon = nativeImage
+    .createFromPath(trayIconPath())
+    .resize({ width: 16, height: 16 });
+  tray = new Tray(icon);
+  tray.setToolTip("Senza Studio");
+  tray.setContextMenu(
+    Menu.buildFromTemplate([
+      {
+        label: "Agent Teams",
+        click: () => showMainWindow("#agent-team"),
+      },
+      {
+        label: "Senza 项目",
+        click: () => showMainWindow("#senza"),
+      },
+      { type: "separator" },
+      {
+        label: "显示主窗口",
+        click: () => showMainWindow(),
+      },
+      {
+        label: "退出",
+        click: () => app.quit(),
+      },
+    ])
+  );
+}
+
+function destroyTray() {
+  if (!tray) return;
+  tray.destroy();
+  tray = null;
 }
 
 function startBackend(agentTeamDescriptorPath) {
@@ -247,6 +314,7 @@ function waitForHttp(url, timeoutMs) {
 
 async function stopProcesses() {
   shuttingDown = true;
+  destroyTray();
   if (mainWindow && !mainWindow.isDestroyed()) {
     mainWindow.destroy();
     mainWindow = null;
@@ -284,7 +352,7 @@ async function stopProcesses() {
   recordDiagnostics("host", { type: "shutdown-stopped" });
 }
 
-async function createWindow() {
+async function createWindow(initialHash = "#agent-team") {
   mainWindow = new BrowserWindow({
     width: 1400,
     height: 900,
@@ -304,15 +372,16 @@ async function createWindow() {
     sameSite: "strict",
   });
   if (isDev) {
-    await mainWindow.loadURL(frontendUrl);
+    await mainWindow.loadURL(`${frontendUrl}${initialHash}`);
     mainWindow.webContents.openDevTools();
   } else {
-    await mainWindow.loadURL(backendUrl);
+    await mainWindow.loadURL(`${backendUrl}${initialHash}`);
   }
 }
 
 app.whenReady().then(async () => {
   try {
+    createTray();
     await startDiagnostics();
     backendPort = await selectBackendPort(process.env.SENZA_STUDIO_PORT);
     backendUrl = backendUrlFromPort(backendPort);
