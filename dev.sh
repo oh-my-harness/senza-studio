@@ -136,17 +136,24 @@ if [ ! -d "studio_frontend/node_modules" ]; then
 fi
 
 # ── 启动后端 ────────────────────────────────────────────
+# Provider 网络策略:与 Agent Team Runtime 的 scripts/studio.sh 同一机制——
+# 读取 ~/.senza-studio/provider-network.json(仅本仓库包装器使用;Runtime 侧
+# 用的是 ~/.harness/agent-team-studio/ 下的另一份文件,两者不自动同步),
+# 把其中的直连域名追加进子进程的大小写 NO_PROXY(去重、保留原有条目)。
+# 没有该文件时完整继承当前代理环境,行为与从前一致。后端进程里的 reqwest
+# (经 Senza SDK)在构造时快照代理环境,必须在启动前应用,不能运行中改。
+# 注意:provider-network.py 会把 `--` 之后的第一个参数当作可执行程序,
+# 所以环境变量赋值必须全部排在 env 之后——env 的参数位置赋值要求"赋值串
+# 在程序名之前。构造顺序:env → 赋值(MODEL 优先级与从前一致)→ 程序。
+BACKEND_ARGS=(env PYTHONPATH=studio_backend "SENZA_STUDIO_API_TOKEN=$API_TOKEN")
 if [ -n "$MODEL" ]; then
+  BACKEND_ARGS+=("SENZA_STUDIO_MODEL=$MODEL")
   echo "🚀 启动后端 (model=$MODEL 来自环境变量, port=$BACKEND_PORT)..."
-  SENZA_STUDIO_MODEL="$MODEL" PYTHONPATH=studio_backend \
-    SENZA_STUDIO_API_TOKEN="$API_TOKEN" \
-    python -m studio_backend.server &
 else
   echo "🚀 启动后端 (model 由设置面板决定, port=$BACKEND_PORT)..."
-  PYTHONPATH=studio_backend \
-    SENZA_STUDIO_API_TOKEN="$API_TOKEN" \
-    python -m studio_backend.server &
 fi
+BACKEND_ARGS+=(python -m studio_backend.server)
+python3 scripts/provider-network.py -- "${BACKEND_ARGS[@]}" &
 BACKEND_PID=$!
 
 # ── 等待后端就绪 ────────────────────────────────────────
