@@ -27,7 +27,6 @@ import subprocess
 import sys
 import tempfile
 import threading
-import time
 import unittest
 
 REPO = Path(__file__).resolve().parents[1]
