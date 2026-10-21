@@ -147,7 +147,7 @@ export function AgentTeamNewTeamModal({
         <input
           value={newTeamRepo}
           onChange={(event) => setNewTeamRepo(event.target.value)}
-          placeholder="已授权工作区路径（可选）"
+          placeholder="工作区路径（未授权时创建会请求确认）"
           aria-label="团队工作区路径"
           className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm"
         />

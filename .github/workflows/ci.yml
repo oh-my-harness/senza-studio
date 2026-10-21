@@ -156,16 +156,53 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: Install pinned Senza SDK
+      - name: Resolve Senza SDK pin
+        id: senza
         shell: bash
         run: |
           set -euo pipefail
-          locked_version="$(jq -r '.senza_version' senza-sdk.lock)"
-          if [[ -z "$locked_version" || "$locked_version" == "null" ]]; then
-            echo "::error title=Invalid Senza pin::senza-sdk.lock does not contain senza_version"
+          version="$(jq -r '.senza_version' senza-sdk.lock)"
+          commit="$(jq -r '.senza_commit' senza-sdk.lock)"
+          [[ "$commit" =~ ^[0-9a-f]{40}$ ]] || {
+            echo "::error title=Invalid Senza commit::senza-sdk.lock must contain a 40-character SHA"
             exit 1
-          fi
-          python -m pip install --only-binary=:all: "senza-sdk==$locked_version"
+          }
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "commit=$commit" >> "$GITHUB_OUTPUT"
+
+      - name: Check out pinned Senza source
+        uses: actions/checkout@v4
+        with:
+          repository: oh-my-harness/Senza
+          ref: ${{ steps.senza.outputs.commit }}
+          path: senza-src
+
+      - name: Install Rust and maturin
+        shell: bash
+        run: |
+          set -euo pipefail
+          rustup toolchain install stable --profile minimal
+          python -m pip install 'maturin>=1.7,<2'
+
+      - name: Build pinned Senza SDK wheel
+        working-directory: senza-src
+        shell: bash
+        env:
+          PRIVATE_REPO_TOKEN: ${{ secrets.PRIVATE_REPO_TOKEN }}
+        run: |
+          set -euo pipefail
+          rev="$(cat senza-pkg/runtime.lock)"
+          [[ "$rev" =~ ^[0-9a-f]{40}$ ]] || {
+            echo "::error title=Invalid Runtime pin::senza-pkg/runtime.lock is not a 40-character SHA"
+            exit 1
+          }
+          export GIT_CONFIG_COUNT=1
+          export GIT_CONFIG_KEY_0="credential.https://github.com.helper"
+          export GIT_CONFIG_VALUE_0='!f() { echo username=x-access-token; echo password="${PRIVATE_REPO_TOKEN}"; }; f'
+          export CARGO_NET_GIT_FETCH_WITH_CLI=true
+          perl -pi -e "s/PLACEHOLDER/$rev/g" Cargo.toml
+          python -m maturin build --release --out dist
+          python -m pip install dist/senza_sdk-*.whl
 
       - name: Install project
         shell: bash
