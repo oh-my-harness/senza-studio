@@ -1,24 +1,33 @@
-"""dev.sh 启动参数的安全测试:静态契约 + 真实包装器组件验证。
+"""dev.sh 启动与就绪探测回归测试。
 
-安全边界(最高优先级):
+层次:
 
-- **不执行**仓库 dev.sh。dev.sh 启动前会用 `lsof` / `pgrep` 清理“占用端口或
-  进程名匹配”的进程;PATH stub、临时 HOME、独立进程组都不能可靠约束这种
-  宿主级行为。此前正是真实入口测试触发了这类清理。
-- **不发送** SIGTERM / SIGINT,不启动、停止或探测任何真实 Studio 服务。
-- 因此真实 dev.sh 的端到端启动/SIGTERM 行为不在自动化测试范围内,标记为
-  未验证;这里只验证生产文件中可直接静态检查的启动参数,以及真实
-  `scripts/provider-network.py` 的命令行行为。
+1. DevShStaticContract / WrapperCommandContract —— 快速静态契约,以及真实
+   `scripts/provider-network.py` 的命令行行为。
+2. CurlLoopbackProxySemantics —— 用真实 curl 证明 `NO_PROXY=127.*` 不会覆盖
+   127.0.0.1,而 `--noproxy '*'` 会直连。
+3. RealDevShReadiness —— **在隔离临时目录执行生产 dev.sh 原样拷贝**。PATH
+   前置替身隔离 lsof/pgrep/uv/npm/后端子进程;就绪探测调用真实 curl,但
+   dev.sh 的固定 URL 被替身改写到临时端口上的回环 HTTP 服务。设置
+   http_proxy 且 NO_PROXY 只有 `127.*`(缺少明确 127.0.0.1/localhost),
+   验证后端与前端探测都显式 `--noproxy '*'`,且请求确实没有经过代理。
 
-运行: python3 -m pytest tests/test_dev_sh_launch.py -q
+安全边界:不绑定也不探测 7878/5173,不发现或清理宿主进程,不读取真实
+HOME/配置,不启动真实 Studio 服务。运行:
+python3 -m pytest tests/test_dev_sh_launch.py -q
 """
 
+import http.server
 import json
 import os
 from pathlib import Path
+import shutil
+import signal
 import subprocess
 import sys
 import tempfile
+import threading
+import time
 import unittest
 
 REPO = Path(__file__).resolve().parents[1]
@@ -202,6 +211,286 @@ class WrapperCommandContract(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("startup-only", result.stdout)
         self.assertFalse(marker.exists(), "--check must not execute command")
+
+
+class _RecordingHandler(http.server.BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.server.hits.append(self.path)
+        body = b"ok"
+        self.send_response(200)
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def log_message(self, *args):
+        pass
+
+
+class _RecordingServer(http.server.ThreadingHTTPServer):
+    """临时回环 HTTP 服务,记录收到的请求路径。"""
+
+    daemon_threads = True
+    allow_reuse_address = True
+
+    def __init__(self):
+        super().__init__(("127.0.0.1", 0), _RecordingHandler)
+        self.hits = []
+        self._thread = threading.Thread(target=self.serve_forever, daemon=True)
+        self._thread.start()
+
+    @property
+    def base_url(self):
+        return f"http://127.0.0.1:{self.server_port}"
+
+    def stop(self):
+        self.shutdown()
+        self.server_close()
+        self._thread.join(timeout=5)
+
+
+def _clean_proxy_env():
+    return {
+        key: value for key, value in os.environ.items()
+        if key.lower() not in {"http_proxy", "https_proxy", "all_proxy", "no_proxy"}
+    }
+
+
+class CurlLoopbackProxySemantics(unittest.TestCase):
+    """真实 curl 行为:证明 127.* 不是通配,而 --noproxy '*' 强制直连。"""
+
+    def setUp(self):
+        self.real_curl = shutil.which("curl")
+        if not self.real_curl:
+            self.skipTest("curl not installed")
+        self.direct = _RecordingServer()
+        self.proxy = _RecordingServer()
+        self.addCleanup(self.proxy.stop)
+        self.addCleanup(self.direct.stop)
+
+    def _curl(self, url, no_proxy, noproxy=None):
+        env = _clean_proxy_env()
+        env["http_proxy"] = self.proxy.base_url
+        env["NO_PROXY"] = no_proxy
+        args = [self.real_curl, "-sf"]
+        if noproxy is not None:
+            args += ["--noproxy", noproxy]
+        args.append(url)
+        return subprocess.run(args, env=env, capture_output=True, text=True,
+                              timeout=15)
+
+    def test_wildcard_127_does_not_cover_loopback(self):
+        url = f"{self.direct.base_url}/api/health"
+        result = self._curl(url, "127.*,api.hyper-op.com")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.direct.hits, [], "请求不应直连")
+        self.assertEqual(self.proxy.hits, [url], "127.* 不匹配 127.0.0.1")
+
+    def test_noproxy_star_forces_direct_loopback(self):
+        url = f"{self.direct.base_url}/api/health"
+        result = self._curl(url, "127.*,api.hyper-op.com", noproxy="*")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.direct.hits, ["/api/health"])
+        self.assertEqual(self.proxy.hits, [])
+
+    def test_explicit_loopback_entry_also_bypasses(self):
+        url = f"{self.direct.base_url}/api/health"
+        result = self._curl(url, "127.0.0.1")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.direct.hits, ["/api/health"])
+        self.assertEqual(self.proxy.hits, [])
+
+
+class RealDevShReadiness(unittest.TestCase):
+    """执行生产 dev.sh 原样拷贝,验证前后端就绪探测在代理环境下直连。
+
+    隔离:
+    - dev.sh 与 provider-network.py 拷贝到临时目录;`.venv/bin/activate` 为空,
+      不读取真实虚拟环境;node_modules/子包目录只建骨架。
+    - PATH 前置替身:lsof/pgrep 恒返回 1(不发现宿主进程),uv/git/node 空操作,
+      python 后端与 npm 是短命 sleep,真实 curl 由替身改写 URL 后执行。
+    - HOME / SENZA_STUDIO_HOME / SENZA_STUDIO_DATA_ROOT 全部指向临时目录。
+    - 不绑定 7878/5173;就绪探测命中临时端口上的回环服务。
+    """
+
+    BACKEND_URL = "http://127.0.0.1:7878"
+    FRONTEND_URL = "http://localhost:5173"
+
+    CURL_STUB = r'''#!__PYTHON__
+import json
+import os
+import subprocess
+import sys
+from pathlib import Path
+
+argv = sys.argv[1:]
+original = argv[-1]
+rewritten = original.replace(
+    os.environ["STUB_BACKEND_URL"], os.environ["STUB_BACKEND_DIRECT"]
+).replace(
+    os.environ["STUB_FRONTEND_URL"], os.environ["STUB_FRONTEND_DIRECT"]
+)
+with open(os.environ["STUB_CURL_LOG"], "a", encoding="utf-8") as stream:
+    stream.write(json.dumps(
+        {"args": argv, "url": original, "rewritten": rewritten},
+        ensure_ascii=False,
+    ) + "\n")
+rc = subprocess.call([os.environ["STUB_REAL_CURL"], *argv[:-1], rewritten])
+if original.startswith(os.environ["STUB_FRONTEND_URL"]) and rc == 0:
+    Path(os.environ["STUB_PROBES_DONE"]).touch()
+sys.exit(rc)
+'''
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.root = Path(self._tmp.name)
+        self.real_curl = shutil.which("curl")
+        self.real_python3 = shutil.which("python3")
+        if not self.real_curl or not self.real_python3:
+            self.skipTest("curl/python3 not installed")
+
+        self.backend_server = _RecordingServer()
+        self.frontend_server = _RecordingServer()
+        self.proxy_server = _RecordingServer()
+        self.addCleanup(self.proxy_server.stop)
+        self.addCleanup(self.frontend_server.stop)
+        self.addCleanup(self.backend_server.stop)
+
+        self.bin = self.root / "bin"
+        self.bin.mkdir()
+        self.curl_log = self.root / "curl.log"
+        self.probes_done = self.root / "probes.done"
+        self._write_stubs()
+        self._write_sandbox()
+
+    def _write_stub(self, name, body):
+        path = self.bin / name
+        path.write_text(body)
+        path.chmod(0o755)
+
+    def _write_stubs(self):
+        # 后端替身:导入检查成功;`-m studio_backend.server` 驻留到 cleanup。
+        self._write_stub(
+            "python",
+            "#!/bin/sh\n"
+            'case "${1:-}" in\n'
+            "  -c) exit 0 ;;\n"
+            "  -m) exec sleep 2 ;;\n"
+            "esac\n"
+            "exit 0\n",
+        )
+        # python3 必须真实执行 provider-network.py;绝对路径避免自我递归。
+        self._write_stub(
+            "python3", f'#!/bin/sh\nexec "{self.real_python3}" "$@"\n')
+        self._write_stub("npm", "#!/bin/sh\nexec sleep 2\n")
+        self._write_stub("uv", "#!/bin/sh\nexit 0\n")
+        self._write_stub("node", "#!/bin/sh\nexit 0\n")
+        self._write_stub("git", "#!/bin/sh\nexit 0\n")
+        # 关键的宿主隔离:端口/进程清理永远“没找到”。
+        self._write_stub("lsof", "#!/bin/sh\nexit 1\n")
+        self._write_stub("pgrep", "#!/bin/sh\nexit 1\n")
+        self._write_stub(
+            "curl", self.CURL_STUB.replace("__PYTHON__", sys.executable))
+
+    def _write_sandbox(self):
+        (self.root / "dev.sh").write_text(DEV_SH.read_text())
+        scripts = self.root / "scripts"
+        scripts.mkdir()
+        (scripts / "provider-network.py").write_text(WRAPPER.read_text())
+        venv_bin = self.root / ".venv" / "bin"
+        venv_bin.mkdir(parents=True)
+        (venv_bin / "activate").touch()  # 空 activate:不污染测试 PATH
+        (self.root / "senza-studio-components").mkdir()
+        (self.root / "senza-studio-runtime").mkdir()
+        (self.root / "studio_frontend" / "node_modules").mkdir(parents=True)
+        # 与用户现场一致:provider 直连域名存在,但 NO_PROXY 仍缺明确回环地址。
+        (self.root / "provider-network.json").write_text(
+            json.dumps({"version": 1, "no_proxy": ["api.example.com"]}))
+
+    def _environment(self):
+        env = _clean_proxy_env()
+        env.update({
+            "HOME": str(self.root),
+            "SENZA_STUDIO_HOME": str(self.root / "senza-home"),
+            "SENZA_STUDIO_DATA_ROOT": str(self.root),
+            "SENZA_STUDIO_API_TOKEN": "test-token",
+            "PATH": f"{self.bin}:{os.environ['PATH']}",
+            "STUB_REAL_CURL": self.real_curl,
+            "STUB_CURL_LOG": str(self.curl_log),
+            "STUB_PROBES_DONE": str(self.probes_done),
+            "STUB_BACKEND_URL": self.BACKEND_URL,
+            "STUB_BACKEND_DIRECT": self.backend_server.base_url,
+            "STUB_FRONTEND_URL": self.FRONTEND_URL,
+            "STUB_FRONTEND_DIRECT": self.frontend_server.base_url,
+            # 用户现场:代理开启,NO_PROXY 只有 127.*(不是明确回环地址),
+            # 且没有 localhost——前后端探测都会受代理影响。
+            "http_proxy": self.proxy_server.base_url,
+            "HTTP_PROXY": self.proxy_server.base_url,
+            "https_proxy": self.proxy_server.base_url,
+            "HTTPS_PROXY": self.proxy_server.base_url,
+            "NO_PROXY": "127.*,api.hyper-op.com",
+            "no_proxy": "127.*,api.hyper-op.com",
+        })
+        for key in ("SENZA_STUDIO_MODEL", "SENZA_STUDIO_API_TOKEN_FILE",
+                    "STUDIO_NO_PROXY_APPEND", "STUDIO_PROVIDER_NETWORK_APPLIED"):
+            env.pop(key, None)
+        return env
+
+    @staticmethod
+    def _terminate(proc):
+        if proc.poll() is not None:
+            return
+        try:
+            os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
+        except ProcessLookupError:
+            return
+        try:
+            proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            try:
+                os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            proc.wait(timeout=5)
+
+    def test_readiness_bypasses_proxy_for_backend_and_frontend(self):
+        proc = subprocess.Popen(
+            ["bash", str(self.root / "dev.sh")],
+            cwd=self.root, env=self._environment(),
+            stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+            text=True, start_new_session=True,
+        )
+        self.addCleanup(self._terminate, proc)
+        try:
+            output, _ = proc.communicate(timeout=40)
+        except subprocess.TimeoutExpired:
+            self._terminate(proc)
+            output, _ = proc.communicate()
+            self.fail(f"dev.sh 未退出:\n{output}")
+
+        self.assertIn(proc.returncode, (0, 1),
+                      f"rc={proc.returncode}\n{output}")
+        self.assertIn("✅ 后端就绪", output)
+        self.assertIn("✅ 前端就绪", output)
+        self.assertNotIn("启动超时", output)
+
+        records = [json.loads(line) for line in
+                   self.curl_log.read_text().splitlines() if line.strip()]
+        self.assertEqual(len(records), 2,
+                         f"期望前后端各一次探测,实际: {records}\n{output}")
+        by_url = {record["url"]: record for record in records}
+        self.assertEqual(set(by_url), {self.BACKEND_URL + "/api/health",
+                                       self.FRONTEND_URL + "/"})
+        for url, record in by_url.items():
+            args = record["args"]
+            self.assertIn("--noproxy", args, f"{url} 缺少 --noproxy")
+            self.assertEqual(args[args.index("--noproxy") + 1], "*",
+                             f"{url} 的 --noproxy 值不是 *")
+
+        self.assertEqual(self.backend_server.hits, ["/api/health"])
+        self.assertEqual(self.frontend_server.hits, ["/"])
+        self.assertEqual(self.proxy_server.hits, [],
+                         "就绪探测不应经过代理")
 
 
 if __name__ == "__main__":

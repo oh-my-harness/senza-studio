@@ -157,9 +157,14 @@ python3 scripts/provider-network.py -- "${BACKEND_ARGS[@]}" &
 BACKEND_PID=$!
 
 # ── 等待后端就绪 ────────────────────────────────────────
+# 本机就绪探测必须显式绕过代理:curl 的 NO_PROXY 不支持 "127.*" 这种通配
+# 写法(只认精确 IP/主机名或单独的 "*"),所以用户设了 http_proxy 且
+# NO_PROXY 里只有 127.* 时,发往 127.0.0.1:7878 的请求仍会走代理。代理
+# 又回不到本机服务,脚本就会在后端已经监听的情况下误报启动超时。
+# --noproxy '*' 只影响这两次探测,不改 provider-network 的模型网络配置。
 echo "⏳ 等待后端就绪..."
 for i in $(seq 1 15); do
-  if curl -sf "http://127.0.0.1:$BACKEND_PORT/api/health" >/dev/null 2>&1; then
+  if curl --noproxy '*' -sf "http://127.0.0.1:$BACKEND_PORT/api/health" >/dev/null 2>&1; then
     echo "✅ 后端就绪"
     break
   fi
@@ -177,7 +182,7 @@ cd ..
 # ── 等待前端就绪 ────────────────────────────────────────
 echo "⏳ 等待前端就绪..."
 for i in $(seq 1 15); do
-  if curl -sf "http://localhost:$FRONTEND_PORT/" >/dev/null 2>&1; then
+  if curl --noproxy '*' -sf "http://localhost:$FRONTEND_PORT/" >/dev/null 2>&1; then
     echo "✅ 前端就绪"
     break
   fi
