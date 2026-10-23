@@ -233,7 +233,7 @@ export const useStudioStore = create<StudioStore>((set) => ({
           ? {
               ...c,
               status: "done",
-              text: output ?? c.text,
+              text: output?.trim() ? output : c.text,
               route: extra?.route,
               debug: extra?.debug,
               fields: extra?.fields,
@@ -255,4 +255,5 @@ export const useStudioStore = create<StudioStore>((set) => ({
         ),
       };
     }),
+
 }));

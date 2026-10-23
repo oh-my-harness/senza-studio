@@ -7,6 +7,8 @@ import type { AgentInfo, RunCard, RunPhase } from "../types";
 
 export interface LayoutProps {
   info: AgentInfo;
+  /** Host-specific stable identity. Never infer identity from a display title. */
+  sessionScope?: string;
   phase: RunPhase;
   cards: RunCard[];
   /** 正在等人工决定的 step id，没有就是 null */

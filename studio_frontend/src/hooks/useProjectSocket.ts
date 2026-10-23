@@ -30,6 +30,7 @@ export function useProjectSocket(projectId: string | null) {
   const markAwaitingApproval = useStudioStore((s) => s.markAwaitingApproval);
   const setPausedStep = useStudioStore((s) => s.setPausedStep);
   const setEnginePaused = useStudioStore((s) => s.setEnginePaused);
+  const setPlayError = useStudioStore((s) => s.setPlayError);
   const setRunFinished = useStudioStore((s) => s.setRunFinished);
   const setStreaming = useStudioStore((s) => s.setStreaming);
   const failRunningSteps = useStudioStore((s) => s.failRunningSteps);
@@ -93,6 +94,7 @@ export function useProjectSocket(projectId: string | null) {
         addLog("info", "▶ 已恢复运行");
       } else if (event.type === "failed") {
         failRunningSteps();
+        setPlayError(event.error || "工作流失败");
         addLog("error", event.error || "工作流失败");
       } else if (event.type === "workflow_done") {
         // 跑完了（成功或失败）不自动退出 playing——留给用户自己看完结果
@@ -138,6 +140,10 @@ export function useProjectSocket(projectId: string | null) {
           // run_play_streaming 都会发）——统一记到日志面板，不再插进聊天
           // 记录（插的假 assistant 气泡本来也不会被真实持久化，刷新就没了）。
           addLog("error", event.message || "发生错误");
+          if (event.source === "play") {
+            setPlayError(event.message || "运行失败");
+            if (event.terminal === true) setRunFinished("failed");
+          }
         }
         // source: "play" 的 error 不该把 status 打回 spec_ready——Play 中途
         // 出错要留在 playing，让用户先看完 Game view 里的错误详情，自己点

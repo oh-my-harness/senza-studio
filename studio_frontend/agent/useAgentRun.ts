@@ -16,6 +16,7 @@ interface StructuredPayload {
  */
 export function useAgentRun() {
   const [info, setInfo] = useState<AgentInfo | null>(null);
+  const [sessionScope, setSessionScope] = useState<string>();
   const [connected, setConnected] = useState(false);
   const [phase, setPhase] = useState<RunPhase>("idle");
   const [cards, setCards] = useState<RunCard[]>([]);
@@ -26,7 +27,11 @@ export function useAgentRun() {
 
   useEffect(() => {
     fetch("/api/agent")
-      .then((r) => r.json())
+      .then((r) => {
+        if (!r.ok) throw new Error(`HTTP ${r.status}`);
+        setSessionScope(r.headers.get("X-Senza-Agent-Scope") ?? undefined);
+        return r.json();
+      })
       .then(setInfo)
       .catch(() => setError("没能读到 agent 信息，服务可能没起来"));
   }, []);
@@ -93,7 +98,7 @@ export function useAgentRun() {
                   ? {
                       ...c,
                       status: "done" as CardStatus,
-                      text: event.output ?? c.text,
+                      text: event.output?.trim() ? event.output : c.text,
                       fields: structured?.fields,
                     }
                   : c
@@ -113,6 +118,7 @@ export function useAgentRun() {
 
         case "error":
           setError(event.message || "发生错误");
+          if (event.terminal === true) { setFinishedState("failed"); setPhase("done"); }
           break;
 
         case "workflow_done":
@@ -149,7 +155,7 @@ export function useAgentRun() {
 
   const start = useCallback((inputs: Record<string, string>) => {
     const ws = wsRef.current;
-    if (!ws || ws.readyState !== WebSocket.OPEN) return;
+    if (!ws || ws.readyState !== WebSocket.OPEN) throw new Error("与服务的连接已断开");
     setCards([]);
     setError(null);
     setFinishedState(null);
@@ -179,7 +185,7 @@ export function useAgentRun() {
     setPhase("idle");
   }, []);
 
-  return { info, connected, phase, cards, pendingStep, error, finishedState, start, decide, cancel, reset };
+  return { info, sessionScope, connected, phase, cards, pendingStep, error, finishedState, start, decide, cancel, reset };
 }
 
 /** 就地更新某个 step 最后一张卡片。从后往前找：同一个 step 可能因为循环

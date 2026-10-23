@@ -28,16 +28,19 @@ interface Draft {
   density: string;
   logo: string;
   inputs: Record<string, InputDraft>;
+  conversation: import("../player/conversation").ConversationConfig;
 }
 
 const LAYOUT_OPTIONS = [
   { value: "", label: "自动" },
   { value: "form", label: "表单 — 填表、时间线、结果" },
+  { value: "conversation", label: "对话 — 多轮交互、保存与恢复" },
   { value: "dashboard", label: "看板 — 一屏面板，无时间线" },
 ];
 
 function toDraft(info: AgentInfo, explicitLayout: string): Draft {
   return {
+    conversation: info.conversation ?? { message_input: info.inputs[0]?.name ?? "", carry_inputs: [], history_max_messages: 20, history_max_chars: 12000 },
     title: info.title,
     description: info.description,
     layout: explicitLayout,
@@ -108,6 +111,8 @@ export default function AgentUiPanel({ projectId }: { projectId: string }) {
     // "自动"就是不写这个键，让后端按流程形态猜——写死一个跟推导结果相同的值
     // 看着没差别，但流程改了之后它就不会跟着变了。
     if (draft.layout) ui.layout = draft.layout;
+    if (draft.layout === "conversation") ui.conversation = draft.conversation;
+    else if ((spec.ui as Record<string, unknown>)?.conversation) ui.conversation = (spec.ui as Record<string, unknown>).conversation;
 
     const theme: Record<string, unknown> = {};
     if (draft.accent !== FALLBACK_THEME.accent) theme.accent = draft.accent;
@@ -118,7 +123,8 @@ export default function AgentUiPanel({ projectId }: { projectId: string }) {
 
     const inputs: Record<string, Record<string, unknown>> = {};
     for (const [name, options] of Object.entries(draft.inputs)) {
-      const entry: Record<string, unknown> = {};
+      const existing = ((spec.ui as { inputs?: Record<string, Record<string, unknown>> })?.inputs ?? {})[name];
+      const entry: Record<string, unknown> = existing?.default !== undefined ? { default: existing.default } : {};
       if (options.label) entry.label = options.label;
       if (options.placeholder) entry.placeholder = options.placeholder;
       // multiline 默认 true，只有关掉了才需要写
@@ -169,6 +175,20 @@ export default function AgentUiPanel({ projectId }: { projectId: string }) {
             ? undefined
             : `按当前流程推导：${effectiveLayout === "dashboard" ? "看板" : "表单"}`
         )}
+
+        {draft.layout === "conversation" && <div className="space-y-3 rounded border p-2">
+          {field("消息输入", <select className={inputClass} value={draft.conversation.message_input} onChange={e => patch({ conversation: { ...draft.conversation, message_input: e.target.value, carry_inputs: draft.conversation.carry_inputs.filter(k => k !== e.target.value), history_input: draft.conversation.history_input === e.target.value ? undefined : draft.conversation.history_input } })}>
+            <option value="">请选择真实入口字段</option>
+            {Object.keys(draft.inputs).map(k => <option key={k} value={k}>{k}</option>)}
+          </select>)}
+          {field("历史输入（可选，JSON 文本）", <select className={inputClass} value={draft.conversation.history_input ?? ""} onChange={e => patch({ conversation: { ...draft.conversation, history_input: e.target.value || undefined, carry_inputs: draft.conversation.carry_inputs.filter(k => k !== e.target.value) } })}>
+            <option value="">无：不自动提供历史上下文</option>
+            {Object.keys(draft.inputs).filter(k => k !== draft.conversation.message_input).map(k => <option key={k} value={k}>{k}</option>)}
+          </select>)}
+          <p className="text-xs text-gray-500">会话内保留并保存的输入（不要选择凭据）：</p>
+          {Object.keys(draft.inputs).filter(k => k !== draft.conversation.message_input && k !== draft.conversation.history_input).map(k => <label key={k} className="block text-xs"><input type="checkbox" checked={draft.conversation.carry_inputs.includes(k)} onChange={e => patch({ conversation: { ...draft.conversation, carry_inputs: e.target.checked ? [...draft.conversation.carry_inputs, k] : draft.conversation.carry_inputs.filter(v => v !== k) } })} /> {k}</label>)}
+          <p className="text-xs text-gray-500">默认仅传最近 20 条成功消息、最多 12000 字符；完整记录保存在此浏览器。</p>
+        </div>}
 
         {field(
           "标题",
