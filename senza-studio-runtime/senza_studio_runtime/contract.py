@@ -38,7 +38,7 @@ DEFAULT_DISPLAY = "chat"
 # 数据复盘是一屏面板，没有共同的"正确布局"。不做成可自由拼版的 DSL——那是一门
 # 要设计、要校验、还要让元 agent 写得好的新语言，而现在连第三种形态都还没出现。
 # 加一种形态 = 加一个 layout 组件，喂给它的契约和运行状态跟别的形态完全一样。
-LAYOUTS = ("form", "dashboard")
+LAYOUTS = ("form", "dashboard", "conversation")
 DEFAULT_LAYOUT = "form"
 
 # 配色/明暗/密度。前端把这些变成 CSS 变量，所有 layout 自动跟着变——交付给
@@ -104,7 +104,50 @@ def describe_inputs(spec_dict: dict) -> list[dict]:
                 "optional": bool(options.get("optional", False)),
             }
         )
+    for field in fields:
+        options = configured.get(field["name"])
+        default = options.get("default") if isinstance(options, dict) else None
+        if isinstance(default, str):
+            field["default"] = default
     return fields
+
+
+def describe_conversation(spec_dict: dict) -> dict:
+    """Validate mappings against real template inputs (currently all strings).
+
+    History is a bounded JSON *string*, never an undeclared array input. This
+    contract deliberately makes no claim about runtime/business-state memory.
+    """
+    inputs = {field["name"] for field in describe_inputs(spec_dict)}
+    config = _ui(spec_dict).get("conversation")
+    if not isinstance(config, dict):
+        raise ValueError("ui.conversation must be an object")
+    allowed = {"message_input", "carry_inputs", "history_input",
+               "history_max_messages", "history_max_chars"}
+    if set(config) - allowed:
+        raise ValueError("ui.conversation has unknown keys")
+    message = config.get("message_input")
+    carry = config.get("carry_inputs", [])
+    history = config.get("history_input")
+    if not isinstance(message, str) or message not in inputs:
+        raise ValueError("conversation.message_input must reference a real string input")
+    if not isinstance(carry, list) or any(not isinstance(v, str) or v not in inputs for v in carry):
+        raise ValueError("conversation.carry_inputs must reference real string inputs")
+    if len(carry) != len(set(carry)) or message in carry:
+        raise ValueError("conversation input mappings must be distinct")
+    if history is not None and (not isinstance(history, str) or history not in inputs
+                                or history == message or history in carry):
+        raise ValueError("conversation.history_input must reference a distinct real string input")
+    result = {"message_input": message, "carry_inputs": carry}
+    if history is not None:
+        result["history_input"] = history
+    for key, default, maximum in (("history_max_messages", 20, 100),
+                                  ("history_max_chars", 12000, 100000)):
+        value = config.get(key, default)
+        if type(value) is not int or not 2 <= value <= maximum:
+            raise ValueError(f"conversation.{key} must be an integer between 2 and {maximum}")
+        result[key] = value
+    return result
 
 
 def describe_steps(spec_dict: dict) -> dict[str, dict]:
@@ -216,4 +259,9 @@ def describe_agent(spec_dict: dict, fallback_title: str = "Agent") -> dict:
     info["layout"] = (
         explicit if explicit in LAYOUTS else infer_layout(info["steps"])
     )
+    if info["layout"] == "conversation":
+        try:
+            info["conversation"] = describe_conversation(spec_dict)
+        except ValueError as exc:
+            info["error"] = str(exc)
     return info

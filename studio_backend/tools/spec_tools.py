@@ -135,6 +135,7 @@ def make_spec_callbacks(spec: Spec) -> dict[str, Callable[[dict, Any], str]]:
                 inputs=args.get("inputs"),
                 layout=args.get("layout"),
                 theme=args.get("theme"),
+                conversation=args.get("conversation"),
             )
             return "Agent UI updated."
         except SpecError as e:
@@ -308,7 +309,7 @@ _SCHEMAS: dict[str, dict] = {
                 },
                 "layout": {
                     "type": "string",
-                    "enum": ["form", "dashboard"],
+                    "enum": ["form", "dashboard", "conversation"],
                     "description": (
                         "Overall shape of the product UI. 'form' = entry form, then a "
                         "timeline of step results, then the answer — right for one-shot "
@@ -316,8 +317,22 @@ _SCHEMAS: dict[str, dict] = {
                         "table/chart steps laid out as a panel grid — right for agents "
                         "whose output is data rather than prose. Omit it and the shape "
                         "is inferred from the flow (table/chart steps and no chat steps "
-                        "=> dashboard); only set it when the inference is wrong."
+                        "=> dashboard). For multi-turn chat explicitly choose conversation "
+                        "and supply the conversation input mappings."
                     ),
+                },
+                "conversation": {
+                    "type": "object",
+                    "description": "For conversation layout. Reference real entry template inputs only (strings). History is bounded JSON text; without history_input no automatic context continuity. Carry values and messages persist in this browser only. Never map credentials.",
+                    "properties": {
+                        "message_input": {"type": "string"},
+                        "carry_inputs": {"type": "array", "items": {"type": "string"}},
+                        "history_input": {"type": "string"},
+                        "history_max_messages": {"type": "integer", "minimum": 2, "maximum": 100},
+                        "history_max_chars": {"type": "integer", "minimum": 2, "maximum": 100000},
+                    },
+                    "required": ["message_input"],
+                    "additionalProperties": False,
                 },
                 "theme": {
                     "type": "object",
@@ -354,6 +369,8 @@ _SCHEMAS: dict[str, dict] = {
                             "label": {"type": "string"},
                             "placeholder": {"type": "string"},
                             "multiline": {"type": "boolean"},
+                            "optional": {"type": "boolean"},
+                            "default": {"type": "string"},
                         },
                     },
                 },

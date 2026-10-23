@@ -23,11 +23,12 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import hashlib
 from pathlib import Path
 from typing import Any
 
 import yaml
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, Response, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
@@ -82,7 +83,7 @@ def create_app(pipeline: Path, webui_dist: Path | None = None) -> FastAPI:
         return {"status": "ok"}
 
     @app.get("/api/agent")
-    async def agent():
+    async def agent(response: Response):
         """界面渲染所需的全部信息。和 Studio 的 /api/projects/{id}/agent 回的是
         同一个东西，由同一个 describe_agent 生成——Game view 就是这个界面的
         预览，两边的数据来源必须是一份。
@@ -90,7 +91,15 @@ def create_app(pipeline: Path, webui_dist: Path | None = None) -> FastAPI:
         标题优先用 spec 里 ui.title（作者写的产品名），没有才退回 agent.json
         里的项目名、再退回目录名。
         """
-        return describe_agent(spec_dict, manifest.get("name") or root.name)
+        info = describe_agent(spec_dict, manifest.get("name") or root.name)
+        # Same-origin exports of different agents must never share conversation data.
+        identity = manifest.get("conversation_storage_id") or hashlib.sha256(
+            json.dumps(spec_dict, sort_keys=True, ensure_ascii=False).encode()
+        ).hexdigest()
+        response.headers["X-Senza-Agent-Scope"] = "export:" + hashlib.sha256(
+            f"{root.resolve()}:{identity}".encode()
+        ).hexdigest()
+        return info
 
     @app.websocket("/ws/run")
     async def run_ws(websocket: WebSocket):
@@ -119,7 +128,7 @@ def create_app(pipeline: Path, webui_dist: Path | None = None) -> FastAPI:
                         # socket——Studio 那边踩过同样的坑。
                         play_session = None
                         await websocket.send_json(
-                            {"type": "error", "message": f"无法启动: {exc}"}
+                            {"type": "error", "message": f"无法启动: {exc}", "terminal": True}
                         )
                         continue
                     play_task = asyncio.create_task(
