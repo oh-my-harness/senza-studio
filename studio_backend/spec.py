@@ -10,8 +10,10 @@ from typing import Any
 
 import yaml
 
+from senza_studio_runtime.preprocess import PreprocessError
 from senza_studio_runtime.contract import (
     LAYOUTS,
+    describe_conversation,
     THEME_DENSITIES,
     THEME_KEYS,
     THEME_MODES,
@@ -27,8 +29,8 @@ _EDGE_PREFIX = "next_on_"
 
 # spec 顶层 ui 块：导出产品（和 Game view，它就是那个产品的预览）的界面文案。
 # 不放进 stages 里——这些是整个 agent 的属性，不属于任何一个 step。
-_AGENT_UI_KEYS = {"title", "description", "inputs", "layout", "theme"}
-_AGENT_UI_INPUT_KEYS = {"label", "placeholder", "multiline"}
+_AGENT_UI_KEYS = {"title", "description", "inputs", "layout", "theme", "conversation"}
+_AGENT_UI_INPUT_KEYS = {"label", "placeholder", "multiline", "default"}
 # 形态和主题的合法取值由 runtime 的契约模块定义——那边是唯一的真相来源
 # （前端和导出项目都从它拿），这里 import 过来校验，不另抄一份枚举。
 _AGENT_UI_THEME_KEYS = set(THEME_KEYS)
@@ -195,6 +197,21 @@ class Spec:
         inputs: dict[str, dict] | None = None,
         layout: str | None = None,
         theme: dict | None = None,
+        conversation: dict | None = None,
+    ) -> None:
+        """Apply incremental edits atomically: rejected mappings leave the spec intact."""
+        candidate = Spec(self._data)
+        candidate._apply_agent_ui(title, description, inputs, layout, theme, conversation)
+        self._data = candidate._data
+
+    def _apply_agent_ui(
+        self,
+        title: str | None = None,
+        description: str | None = None,
+        inputs: dict[str, dict] | None = None,
+        layout: str | None = None,
+        theme: dict | None = None,
+        conversation: dict | None = None,
     ) -> None:
         """设置整个 agent 的界面文案（顶层 ui 块）。
 
@@ -223,6 +240,14 @@ class Spec:
                 ui["theme"] = merged_theme
             _check_theme(theme)
             merged_theme.update(theme)
+        if conversation is not None:
+            candidate = copy.deepcopy(self._data)
+            candidate["ui"]["conversation"] = conversation
+            try:
+                describe_conversation(candidate)
+            except (ValueError, PreprocessError) as exc:
+                raise SpecError(str(exc)) from exc
+            ui["conversation"] = copy.deepcopy(conversation)
         if inputs is not None:
             merged = ui.setdefault("inputs", {})
             if not isinstance(merged, dict):
@@ -231,6 +256,8 @@ class Spec:
             for name, options in inputs.items():
                 if not isinstance(options, dict):
                     raise SpecError(f"ui.inputs['{name}'] must be an object")
+                if "default" in options and not isinstance(options["default"], str):
+                    raise SpecError("ui.inputs default must be a string")
                 unknown = set(options) - _AGENT_UI_INPUT_KEYS
                 if unknown:
                     raise SpecError(
@@ -302,6 +329,11 @@ class Spec:
                 raise SpecError(
                     f"unknown layout {layout!r} (expected one of {sorted(LAYOUTS)})"
                 )
+            if layout == "conversation" or "conversation" in ui:
+                try:
+                    describe_conversation(self._data)
+                except (ValueError, PreprocessError) as exc:
+                    raise SpecError(str(exc)) from exc
             theme = ui.get("theme")
             if theme is not None:
                 if not isinstance(theme, dict):
@@ -314,6 +346,8 @@ class Spec:
                 for name, options in inputs.items():
                     if not isinstance(options, dict):
                         raise SpecError(f"ui.inputs['{name}'] must be an object")
+                    if "default" in options and not isinstance(options["default"], str):
+                        raise SpecError("ui.inputs default must be a string")
                     unknown = set(options) - _AGENT_UI_INPUT_KEYS
                     if unknown:
                         raise SpecError(

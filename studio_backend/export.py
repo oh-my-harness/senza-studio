@@ -647,7 +647,7 @@ def export_project(
     # 人类可读的名字单独存，不塞进 pipeline.yaml——那是流程定义，不是展示
     # 元数据。界面的标题和浏览器标签页用它。
     (target / "agent.json").write_text(
-        json.dumps({"name": display_name}, ensure_ascii=False, indent=2) + "\n",
+        json.dumps({"name": display_name, "conversation_storage_id": project.meta["id"]}, ensure_ascii=False, indent=2) + "\n",
         encoding="utf-8",
     )
     _copy_tree(project.path / "tools", target / "tools")
