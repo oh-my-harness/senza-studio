@@ -141,10 +141,19 @@ def test_stage_with_max_tokens_2048(capture):
 
 
 def test_structured_stage_keeps_response_format(capture):
-    result = _drive(_make_executor(capture, {},
+    result = _drive(_make_executor(capture, {"json_mode": True},
                                    routes={"OUTCOME_PROPOSAL": "t", "ERROR": "e"}))
     assert "err" not in result, result.get("err")
     assert capture.bodies[0].get("response_format") == {"type": "json_object"}
+
+
+def test_structured_stage_defaults_to_no_response_format(capture):
+    """默认契约是"叙事 + 末尾 route JSON"，不是 JSON-only；json_object 会
+    与它冲突（DeepSeek 下会吐占位对象或漏 route）。"""
+    result = _drive(_make_executor(capture, {},
+                                   routes={"OUTCOME_PROPOSAL": "t", "ERROR": "e"}))
+    assert "err" not in result, result.get("err")
+    assert "response_format" not in capture.bodies[0]
 
 
 def test_format_fallback_rebuild_preserves_thinking_settings(capture, monkeypatch):
@@ -196,7 +205,7 @@ def test_format_fallback_rebuild_preserves_thinking_settings(capture, monkeypatc
     monkeypatch.setattr(play, "_run_agent_step", fake_run)
 
     result = _drive(_make_executor(
-        capture, {"thinking_level": "low", "max_tokens": 2048},
+        capture, {"thinking_level": "low", "max_tokens": 2048, "json_mode": True},
         routes={"OUTCOME_PROPOSAL": "t", "ERROR": "e"}))
     assert "err" not in result, result.get("err")
     assert len(calls) == 2, f"expected exactly one fallback, got {len(calls)}"

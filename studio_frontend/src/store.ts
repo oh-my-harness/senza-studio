@@ -116,6 +116,7 @@ interface StudioStore {
       route?: string;
       debug?: Record<string, unknown> | null;
       fields?: Record<string, unknown> | null;
+      validation?: Record<string, unknown> | null;
     }
   ) => void;
   setExecActivity: (scope: string, phase: ExecActivityPhase, message?: string) => void;
@@ -525,6 +526,7 @@ export const useStudioStore = create<StudioStore>((set) => ({
           route: extra?.route,
           debug: extra?.debug,
           fields: extra?.fields,
+          validation: extra?.validation,
         };
       }),
     })),
@@ -669,7 +671,7 @@ export const useStudioStore = create<StudioStore>((set) => ({
               ? {
                   ...c,
                   status: "done" as const,
-                  text: output ?? c.text,
+                  text: output?.trim() ? output : c.text,
                   route: structured?.route_key,
                   debug: structured?._debug,
                   fields: structured?.fields,

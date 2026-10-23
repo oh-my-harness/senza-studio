@@ -75,6 +75,20 @@ function RuntimeInspector({ card, stepType }: { card: GameCard | undefined; step
         </div>
       )}
 
+      {card.validation && card.validation.status === "failed" && (
+        <div>
+          <label className="block text-xs text-gray-500 mb-1">验证失败</label>
+          <div className="text-xs text-red-700">
+            {String(card.validation.code ?? "")}: {String(card.validation.detail ?? "")}
+          </div>
+          {typeof card.validation.raw_output === "string" && (
+            <pre className="mt-1 rounded border border-red-200 bg-red-50 px-2 py-1 text-xs whitespace-pre-wrap break-words">
+              {card.validation.raw_output}
+            </pre>
+          )}
+        </div>
+      )}
+
       {(toolCallsCount !== undefined || usage) && (
         <div className="pt-2 border-t border-gray-100">
           <label className="block text-xs text-gray-500 mb-1">指标</label>

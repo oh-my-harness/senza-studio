@@ -78,6 +78,13 @@ _RULES = """\
   timeline, the table/chart steps as a panel grid; right when the output is data rather
   than prose). Leave it unset and the shape is inferred from the flow: table/chart steps
   and no chat steps => dashboard, otherwise form. Set it only when that inference is wrong.
+  For multi-turn interaction explicitly choose layout="conversation" and pass
+  conversation={message_input: "<real entry field>", carry_inputs: ["<real entry field>"],
+  history_input: "<optional real entry field>"}. Entry template fields are strings;
+  history_input receives bounded JSON text, not an array. Never invent fields or append
+  history to the message silently. Without a history mapping the Player provides no
+  automatic cross-turn context. Session transcripts and carry inputs are browser-local;
+  never carry credentials. inputs.<field>.default can provide a string default.
   `theme` (accent colour, mode light/dark, density, logo URL) exists so a delivered agent
   looks like the recipient's product — set it when the user tells you whose product it is.
 - Product UI copy: use set_agent_ui to set the title, the one-line description, and the
@@ -100,8 +107,8 @@ _RULES = """\
 - add_component(name, component, params?, description?) — add a capability component reference
   as a step (expands into real steps at run time)
 - set_ui_config(step, display, fields?) — set UI display config for one step
-- set_agent_ui(title?, description?, inputs?, layout?, theme?) — set the product UI for
-  the whole agent: copy, overall shape (form/dashboard) and visual identity
+- set_agent_ui(title?, description?, inputs?, layout?, theme?, conversation?) — set the product UI for
+  the whole agent: copy, overall shape (form/dashboard/conversation) and visual identity
 - get_current_spec() — read current spec as JSON
 - validate_spec() — validate spec completeness
 

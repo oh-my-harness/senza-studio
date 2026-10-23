@@ -61,6 +61,9 @@ export interface GameCard {
   // {tool, args}，checker/pending 状态没有（undefined）。
   debug?: Record<string, unknown> | null;
   route?: string;
+  // 结构化路由验证失败时的完整诊断（code/detail/raw_output）。只有失败卡片
+  // 才有；raw_output 是模型可见输出，用来判断截断、选错 JSON 还是漏 route。
+  validation?: Record<string, unknown> | null;
   // GameView 的 table/chart 卡片用——structured.fields，ui.fields 点名的
   // 字段值从这里取。
   fields?: Record<string, unknown> | null;

@@ -16,6 +16,7 @@ export interface AgentInput {
   /** 作者在 ui.inputs 里显式声明 optional 的字段可以留空；没写就是必填
    *  （后端契约默认 false，前端不做任何猜测）。 */
   optional?: boolean;
+  default?: string;
 }
 
 /** 停下来问人时的一个选项。value 是 next_on_<value> 的路由名，label 是给
@@ -42,6 +43,7 @@ export interface AgentInfo {
   /** 整体形态。后端回的永远是**最终生效的那个**（作者写的，或按流程形态
    *  猜的）——前端不该也去猜一遍，那就又是两份实现了。 */
   layout: string;
+  conversation?: import("./conversation").ConversationConfig;
   theme: AgentTheme;
   inputs: AgentInput[];
   steps: Record<string, AgentStep>;

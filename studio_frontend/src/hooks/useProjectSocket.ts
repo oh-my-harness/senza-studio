@@ -34,6 +34,7 @@ export function useProjectSocket(projectId: string | null) {
   const markAwaitingApproval = useStudioStore((s) => s.markAwaitingApproval);
   const setPausedStep = useStudioStore((s) => s.setPausedStep);
   const setEnginePaused = useStudioStore((s) => s.setEnginePaused);
+  const setPlayError = useStudioStore((s) => s.setPlayError);
   const setRunFinished = useStudioStore((s) => s.setRunFinished);
   const setStreaming = useStudioStore((s) => s.setStreaming);
   const failRunningSteps = useStudioStore((s) => s.failRunningSteps);
@@ -90,6 +91,7 @@ export function useProjectSocket(projectId: string | null) {
               route_key?: string;
               _debug?: Record<string, unknown> | null;
               fields?: Record<string, unknown> | null;
+              _validation?: Record<string, unknown> | null;
             }
           | null
           | undefined;
@@ -101,6 +103,7 @@ export function useProjectSocket(projectId: string | null) {
             route: structured?.route_key,
             debug: structured?._debug,
             fields: structured?.fields,
+            validation: structured?._validation,
           });
           setPausedStep(null);
         }
@@ -117,6 +120,7 @@ export function useProjectSocket(projectId: string | null) {
         finalizeInFlightExec("工作流失败,工具调用被中断");
         finalizeInFlightActivity("工作流失败,步骤被中断");
         failRunningSteps();
+        setPlayError(event.error || "工作流失败");
         addLog("error", event.error || "工作流失败");
       } else if (event.type === "workflow_done") {
         // 跑完了（成功或失败）不自动退出 playing——留给用户自己看完结果
@@ -181,6 +185,10 @@ export function useProjectSocket(projectId: string | null) {
           // run_play_streaming 都会发）——统一记到日志面板，不再插进聊天
           // 记录（插的假 assistant 气泡本来也不会被真实持久化，刷新就没了）。
           addLog("error", event.message || "发生错误");
+          if (event.source === "play") {
+            setPlayError(event.message || "运行失败");
+            if (event.terminal === true) setRunFinished("failed");
+          }
           // 前置事件(比如 CompactionError 在任何事件之前)抛出时,"chat"
           // 活动还没进入终态——在这里显式标 error,别让等待行永远挂着。
           setExecActivity(CHAT_ACTIVITY_SCOPE, "error", event.message || "发生错误");

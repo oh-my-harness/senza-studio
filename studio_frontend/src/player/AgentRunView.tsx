@@ -10,12 +10,14 @@
 //
 // 纯展示：没有 store、没有 WebSocket、没有 fetch。状态和动作全部由宿主传进来
 // （Studio 从 zustand store 映射，导出项目从 useAgentRun 映射）。
+import ConversationLayout from "./layouts/ConversationLayout";
 import DashboardLayout from "./layouts/DashboardLayout";
 import FormLayout from "./layouts/FormLayout";
 import type { LayoutProps } from "./layouts/types";
 
 const LAYOUTS: Record<string, (props: LayoutProps) => JSX.Element> = {
   form: FormLayout,
+  conversation: ConversationLayout,
   dashboard: DashboardLayout,
 };
 

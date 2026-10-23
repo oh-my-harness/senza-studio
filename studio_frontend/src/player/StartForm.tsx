@@ -22,19 +22,69 @@ export default function StartForm({
   onStart,
   variant = "stacked",
   submitLabel = "开始",
+  values: controlledValues,
+  onValuesChange,
+  dense = false,
 }: {
   info: AgentInfo;
   disabled: boolean;
   onStart: (values: Record<string, string>) => void;
   variant?: "stacked" | "inline";
   submitLabel?: string;
+  values?: Record<string, string>;
+  onValuesChange?: (values: Record<string, string>) => void;
+  /** 对话布局用：多行框收成 2 行，并把字段区限制在固定高度内滚动，
+   *  保证聊天记录永远有空间、发送按钮始终可见。表单/看板布局不传。 */
+  dense?: boolean;
 }) {
-  const [values, setValues] = useState<Record<string, string>>({});
+  const [localValues, setLocalValues] = useState<Record<string, string>>(() =>
+    Object.fromEntries(info.inputs.filter(f => f.default !== undefined).map(f => [f.name, f.default!])),
+  );
+  const values = controlledValues ?? localValues;
+  const setValues = (update: (v: Record<string, string>) => Record<string, string>) => {
+    const next = update(values);
+    if (onValuesChange) onValuesChange(next);
+    else setLocalValues(next);
+  };
   const ready = isStartReady(info.inputs, values);
   const inline = variant === "inline";
 
   const inputClass =
     "w-full rounded-lg border border-[var(--border)] bg-[var(--surface)] px-3 py-2 text-sm text-[var(--text)] outline-none placeholder:text-[var(--text-faint)] focus:border-[var(--accent)]";
+
+  const fields = info.inputs.map((field) => (
+    <div key={field.name} className={inline ? "min-w-[12rem] flex-1" : undefined}>
+      <label
+        className="mb-1.5 block text-sm font-medium text-[var(--text)]"
+        htmlFor={`input-${field.name}`}
+      >
+        {field.label}
+        {field.optional && (
+          <span className="ml-1 text-xs font-normal text-[var(--text-faint)]">
+            （可选）
+          </span>
+        )}
+      </label>
+      {field.multiline && !inline ? (
+        <textarea
+          id={`input-${field.name}`}
+          rows={dense ? 2 : 5}
+          placeholder={field.placeholder}
+          value={values[field.name] ?? ""}
+          onChange={(e) => setValues((v) => ({ ...v, [field.name]: e.target.value }))}
+          className={`resize-y ${inputClass}`}
+        />
+      ) : (
+        <input
+          id={`input-${field.name}`}
+          placeholder={field.placeholder}
+          value={values[field.name] ?? ""}
+          onChange={(e) => setValues((v) => ({ ...v, [field.name]: e.target.value }))}
+          className={inputClass}
+        />
+      )}
+    </div>
+  ));
 
   return (
     <form
@@ -44,39 +94,11 @@ export default function StartForm({
         if (ready && !disabled) onStart(values);
       }}
     >
-      {info.inputs.map((field) => (
-        <div key={field.name} className={inline ? "min-w-[12rem] flex-1" : undefined}>
-          <label
-            className="mb-1.5 block text-sm font-medium text-[var(--text)]"
-            htmlFor={`input-${field.name}`}
-          >
-            {field.label}
-            {field.optional && (
-              <span className="ml-1 text-xs font-normal text-[var(--text-faint)]">
-                （可选）
-              </span>
-            )}
-          </label>
-          {field.multiline && !inline ? (
-            <textarea
-              id={`input-${field.name}`}
-              rows={5}
-              placeholder={field.placeholder}
-              value={values[field.name] ?? ""}
-              onChange={(e) => setValues((v) => ({ ...v, [field.name]: e.target.value }))}
-              className={`resize-y ${inputClass}`}
-            />
-          ) : (
-            <input
-              id={`input-${field.name}`}
-              placeholder={field.placeholder}
-              value={values[field.name] ?? ""}
-              onChange={(e) => setValues((v) => ({ ...v, [field.name]: e.target.value }))}
-              className={inputClass}
-            />
-          )}
-        </div>
-      ))}
+      {dense ? (
+        <div className="max-h-[32vh] space-y-4 overflow-y-auto pr-1">{fields}</div>
+      ) : (
+        fields
+      )}
       <button
         type="submit"
         disabled={!ready || disabled}
