@@ -16,6 +16,9 @@ import { useStudioStore } from "../store";
 export default function GameView({ projectId }: { projectId: string }) {
   const [info, setInfo] = useState<AgentInfo | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
+  // 对话型 agent 的 Play 就是玩家在玩，不是一个供调试的窄预览。默认铺满
+  // 整个 Studio；"返回编辑器"仍能回到 DAG/Inspector，布局随时可以切回去。
+  const [expanded, setExpanded] = useState(false);
 
   const ws = useStudioStore((s) => s.ws);
   const gameCards = useStudioStore((s) => s.gameCards);
@@ -39,6 +42,23 @@ export default function GameView({ projectId }: { projectId: string }) {
     };
   }, [projectId]);
 
+  // 只对 conversation 自动铺满：form/dashboard 在侧栏里仍能完整预览，
+  // 而对话界面塞进 25% 侧栏时输入框和消息都不可用。
+  useEffect(() => {
+    if (info?.layout === "conversation") setExpanded(true);
+  }, [info]);
+
+  useEffect(() => {
+    if (!expanded) return;
+    // react-test-renderer 的 window 不是 DOM window，没有监听器 API。
+    if (typeof window.addEventListener !== "function") return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setExpanded(false);
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [expanded]);
+
   // 还没发 play 的时候就是 idle——这时 AgentRunView 显示的是开始表单，也就是
   // 最终用户打开导出产品看到的第一屏。入口输入从控制条搬到这里，就是为了让
   // 这一屏也能被预览到（它以前在 Studio 里根本没法看）。
@@ -61,30 +81,68 @@ export default function GameView({ projectId }: { projectId: string }) {
   }
 
   return (
-    <AgentRunView
-      info={info}
-      phase={phase}
-      cards={gameCards}
-      pendingStep={pausedStepId}
-      error={playError}
-      finishedState={runFinishedState}
-      connected={ws !== null}
-      compact
-      onStart={(inputs) =>
-        // start_paused 是"从头单步"按钮记下的（控制条 → store → 这里）。
-        // 它是调试用的，不属于产品界面，所以按钮留在控制条上。
-        send({ type: "play", inputs, start_paused: playStartPaused })
+    <div
+      className={
+        expanded
+          ? "fixed inset-0 z-50 flex flex-col bg-white"
+          : "flex h-full flex-col"
       }
-      onDecide={(stepId, decision) =>
-        send({ type: "submit_decision", step_id: stepId, decision })
-      }
-      onCancel={() => send({ type: "stop" })}
-      onReset={() => {
-        // 回到开始表单，但不退出运行视图——"再来一次"是产品行为，"退回编辑"
-        // 是控制条上的 Stop。后端那边上一轮的 play_task 已经结束，下一次
-        // play 会新建一个 PlaySession（app.py 的 play 分支只挡还在跑的）。
-        resetPlay();
-      }}
-    />
+    >
+      {info.layout === "conversation" && (
+        <div className="flex shrink-0 items-center justify-between gap-2 border-b border-gray-200 bg-white px-3 py-1.5">
+          <span className="truncate text-xs text-gray-500">
+            {expanded ? `玩家视图 · ${info.title}` : "玩家视图"}
+          </span>
+          <div className="flex shrink-0 items-center gap-1">
+            {phase !== "idle" && (
+              <button
+                type="button"
+                onClick={() => send({ type: "stop" })}
+                className="rounded border border-gray-300 px-2 py-0.5 text-xs text-gray-600 hover:bg-gray-100"
+              >
+                停止
+              </button>
+            )}
+            <button
+              type="button"
+              onClick={() => setExpanded((value) => !value)}
+              className="rounded border border-gray-300 px-2 py-0.5 text-xs text-gray-600 hover:bg-gray-100"
+            >
+              {expanded ? "返回编辑器" : "全屏玩家"}
+            </button>
+          </div>
+        </div>
+      )}
+      <div className="min-h-0 flex-1">
+        <AgentRunView
+          key={projectId}
+          info={info}
+          sessionScope={`studio:${projectId}`}
+          phase={phase}
+          cards={gameCards}
+          pendingStep={pausedStepId}
+          error={playError}
+          finishedState={runFinishedState}
+          connected={ws?.readyState === WebSocket.OPEN}
+          compact={!expanded}
+          onStart={(inputs) => {
+            if (!ws || ws.readyState !== WebSocket.OPEN) throw new Error("与服务的连接已断开");
+            // start_paused 是"从头单步"按钮记下的（控制条 → store → 这里）。
+            // 它是调试用的，不属于产品界面，所以按钮留在控制条上。
+            send({ type: "play", inputs, start_paused: playStartPaused });
+          }}
+          onDecide={(stepId, decision) =>
+            send({ type: "submit_decision", step_id: stepId, decision })
+          }
+          onCancel={() => send({ type: "stop" })}
+          onReset={() => {
+            // 回到开始表单，但不退出运行视图——"再来一次"是产品行为，"退回编辑"
+            // 是控制条上的 Stop。后端那边上一轮的 play_task 已经结束，下一次
+            // play 会新建一个 PlaySession（app.py 的 play 分支只挡还在跑的）。
+            resetPlay();
+          }}
+        />
+      </div>
+    </div>
   );
 }

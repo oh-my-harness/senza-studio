@@ -21,6 +21,7 @@ export default function AgentApp() {
   return (
     <AgentRunView
       info={run.info}
+      sessionScope={run.sessionScope}
       phase={run.phase}
       cards={run.cards}
       pendingStep={run.pendingStep}

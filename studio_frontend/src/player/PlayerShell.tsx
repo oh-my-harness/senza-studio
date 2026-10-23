@@ -9,22 +9,30 @@ export default function PlayerShell({
   info,
   connected,
   compact,
+  fill = false,
   actions,
   children,
 }: {
   info: AgentInfo;
   connected: boolean;
   compact: boolean;
+  /** 撑满宿主高度、由子内容自己滚动。对话布局用它把页头/输入区固定住；
+   *  表单/看板仍走整页滚动，行为不变。 */
+  fill?: boolean;
   /** 页头右侧的东西（看板布局把"运行"按钮放这儿） */
   actions?: React.ReactNode;
   children: React.ReactNode;
 }) {
   return (
     <div
-      className="h-full overflow-y-auto bg-[var(--bg)] text-[var(--text)]"
+      className={`bg-[var(--bg)] text-[var(--text)] ${
+        fill
+          ? "flex h-full min-h-0 flex-col overflow-hidden"
+          : "h-full overflow-y-auto"
+      }`}
       style={themeStyle(info.theme)}
     >
-      <header className="border-b border-[var(--border)] bg-[var(--surface)]">
+      <header className="shrink-0 border-b border-[var(--border)] bg-[var(--surface)]">
         <div
           className={`mx-auto flex max-w-5xl items-center gap-4 ${
             compact ? "px-4 py-3" : "px-6 py-5"
@@ -57,15 +65,21 @@ export default function PlayerShell({
       </header>
 
       <main
-        className={`mx-auto max-w-5xl space-y-4 ${compact ? "px-4 py-4" : "p-[var(--pad-page)]"}`}
+        className={
+          fill
+            ? `mx-auto flex w-full max-w-5xl min-h-0 flex-1 flex-col gap-4 ${
+                compact ? "px-4 py-4" : "p-[var(--pad-page)]"
+              }`
+            : `mx-auto max-w-5xl space-y-4 ${compact ? "px-4 py-4" : "p-[var(--pad-page)]"}`
+        }
       >
         {info.error && (
-          <div className="rounded-lg border border-[var(--danger-border)] bg-[var(--danger-bg)] px-4 py-3 text-sm text-[var(--danger-text)]">
+          <div className="shrink-0 rounded-lg border border-[var(--danger-border)] bg-[var(--danger-bg)] px-4 py-3 text-sm text-[var(--danger-text)]">
             这个 agent 没法运行：{info.error}
           </div>
         )}
         {!connected && (
-          <div className="rounded-lg border border-[var(--warn-border)] bg-[var(--warn-bg)] px-4 py-3 text-sm text-[var(--warn-text)]">
+          <div className="shrink-0 rounded-lg border border-[var(--warn-border)] bg-[var(--warn-bg)] px-4 py-3 text-sm text-[var(--warn-text)]">
             与服务的连接已断开，刷新页面重试。
           </div>
         )}
