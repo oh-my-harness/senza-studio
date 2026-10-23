@@ -2,6 +2,7 @@
 import { describe, expect, it } from "vitest";
 import {
   PANEL_LAYOUT_VERSION,
+  PANEL_VERTICAL_SEPARATOR_SIZE,
   addMinimized,
   emptyPanelState,
   enforceMinimumPercentages,
@@ -214,6 +215,13 @@ describe("minimum spans", () => {
   it("sums shell minimums plus separators", () => {
     expect(panelMinSpan(["agent-sidebar", "agent-chat"])).toBe(240 + 360 + 6);
     expect(panelMinSpan([])).toBe(0);
+  });
+
+  it("reserves the overlay separator's real layout thickness vertically", () => {
+    expect(panelMinSpan(["workspace-main", "logs"], "vertical")).toBe(
+      240 + 140 + PANEL_VERTICAL_SEPARATOR_SIZE,
+    );
+    expect(PANEL_VERTICAL_SEPARATOR_SIZE).toBeGreaterThan(6);
   });
 
 });

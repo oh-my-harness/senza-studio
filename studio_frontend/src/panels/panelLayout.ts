@@ -12,8 +12,21 @@ import type { Layout } from "react-resizable-panels";
 
 export const PANEL_LAYOUT_VERSION = 1;
 
-/** 水平/垂直分隔线占用的像素。与 PanelSeparator 的宽度保持一致。 */
+/** 水平分隔线占用的像素。与 PanelSeparator 的宽度保持一致。 */
 export const PANEL_SEPARATOR_SIZE = 6;
+
+/**
+ * 纵向分隔线占用的像素。底部 Panel 的分隔线是 overlay 手柄：元素更高
+ * （覆盖标题栏命中区），但实际占位只有 10px，Group 的最小高度必须按
+ * 这个实际占位计算，否则短视口会把 Panel 压到 minHeight 以下。
+ */
+export const PANEL_VERTICAL_SEPARATOR_SIZE = 10;
+
+function separatorSize(orientation: "horizontal" | "vertical"): number {
+  return orientation === "horizontal"
+    ? PANEL_SEPARATOR_SIZE
+    : PANEL_VERTICAL_SEPARATOR_SIZE;
+}
 
 export type StudioPanelId =
   | "workspace-main"
@@ -333,7 +346,7 @@ export function panelMinSpan(
           : STUDIO_PANEL_SPECS[id].minHeight),
       0,
     ) +
-    PANEL_SEPARATOR_SIZE * (panelIds.length - 1)
+    separatorSize(orientation) * (panelIds.length - 1)
   );
 }
 

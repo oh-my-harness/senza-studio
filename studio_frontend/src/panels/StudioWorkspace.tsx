@@ -23,6 +23,7 @@ import PanelDock from "./PanelDock";
 import PanelFrame from "./PanelFrame";
 import PanelSeparator from "./PanelSeparator";
 import {
+  PANEL_VERTICAL_SEPARATOR_SIZE,
   STUDIO_PANEL_SPECS,
   groupPanelIds,
   panelMinSpan,
@@ -311,6 +312,11 @@ export default function StudioWorkspace({
             orientation="vertical"
             label="调整 Execution Logs 高度"
             hidden={isHidden("workspace-main") || isHidden("logs")}
+            thickness={PANEL_VERTICAL_SEPARATOR_SIZE}
+            // 命中区向下盖住标题栏 22px；右侧 80px 留给最小化/最大化按钮，
+            // 避免拖拽手柄抢占按钮点击。
+            overlay={{ height: 32, rightInset: 80 }}
+            handleId="separator-logs"
           />
           <Panel
             id="logs"
