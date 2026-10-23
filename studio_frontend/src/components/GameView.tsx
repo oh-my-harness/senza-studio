@@ -13,12 +13,25 @@ import AgentRunView from "../player/AgentRunView";
 import type { AgentInfo, RunPhase } from "../player/types";
 import { useStudioStore } from "../store";
 
-export default function GameView({ projectId }: { projectId: string }) {
+interface GameViewProps {
+  projectId: string;
+  /** 由 Studio 的 Panel 控制器提供：true = 该 Panel 已最大化。 */
+  expanded?: boolean;
+  /** 最大化/恢复该 Panel；不传时退回组件自己的全屏 overlay（导出/测试）。 */
+  onToggleExpanded?: () => void;
+}
+
+export default function GameView({ projectId, expanded: expandedProp, onToggleExpanded }: GameViewProps) {
   const [info, setInfo] = useState<AgentInfo | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
   // 对话型 agent 的 Play 就是玩家在玩，不是一个供调试的窄预览。默认铺满
   // 整个 Studio；"返回编辑器"仍能回到 DAG/Inspector，布局随时可以切回去。
-  const [expanded, setExpanded] = useState(false);
+  // 在 Studio 里 expanded 由共享 Panel 控制器拥有；独立使用（测试/其他宿主）
+  // 时退回本地状态，保持原来的 fixed overlay 行为。
+  const [localExpanded, setLocalExpanded] = useState(false);
+  const expanded = expandedProp ?? localExpanded;
+  const toggleExpanded = onToggleExpanded ?? (() => setLocalExpanded((value) => !value));
+  const usesLocalOverlay = expanded && !onToggleExpanded;
 
   const ws = useStudioStore((s) => s.ws);
   const gameCards = useStudioStore((s) => s.gameCards);
@@ -45,19 +58,22 @@ export default function GameView({ projectId }: { projectId: string }) {
   // 只对 conversation 自动铺满：form/dashboard 在侧栏里仍能完整预览，
   // 而对话界面塞进 25% 侧栏时输入框和消息都不可用。
   useEffect(() => {
-    if (info?.layout === "conversation") setExpanded(true);
+    if (info?.layout === "conversation" && !expanded) toggleExpanded();
+    // toggleExpanded 在 Studio 里是稳定的 Panel 控制器回调；本地状态版本
+    // 也只在 expanded 变化时触发一次。
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [info]);
 
   useEffect(() => {
-    if (!expanded) return;
+    if (!usesLocalOverlay) return;
     // react-test-renderer 的 window 不是 DOM window，没有监听器 API。
     if (typeof window.addEventListener !== "function") return;
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") setExpanded(false);
+      if (e.key === "Escape") setLocalExpanded(false);
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [expanded]);
+  }, [usesLocalOverlay]);
 
   // 还没发 play 的时候就是 idle——这时 AgentRunView 显示的是开始表单，也就是
   // 最终用户打开导出产品看到的第一屏。入口输入从控制条搬到这里，就是为了让
@@ -83,9 +99,9 @@ export default function GameView({ projectId }: { projectId: string }) {
   return (
     <div
       className={
-        expanded
+        usesLocalOverlay
           ? "fixed inset-0 z-50 flex flex-col bg-white"
-          : "flex h-full flex-col"
+          : "flex h-full min-h-0 flex-col"
       }
     >
       {info.layout === "conversation" && (
@@ -105,7 +121,7 @@ export default function GameView({ projectId }: { projectId: string }) {
             )}
             <button
               type="button"
-              onClick={() => setExpanded((value) => !value)}
+              onClick={toggleExpanded}
               className="rounded border border-gray-300 px-2 py-0.5 text-xs text-gray-600 hover:bg-gray-100"
             >
               {expanded ? "返回编辑器" : "全屏玩家"}

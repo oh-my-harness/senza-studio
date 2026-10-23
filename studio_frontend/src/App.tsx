@@ -1,18 +1,11 @@
 // studio_frontend/src/App.tsx
 import { useEffect, useState } from "react";
-import { Group, Panel, Separator } from "react-resizable-panels";
 import { useStudioStore } from "./store";
 import { useProjectSocket } from "./hooks/useProjectSocket";
 import { api } from "./api";
-import ChatPanel from "./components/ChatPanel";
-import Canvas from "./components/Canvas";
-import ControlBar from "./components/ControlBar";
-import GameView from "./components/GameView";
-import Inspector from "./components/Inspector";
-import BottomPanel from "./components/BottomPanel";
 import SettingsModal from "./components/SettingsModal";
-import StatusBar from "./components/StatusBar";
 import AgentTeamWorkspace from "./components/AgentTeamWorkspace";
+import StudioWorkspace from "./panels/StudioWorkspace";
 import type { ProjectMeta } from "./types";
 import { splitToolCalls } from "./utils";
 
@@ -235,44 +228,10 @@ export default function App() {
   const playing = status === "playing";
 
   return (
-    <div className="h-full w-full flex flex-col">
-      <div className="flex items-center gap-3 px-4 py-2 border-b border-gray-200 bg-white">
-        <button
-          onClick={backToProjects}
-          disabled={playing}
-          title={playing ? "运行中无法切换项目" : "返回项目列表"}
-          className="text-sm text-gray-600 hover:text-gray-900 disabled:opacity-40 disabled:cursor-not-allowed"
-        >
-          ← 返回项目列表
-        </button>
-        {project && (
-          <span className="text-sm font-medium text-gray-700">{project.name}</span>
-        )}
-      </div>
-      <ControlBar projectId={projectId} />
-      <Group orientation="horizontal" className="flex-1 min-h-0">
-        <Panel id="chat" defaultSize={playing ? "20%" : "25%"} minSize="15%">
-          <ChatPanel projectId={projectId} />
-        </Panel>
-        <Separator className="w-1 bg-gray-200 hover:bg-blue-400 transition-colors cursor-col-resize" />
-        {playing && (
-          <>
-            <Panel id="game" defaultSize="25%" minSize="15%">
-              <GameView projectId={projectId} />
-            </Panel>
-            <Separator className="w-1 bg-gray-200 hover:bg-blue-400 transition-colors cursor-col-resize" />
-          </>
-        )}
-        <Panel id="canvas" defaultSize={playing ? "35%" : "50%"} minSize="20%">
-          <Canvas projectId={projectId} />
-        </Panel>
-        <Separator className="w-1 bg-gray-200 hover:bg-blue-400 transition-colors cursor-col-resize" />
-        <Panel id="inspector" defaultSize="20%" minSize="15%">
-          <Inspector projectId={projectId} />
-        </Panel>
-      </Group>
-      <BottomPanel />
-      <StatusBar />
-    </div>
+    <StudioWorkspace
+      projectId={projectId}
+      playing={playing}
+      onBack={backToProjects}
+    />
   );
 }
