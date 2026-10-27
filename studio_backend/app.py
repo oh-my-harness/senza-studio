@@ -324,7 +324,14 @@ def create_app(config: StudioConfig | None = None) -> FastAPI:
 
     @app.put("/api/settings")
     async def update_settings(req: UpdateSettingsReq):
-        saved = save_settings(cfg, req.values)
+        try:
+            saved = save_settings(cfg, req.values)
+        except Exception as exc:  # noqa: BLE001
+            # 损坏文件已隔离；明确告诉用户原始字节在哪、需要重新保存。
+            return JSONResponse(
+                status_code=500,
+                content={"detail": f"设置保存失败：{exc}"},
+            )
         apply_to_environ(saved)
         # 模型配置变了要重建已经建好的 harness：provider 和 model 是
         # HarnessBuilder build 时定死的，只改 cfg 不重建的话，当前打开的

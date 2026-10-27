@@ -150,11 +150,21 @@ def save_settings(config: StudioConfig, values: dict[str, str]) -> dict[str, str
             if not isinstance(raw, dict):
                 raise ValueError("settings.json is not an object")
         except (OSError, UnicodeDecodeError, json.JSONDecodeError, ValueError) as exc:
-            if quarantine_file(path, reason=f"invalid settings: {exc}") is None:
+            quarantined = quarantine_file(
+                path, reason=f"invalid settings: {exc}"
+            )
+            if quarantined is None:
                 if path.exists():
                     raise OSError(
                         f"settings.json is invalid and could not be quarantined: {path}"
                     ) from exc
+            else:
+                # 不要让“保存一两个字段”顺手把原有密钥变成静默丢失。
+                # 原始字节已隔离；让调用方看到失败，用户确认后重试即可。
+                raise OSError(
+                    "settings.json 已损坏，原始文件已隔离到 "
+                    f"{quarantined}；请重新确认并保存设置"
+                ) from exc
 
     atomic_write_text(
         path,

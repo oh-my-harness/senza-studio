@@ -135,6 +135,53 @@ def test_ensure_session_quarantines_corrupt_meta_without_touching_entries(tmp_pa
     assert (sdir / "entries.jsonl").read_text(encoding="utf-8") == "history"
 
 
+def test_ensure_session_preserves_valid_runtime_meta(tmp_path):
+    """runtime 写的合法 meta（纳秒时间 + 未知字段）不能被隔离/重写。"""
+    sessions = tmp_path / "sessions"
+    sid = "sess-valid"
+    sdir = sessions / sid
+    sdir.mkdir(parents=True)
+    runtime_meta = {
+        "id": sid,
+        "name": "chat",
+        "created_at": "2026-10-27T00:00:00.123456Z",
+        "updated_at": "2026-10-27T00:00:01.987654Z",
+        "model": "deepseek-chat",
+        "active_cursor": "0192f0aa-0000-7000-8000-000000000001",
+        "parent_session_path": None,
+        "durability": "durable",
+        "lifecycle": "active",
+        "recall_policy": "disabled",
+        "recall_revision": 7,
+    }
+    (sdir / "meta.json").write_text(json.dumps(runtime_meta), encoding="utf-8")
+
+    ensure_session(sessions, sid)
+
+    assert json.loads((sdir / "meta.json").read_text(encoding="utf-8")) == runtime_meta
+    assert not list(sdir.glob("meta.json.corrupt-*"))
+
+
+def test_repaired_session_meta_reconnects_last_entry_cursor(tmp_path):
+    sessions = tmp_path / "sessions"
+    sid = "sess-cursor"
+    sdir = sessions / sid
+    sdir.mkdir(parents=True)
+    (sdir / "meta.json").write_text("", encoding="utf-8")
+    (sdir / "entries.jsonl").write_text(
+        json.dumps({"id": "entry-1", "parent_id": None}) + "\n"
+        + json.dumps({"id": "entry-2", "parent_id": "entry-1"}) + "\n"
+        + '{"id": "truncated"',
+        encoding="utf-8",
+    )
+
+    ensure_session(sessions, sid)
+
+    meta = json.loads((sdir / "meta.json").read_text(encoding="utf-8"))
+    assert meta["active_cursor"] == "entry-2"
+    assert (sdir / "entries.jsonl").read_text(encoding="utf-8").endswith('{"id": "truncated"')
+
+
 def test_session_id_cannot_escape_sessions_dir(tmp_path):
     sessions = tmp_path / "sessions"
     with pytest.raises(ValueError):
@@ -176,13 +223,28 @@ def test_corrupt_settings_are_quarantined_before_next_save(cfg):
     original = b"not-json-original-bytes"
     path.write_bytes(original)
 
-    save_settings(cfg, {"SENZA_STUDIO_MODEL": "second"})
+    with pytest.raises(OSError, match="已损坏"):
+        save_settings(cfg, {"SENZA_STUDIO_MODEL": "second"})
 
     quarantined = list(path.parent.glob("settings.json.corrupt-*"))
     assert len(quarantined) == 1
     assert quarantined[0].read_bytes() == original
+    assert not path.exists()
+    save_settings(cfg, {"SENZA_STUDIO_MODEL": "second"})
     assert load_settings(cfg) == {"SENZA_STUDIO_MODEL": "second"}
     assert path.stat().st_mode & 0o777 == 0o600
+
+
+def test_corrupt_project_is_hidden_from_list_and_reports_422(api_client, cfg):
+    pid = api_client.post("/api/projects", json={"name": "p"}).json()["id"]
+    state = _get_or_load_project(cfg, pid)
+    (state["project"].path / ".studio" / "meta.json").write_text("", encoding="utf-8")
+    _reset_state()
+
+    assert api_client.get("/api/projects").json() == []
+    r = api_client.get(f"/api/projects/{pid}")
+    assert r.status_code == 422
+    assert "损坏" in r.json()["detail"]
 
 
 def test_update_spec_save_failure_keeps_memory_and_disk(api_client, cfg, monkeypatch):
