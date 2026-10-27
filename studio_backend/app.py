@@ -6,6 +6,7 @@ import json
 import os
 import stat
 import sys
+import time
 from contextlib import asynccontextmanager
 from pathlib import Path
 from mimetypes import guess_type
@@ -52,7 +53,12 @@ from .auth import (
     token_matches,
     websocket_is_authenticated,
 )
-from .ws import finalize_play, run_play_streaming, run_prompt_streaming
+from .ws import (
+    finalize_play,
+    run_play_streaming,
+    run_prompt_streaming,
+    stop_active_prompt,
+)
 
 
 class CreateProjectReq(BaseModel):
@@ -479,8 +485,14 @@ def create_app(config: StudioConfig | None = None) -> FastAPI:
         """
         state = _get_or_load_project(cfg, project_id)
         try:
-            target, with_webui, missing_wheels = export_project(
-                state["project"], state["spec"], name=req.name, webui_dist=WEBUI_DIST
+            # export 内部会 copytree + 同步调用 pip wheel（单包最长 180s）。
+            # 留在事件循环里会冻结所有 WS/REST；放到工作线程，循环继续服务。
+            target, with_webui, missing_wheels = await asyncio.to_thread(
+                export_project,
+                state["project"],
+                state["spec"],
+                name=req.name,
+                webui_dist=WEBUI_DIST,
             )
         except ExportError as exc:
             return JSONResponse(status_code=400, content={"detail": str(exc)})
@@ -663,6 +675,9 @@ def create_app(config: StudioConfig | None = None) -> FastAPI:
             return
         agent = state["agent"]
         project = state["project"]
+        # 每条 WS 连接一个稳定标识：prompt 抢占/abort 只允许发起它的连接操作，
+        # 另一个 tab 不能误杀正在运行的 run。
+        connection_id = f"ws-{id(websocket)}"
 
         # 如果 agent 还没启动 session，启动一个。session 持久化不可用时
         # 必须让用户看到原因，不能带着内存会话继续跑。
@@ -682,7 +697,17 @@ def create_app(config: StudioConfig | None = None) -> FastAPI:
                 await websocket.close(code=1011)
                 return
 
-        streaming_task: asyncio.Task | None = None
+        # 登记当前活跃 socket——prompt 终态推送（跨 run）以此为投递目标。
+        # 旧连接被新连接替换时自动覆盖；断开时清空由 finally 完成。
+        state["ws_socket"] = websocket
+        # 重连对账：把当前/最近一次 prompt run 的状态推给新连接。
+        run = state.get("prompt_run")
+        if run is not None:
+            try:
+                await websocket.send_json({"type": "prompt_state", "run": dict(run)})
+            except Exception:
+                pass
+
         play_task: asyncio.Task | None = None
 
         try:
@@ -732,10 +757,10 @@ def create_app(config: StudioConfig | None = None) -> FastAPI:
                             await play_task
                         except asyncio.CancelledError:
                             pass
-                    else:
-                        # 运行已经自然结束（succeeded/failed），run_play_streaming
-                        # 早就退出了，得在这里自己收尾回 editing。
-                        await finalize_play(websocket, project)
+                    # 无论 play_task 是刚被 Stop、已经自然结束，还是刚好在线程
+                    # 死亡与事件流退出之间的窗口，都把项目收尾回 editing。
+                    # finalize_play 自身幂等，重复调用无害。
+                    await finalize_play(websocket, project)
 
                 elif msg_type == "submit_decision":
                     # checker step 在等人工审批——run_play_streaming 的事件
@@ -769,28 +794,83 @@ def create_app(config: StudioConfig | None = None) -> FastAPI:
                         play_session.step()
 
                 elif msg_type == "prompt":
-                    # 如果上一个 prompt 还在跑，先中止
-                    if streaming_task is not None and not streaming_task.done():
-                        agent.abort()
-                        streaming_task.cancel()
-                        try:
-                            await streaming_task
-                        except asyncio.CancelledError:
-                            pass
+                    # 同项目必须串行：同连接可 abort + 有界等待旧 run；跨连接
+                    # 直接拒绝，避免两个 tab 共用同一个 harness/线程。
+                    stop_error = await stop_active_prompt(state, agent, connection_id)
+                    if stop_error is not None:
+                        await websocket.send_json(
+                            {
+                                "type": "error",
+                                "message": stop_error,
+                                "source": "prompt",
+                            }
+                        )
+                        continue
 
                     text = msg.get("text", "")
-                    # 将 streaming 作为后台 task 运行，不阻塞 WS 主循环
-                    streaming_task = asyncio.create_task(
+                    # 客户端生成的 run id——终态行的关联/去重键。缺失时退化
+                    # 为后端生成（旧客户端兼容），不阻塞本次执行。
+                    run_id = msg.get("run_id")
+                    if not isinstance(run_id, str) or not run_id:
+                        run_id = f"srv-{int(time.time() * 1000)}"
+                    state["prompt_run"] = {
+                        "run_id": run_id,
+                        "prompt": text,
+                        "status": "running",
+                        "error": None,
+                        "started_at": time.time(),
+                        "ended_at": None,
+                        # 连接归属：别的 tab 不能 abort/抢占本 run。
+                        "owner": connection_id,
+                    }
+                    # run 所有权放在项目 state，而不是 handler 局部变量：
+                    # 连接断开后任务继续执行，重连/另一个连接可据此对账。
+                    prompt_task = asyncio.create_task(
                         run_prompt_streaming(
-                            websocket, agent, project, text, state
+                            websocket, agent, project, text, state, run_id
                         )
                     )
+                    state["prompt_task"] = prompt_task
+
+                    def _clear_prompt_task(task: asyncio.Task) -> None:
+                        if state.get("prompt_task") is task:
+                            state.pop("prompt_task", None)
+
+                    prompt_task.add_done_callback(_clear_prompt_task)
 
                 elif msg_type == "abort":
-                    agent.abort()
+                    run = state.get("prompt_run")
+                    if (
+                        isinstance(run, dict)
+                        and run.get("status") == "running"
+                        and run.get("owner") not in (None, connection_id)
+                    ):
+                        await websocket.send_json(
+                            {
+                                "type": "error",
+                                "message": "另一个连接正在运行 prompt；不能从当前连接中止。",
+                                "source": "prompt",
+                            }
+                        )
+                    else:
+                        agent.abort()
 
                 elif msg_type == "switch_session":
                     sid = msg.get("session_id")
+                    run = state.get("prompt_run")
+                    thread = state.get("prompt_thread")
+                    if (
+                        isinstance(run, dict)
+                        and run.get("status") == "running"
+                    ) or (thread is not None and thread.is_alive()):
+                        await websocket.send_json(
+                            {
+                                "type": "error",
+                                "message": "prompt 运行期间不能切换 session；请先等待结束或停止。",
+                                "source": "prompt",
+                            }
+                        )
+                        continue
                     if sid:
                         try:
                             agent.start_session(sid)
@@ -813,12 +893,13 @@ def create_app(config: StudioConfig | None = None) -> FastAPI:
         except WebSocketDisconnect:
             pass
         finally:
-            if streaming_task is not None and not streaming_task.done():
-                streaming_task.cancel()
-                try:
-                    await streaming_task
-                except asyncio.CancelledError:
-                    pass
+            # 只释放本 handler 登记的 socket。A 断开后若 B 已重连并
+            # 覆盖了该槽位，A 的延迟 cleanup 不得清掉 B。prompt 收尾
+            # 仍会在发送时重新读取该槽位，所以之后接管的 B 仍能收到终态。
+            if state.get("ws_socket") is websocket:
+                state["ws_socket"] = None
+            # prompt 任务的所有权在 state 上：断线只清 socket 槽，绝不 cancel
+            # 正在执行的 run。终态收尾由独立的 finalizer 继续完成。
             if play_task is not None and not play_task.done():
                 play_session = state.get("play_session")
                 if play_session is not None:
@@ -828,10 +909,9 @@ def create_app(config: StudioConfig | None = None) -> FastAPI:
                     await play_task
                 except asyncio.CancelledError:
                     pass
-            elif project.meta.get("status") == "playing":
-                # 运行已自然结束但用户没点 Stop 就断开了连接——项目状态
-                # 不该永远卡在 playing（下次打开这个项目会显示"运行中"）。
-                await finalize_play(websocket, project)
+            # 断线也走统一收尾：自然结束窗口、取消路径、Stop 后残留都不能
+            # 让 meta 永久停在 playing。
+            await finalize_play(websocket, project)
 
     if static_root is not None:
         @app.get("/{full_path:path}")

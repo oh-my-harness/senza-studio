@@ -31,6 +31,24 @@ _SKIP_TYPES = frozenset({"timeout"})
 POLL_INTERVAL_MS = 250
 MAX_SILENT_POLLS = 20_000
 
+# 收尾时等待 Play 工作线程退出的上限。必须异步等待：join() 在事件循环
+# 线程上会冻结整个服务（所有连接/REST/心跳），即使线程只再跑几秒。
+PLAY_STOP_GRACE_S = 10.0
+
+
+async def _wait_thread_exit(thread, timeout_s: float) -> bool:
+    """异步等待 threading.Thread 退出，不阻塞事件循环。"""
+    if thread is None:
+        return True
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + timeout_s
+    while thread.is_alive():
+        remaining = deadline - loop.time()
+        if remaining <= 0:
+            return False
+        await asyncio.sleep(min(0.05, remaining))
+    return True
+
 
 async def run_play_streaming(
     websocket: WebSocket,
@@ -131,8 +149,16 @@ async def run_play_streaming(
         except Exception:
             pass
     finally:
-        if play_session._thread is not None:
-            play_session._thread.join(timeout=10)
+        thread = play_session._thread
+        if thread is not None and not await _wait_thread_exit(thread, PLAY_STOP_GRACE_S):
+            # 线程仍卡在不可中断的 Python 工具回调里（spawn_blocking 无法被
+            # engine.cancel 打断）。不能谎称已完全停止；记录并继续收尾，
+            # 由调用方决定 Stop 的可见结果。事件循环至少不会被冻结。
+            print(
+                f"Play thread still alive after {PLAY_STOP_GRACE_S:.0f}s; "
+                "finalizing stream without blocking the event loop",
+                file=sys.stderr,
+            )
         state = play_session.state()
         # engine.run() 在 workflow 失败时 raise——PlaySession 把它捕获存到
         # run_error 而不是让线程崩溃。这里确保前端总能拿到清晰的错误信息，
