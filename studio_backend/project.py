@@ -1,6 +1,7 @@
 """项目管理：创建/打开/列出项目，meta.json 维护。"""
 from __future__ import annotations
 
+import copy
 import json
 import secrets
 import shutil
@@ -279,29 +280,65 @@ class Project:
         if not text.strip():
             raise ProjectDataError("pipeline.yaml 为空；拒绝当作空 spec 打开")
         try:
-            spec = Spec.from_yaml(text)
-        except (yaml.YAMLError, SpecError, TypeError) as exc:
+            raw = yaml.safe_load(text)
+        except yaml.YAMLError as exc:
             raise ProjectDataError(f"pipeline.yaml 解析失败：{exc}") from exc
-        data = spec.get_current_spec()
-        stages = data.get("stages")
-        if not isinstance(stages, list) or any(not isinstance(s, dict) for s in stages):
-            raise ProjectDataError("pipeline.yaml 的 stages 结构无效")
-        return spec
+        # 必须在 Spec.from_yaml()/Spec() 默认化之前看原始结构。Spec 会把
+        # 缺失的 stages 补成 []，那份宽容只适合作者显式写出 `stages: []`
+        # 的项目；`null`、只有注释、顶层不是 mapping、缺字段或 stages 畸形
+        # 都意味着文件损坏，不能静默当成空项目再被下一次保存覆盖。
+        if raw is None:
+            raise ProjectDataError("pipeline.yaml 是 null/只有注释；拒绝当作空 spec 打开")
+        if not isinstance(raw, dict):
+            raise ProjectDataError("pipeline.yaml 顶层必须是 mapping")
+        if "stages" not in raw:
+            raise ProjectDataError("pipeline.yaml 缺少 stages 字段")
+        stages = raw.get("stages")
+        if not isinstance(stages, list):
+            raise ProjectDataError("pipeline.yaml 的 stages 必须是 list")
+        if any(not isinstance(stage, dict) for stage in stages):
+            raise ProjectDataError("pipeline.yaml 的每个 stage 必须是 mapping")
+        try:
+            return Spec(raw)
+        except (SpecError, TypeError, ValueError) as exc:
+            raise ProjectDataError(f"pipeline.yaml 解析失败：{exc}") from exc
 
     # ── Session 管理 ──────────────────────────────────────
 
+    def new_session_id(self) -> str:
+        """只生成 id，不写 meta/目录。调用方准备成功后再 commit_session()。"""
+        return _gen_id("sess")
+
+    def commit_session(self, session_id: str, *, add: bool) -> None:
+        """原子提交 sessions/active_session，并把 meta 写盘。
+
+        先在内存副本上改，写盘成功后才替换 self.meta；写失败则恢复旧
+        meta。这样调用方可以在“目录/harness 已准备好”之后才调用它，
+        失败时旧 session 和旧 meta 仍然一致。
+        """
+        old_meta = copy.deepcopy(self.meta)
+        try:
+            sessions = self.meta.setdefault("sessions", [])
+            if add and session_id not in sessions:
+                sessions.append(session_id)
+            if session_id not in sessions:
+                raise ValueError(f"session {session_id} not found")
+            self.meta["active_session"] = session_id
+            self._save_meta()
+        except BaseException:
+            # 保留 meta 对象身份：调用方/测试可能持有 project.meta 引用，
+            # 回滚时不能只替换属性。
+            self.meta.clear()
+            self.meta.update(old_meta)
+            raise
+
     def create_session(self) -> str:
-        sid = _gen_id("sess")
-        self.meta.setdefault("sessions", []).append(sid)
-        self.meta["active_session"] = sid
-        self._save_meta()
+        sid = self.new_session_id()
+        self.commit_session(sid, add=True)
         return sid
 
     def set_active_session(self, session_id: str) -> None:
-        if session_id not in self.meta.get("sessions", []):
-            raise ValueError(f"session {session_id} not found")
-        self.meta["active_session"] = session_id
-        self._save_meta()
+        self.commit_session(session_id, add=False)
 
     @property
     def sessions_dir(self) -> Path:

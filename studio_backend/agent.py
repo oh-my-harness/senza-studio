@@ -56,23 +56,33 @@ class StudioAgent:
         self._system_prompt_text: str = ""
 
     def start_session(self, session_id: str | None = None) -> str:
-        """Build harness 并绑定 session。"""
-        if session_id is None:
-            session_id = self._project.create_session()
-        elif session_id not in self._project.meta.get("sessions", []):
-            # 先把非法/越界的 sid 挡在 meta 之外；ensure_session 在 build 时
-            # 还会再校验一次。
-            session_dir_path(self._project.sessions_dir, session_id)
-            self._project.meta.setdefault("sessions", []).append(session_id)
-            self._project._save_meta()
+        """准备目标 session/harness，成功后才提交活动 session。
 
-        self._project.set_active_session(session_id)
+        旧实现先写 meta.active_session 再 build；build/恢复失败时内存里
+        的 _session_id 已指向新 session，而 _harness 还是旧对象，下一次
+        prompt 会写进错误的 session。这里改为 build 使用局部候选，全部
+        成功后才一次性提交 meta + 内存状态。
+        """
+        add = session_id is None
+        if session_id is None:
+            session_id = self._project.new_session_id()
+        else:
+            # 先把非法/越界的 sid 挡在 meta 之外；ensure_session 在 build
+            # 时还会再校验一次。
+            session_dir_path(self._project.sessions_dir, session_id)
+            add = session_id not in self._project.meta.get("sessions", [])
+
+        harness, prompt_text = self._build_harness_for(session_id)
+        # 提交点：meta 写盘成功才替换活动状态。失败时 _harness/_session_id
+        # 和 project.meta 都保持旧值（commit_session 会恢复 meta）。
+        self._project.commit_session(session_id, add=add)
+        self._harness = harness
+        self._system_prompt_text = prompt_text
         self._session_id = session_id
-        self._build_harness()
         return session_id
 
-    def _build_harness(self) -> None:
-        """Build harness with current spec/prompt/tools/session."""
+    def _build_harness_for(self, session_id: str) -> tuple[Any, str]:
+        """构建候选 harness，不修改 self/project 的任何活动状态。"""
         import senza
 
         # ── Provider ────────────────────────────────────────
@@ -87,13 +97,13 @@ class StudioAgent:
         env = senza.create_os_env(working_dir)
 
         # ── System prompt (dynamic) ─────────────────────────
-        self._system_prompt_text = build_system_prompt(self._spec, self._project)
+        prompt_text = build_system_prompt(self._spec, self._project)
 
         # ── Build harness ───────────────────────────────────
         builder = (
             senza.HarnessBuilder(self._config.model)
             .provider("*", provider)
-            .system_prompt(self._system_prompt_text)
+            .system_prompt(prompt_text)
             .env(env)
             # File tools (read/write for write_document etc.)
             .plugin(senza.create_fs_tools_plugin())
@@ -115,20 +125,19 @@ class StudioAgent:
         # 持久化失败不能静默降级成内存会话：那会让 UI 显示 sid 已创建、
         # /messages 却永远为空，重启后历史全丢。让异常带上上下文冒到调用方，
         # 由 WS/REST 层给用户明确错误。
-        if self._session_id:
-            try:
-                ensure_session(self._project.sessions_dir, self._session_id)
-                repo = senza.knowledge.jsonl_session_repo(
-                    str(self._project.sessions_dir)
-                )
-                builder = builder.session_repo(repo, self._session_id)
-            except Exception as exc:
-                raise RuntimeError(
-                    f"session persistence unavailable for {self._session_id}: {exc}"
-                ) from exc
+        try:
+            ensure_session(self._project.sessions_dir, session_id)
+            repo = senza.knowledge.jsonl_session_repo(
+                str(self._project.sessions_dir)
+            )
+            builder = builder.session_repo(repo, session_id)
+        except Exception as exc:
+            raise RuntimeError(
+                f"session persistence unavailable for {session_id}: {exc}"
+            ) from exc
 
         # ── Build ───────────────────────────────────────────
-        self._harness = builder.build()
+        return builder.build(), prompt_text
 
     def prompt(self, text: str, timeout_ms: int = 30000) -> list[dict]:
         """Send prompt and collect events until settled.
@@ -161,4 +170,6 @@ class StudioAgent:
         """Rebuild harness with current spec/prompt. Preserves session_id."""
         if self._session_id is None:
             raise RuntimeError("No session. Call start_session() first.")
-        self._build_harness()
+        harness, prompt_text = self._build_harness_for(self._session_id)
+        self._harness = harness
+        self._system_prompt_text = prompt_text

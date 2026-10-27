@@ -88,6 +88,44 @@ def atomic_write_text(
         raise
 
 
+def atomic_write_bytes(
+    path: Path,
+    data: bytes,
+    *,
+    mode: int | None = None,
+) -> None:
+    """原子替换二进制文件（上传原文等）。语义与 atomic_write_text 一致。"""
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    target_mode = mode
+    if target_mode is None:
+        try:
+            target_mode = stat.S_IMODE(path.stat().st_mode)
+        except OSError:
+            target_mode = 0o600
+    fd, tmp_name = tempfile.mkstemp(
+        prefix=f".{path.name}.", suffix=".tmp", dir=str(path.parent)
+    )
+    tmp = Path(tmp_name)
+    try:
+        with os.fdopen(fd, "wb") as handle:
+            if hasattr(os, "fchmod"):
+                os.fchmod(handle.fileno(), target_mode)
+            handle.write(data)
+            handle.flush()
+            os.fsync(handle.fileno())
+        if not hasattr(os, "fchmod"):
+            os.chmod(tmp, target_mode)
+        _replace_with_retry(tmp, path)
+        _fsync_directory(path.parent)
+    except BaseException:
+        try:
+            tmp.unlink()
+        except OSError:
+            pass
+        raise
+
+
 def quarantine_file(path: Path, *, reason: str) -> Path | None:
     """把损坏文件改名保留原始字节，绝不静默覆盖。
 
