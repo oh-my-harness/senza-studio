@@ -39,6 +39,61 @@ WS_SEND_TIMEOUT_S = 10.0
 _WAIT_INTERVAL_S = 0.05
 
 
+def project_lock(state: dict) -> asyncio.Lock:
+    """每个项目一把 async 锁，串行化 meta/spec 等整文件提交。"""
+    lock = state.get("project_lock")
+    if lock is None:
+        lock = asyncio.Lock()
+        state["project_lock"] = lock
+    return lock
+
+
+def prompt_is_active(state: dict) -> bool:
+    run = state.get("prompt_run")
+    task = state.get("prompt_task")
+    finalizer = state.get("prompt_finalizer")
+    thread = state.get("prompt_thread")
+    return (
+        (isinstance(run, dict) and run.get("status") == "running")
+        or (task is not None and not task.done())
+        or (finalizer is not None and not finalizer.done())
+        or (thread is not None and thread.is_alive())
+    )
+
+
+def play_is_active(state: dict) -> bool:
+    task = state.get("play_task")
+    if task is not None and not task.done():
+        return True
+    play_session = state.get("play_session")
+    if play_session is None:
+        return False
+    try:
+        return play_session.state() in ("running", "paused")
+    except Exception:
+        return False
+
+
+def harness_is_busy(state: dict) -> bool:
+    """Prompt/Play 正在使用共享 harness 时，任何入口都不得替换它。"""
+    return prompt_is_active(state) or play_is_active(state)
+
+
+def owner_is_live(state: dict, owner: str | None) -> bool:
+    """owner 连接是否仍在线。
+
+    没有登记表的老测试/旧 state 视为在线（保守拒绝跨连接抢占）；真实 WS
+    handler 会维护 ws_connections，断线后 owner 不在集合里，重连才能接管
+    一个已失去所有者的 run。
+    """
+    if owner is None:
+        return False
+    connections = state.get("ws_connections")
+    if connections is None:
+        return True
+    return owner in connections
+
+
 async def _send_live(state: dict, obj: dict) -> None:
     """向 state 里当前活跃的 socket 投递一条消息（尽力而为）。
 
@@ -56,23 +111,28 @@ async def _send_live(state: dict, obj: dict) -> None:
         pass
 
 
-async def _wait_event(event, timeout_s: float | None) -> bool:
-    """异步等待 threading.Event / asyncio.Event，永不阻塞事件循环。
+async def _wait_run_settled(
+    done: threading.Event,
+    events_finished: asyncio.Event,
+    deadline: float,
+    terminal_seen: dict | None = None,
+) -> bool:
+    """等线程退出且事件转发结束；deadline 是绝对 loop 时间。
 
-    timeout_s=None 表示一直等。调用方负责在超时后决定 abort/失败语义。
+    预算从 run 启动时开始，而不是从 events_finished 之后开始——否则事件
+    迭代器一直吐非终态（或永远不结束）时，超时永远不会触发。
     """
-    if timeout_s is None:
-        while not event.is_set():
-            await asyncio.sleep(_WAIT_INTERVAL_S)
-        return True
     loop = asyncio.get_running_loop()
-    deadline = loop.time() + timeout_s
-    while not event.is_set():
+    while True:
+        if done.is_set() and (
+            events_finished.is_set()
+            or (terminal_seen is not None and terminal_seen.get("seen"))
+        ):
+            return True
         remaining = deadline - loop.time()
         if remaining <= 0:
             return False
         await asyncio.sleep(min(_WAIT_INTERVAL_S, remaining))
-    return True
 
 
 def _prompt_record(state: dict, run_id: str) -> dict | None:
@@ -96,6 +156,10 @@ async def _finalize_prompt_run(
     terminal_seen: dict,
     thread_timeout_s: float,
     stop_grace_s: float,
+    driver_task: asyncio.Task | None,
+    started_at: float,
+    stop_forwarding: threading.Event,
+    cancel_driver_on_timeout: bool,
 ) -> None:
     """独立的终态收尾任务。
 
@@ -104,22 +168,73 @@ async def _finalize_prompt_run(
     不在事件循环线程上做 Event.wait / Thread.join。
     """
     try:
-        # 先等事件转发任务把已收到的事件处理完，避免它还没看到 terminal
-        # 事件时这里就用 terminal_seen=false 判失败。
-        await events_finished.wait()
+        loop = asyncio.get_running_loop()
+        deadline = started_at + thread_timeout_s
+        finished = False
+        timed_out = False
 
-        finished = await _wait_event(done, thread_timeout_s)
+        # 线程一旦退出，就不该继续等完整 30 分钟预算——终态事件可能只是
+        # 还排在慢发送/5s events() 超时后面。给一个短的有界 drain 窗口；
+        # 仍无终态就按“线程结束但没有 terminal”失败，而不是拖到预算耗尽。
+        while not done.is_set():
+            remaining = deadline - loop.time()
+            if remaining <= 0:
+                break
+            await asyncio.sleep(min(_WAIT_INTERVAL_S, remaining))
+        if done.is_set():
+            # 线程已结束，drain 窗口是额外预算，不能再被已过期的执行
+            # deadline 截断。
+            drain_deadline = loop.time() + min(stop_grace_s, 2.0)
+            finished = await _wait_run_settled(
+                done, events_finished, drain_deadline, terminal_seen
+            )
+
         if not finished:
-            try:
-                agent.abort()
-            except Exception:
-                pass
-            finished = await _wait_event(done, stop_grace_s)
+            if done.is_set():
+                # 线程已退出且 drain 完仍无终态：停止转发，避免随后又补发
+                # 一个与已写 prompt_run 矛盾的 terminal。
+                stop_forwarding.set()
+                if (
+                    cancel_driver_on_timeout
+                    and driver_task is not None
+                    and not driver_task.done()
+                ):
+                    driver_task.cancel()
+            else:
+                timed_out = True
+                # 先让转发循环在下一轮退出；直接取消“被调用方 await 的同一个
+                # 协程”会让调用方收到 CancelledError，与终态任务解耦的语义
+                # 相冲突。app 的 driver 是独立 task，额外允许取消以尽快释放
+                # executor 里的 next()。
+                stop_forwarding.set()
+                try:
+                    agent.abort()
+                except Exception:
+                    pass
+                if (
+                    cancel_driver_on_timeout
+                    and driver_task is not None
+                    and not driver_task.done()
+                ):
+                    driver_task.cancel()
+                grace_deadline = loop.time() + stop_grace_s
+                await _wait_run_settled(done, events_finished, grace_deadline)
 
         thread_alive = prompt_thread.is_alive()
         outcome: str
         err_msg: str | None = None
-        if errors:
+        if timed_out:
+            # 超时后即使线程在 grace 内退出/abort 抛错，也不把本轮包装成
+            # completed 或普通 prompt error：用户看到的必须是“预算耗尽”。
+            outcome = "failed"
+            if thread_alive:
+                err_msg = (
+                    f"prompt timed out after {thread_timeout_s:.0f}s; "
+                    "thread still running after abort"
+                )
+            else:
+                err_msg = f"prompt timed out after {thread_timeout_s:.0f}s"
+        elif errors:
             outcome = "failed"
             err_msg = f"prompt error: {errors[0]}"
         elif res.get("aborted"):
@@ -163,7 +278,11 @@ async def _finalize_prompt_run(
         save_error: str | None = None
         if spec is not None:
             try:
-                project.save_spec(spec)
+                # D1 的 save_spec 含文件/目录 fsync；留在事件循环上会冻结
+                # 所有 WS/REST。项目锁保证 update_spec / session 提交 /
+                # Play meta 不会与本提交交叉。新 prompt 仍会等待 finalizer。
+                async with project_lock(state):
+                    await asyncio.to_thread(project.save_spec, spec)
             except Exception as exc:  # noqa: BLE001
                 saved = False
                 save_error = f"spec save failed: {exc}"
@@ -200,6 +319,22 @@ async def _finalize_prompt_run(
 
         if state.get("prompt_thread") is prompt_thread and not thread_alive:
             state.pop("prompt_thread", None)
+
+        # Settings/upload 在运行中不替换 harness，只记 pending；run 真正
+        # 结束后在这里应用最新状态。若旧线程还活着（超时卡死），绝不换
+        # harness，pending 留到下一次安全的启动点。
+        if (
+            state.get("harness_rebuild_pending")
+            and not thread_alive
+            and not play_is_active(state)
+            and hasattr(agent, "rebuild")
+        ):
+            try:
+                async with project_lock(state):
+                    await asyncio.to_thread(agent.rebuild)
+                state.pop("harness_rebuild_pending", None)
+            except Exception as exc:  # noqa: BLE001
+                print(f"pending harness rebuild failed: {exc}", file=sys.stderr)
     except asyncio.CancelledError:
         # finalizer 自身不应被取消；真被取消时保留记录，交给进程退出/人工处理。
         print("prompt finalizer cancelled", file=sys.stderr)
@@ -229,16 +364,13 @@ async def stop_active_prompt(
     run = state.get("prompt_run")
     task = state.get("prompt_task")
     finalizer = state.get("prompt_finalizer")
-    thread = state.get("prompt_thread")
 
-    active = (
-        (isinstance(run, dict) and run.get("status") == "running")
-        or (task is not None and not task.done())
-        or (finalizer is not None and not finalizer.done())
-    )
-    if active:
+    if prompt_is_active(state):
         owner = run.get("owner") if isinstance(run, dict) else None
-        if owner not in (None, connection_id):
+        # 仍在线的另一个 tab 不能被抢占；原连接已经断开（owner 不在
+        # ws_connections）时，重连连接可以 abort 这个孤儿 run，然后等待
+        # 它安全结束再启动新一轮。
+        if owner not in (None, connection_id) and owner_is_live(state, owner):
             return "此项目已有另一个连接在运行 prompt；请等待其结束，或在原连接中停止。"
         try:
             agent.abort()
@@ -269,7 +401,8 @@ async def run_prompt_streaming(
     run_id: str,
     *,
     thread_timeout_s: float | None = None,
-    stop_grace_s: float = PROMPT_STOP_GRACE_S,
+    stop_grace_s: float | None = None,
+    cancel_driver_on_timeout: bool = False,
 ) -> None:
     """在后台线程运行 prompt，将事件推送到 WebSocket。
 
@@ -279,6 +412,11 @@ async def run_prompt_streaming(
     """
     if thread_timeout_s is None:
         thread_timeout_s = PROMPT_THREAD_TIMEOUT_S
+    if stop_grace_s is None:
+        stop_grace_s = PROMPT_STOP_GRACE_S
+    loop = asyncio.get_running_loop()
+    # 预算从本函数进入时开始，而不是等 events()/线程就绪之后。
+    started_at = loop.time()
 
     harness = agent._harness
     if harness is None:
@@ -372,9 +510,9 @@ async def run_prompt_streaming(
         await _send_live(state, {"type": "error", "message": message})
         return
 
-    loop = asyncio.get_running_loop()
     terminal_seen = {"seen": False}
     events_finished = asyncio.Event()
+    stop_forwarding = threading.Event()
 
     finalizer = asyncio.create_task(
         _finalize_prompt_run(
@@ -390,6 +528,10 @@ async def run_prompt_streaming(
             terminal_seen=terminal_seen,
             thread_timeout_s=thread_timeout_s,
             stop_grace_s=stop_grace_s,
+            driver_task=asyncio.current_task(),
+            started_at=started_at,
+            stop_forwarding=stop_forwarding,
+            cancel_driver_on_timeout=cancel_driver_on_timeout,
         )
     )
     # 强引用：即使事件转发任务被取消，GC 也不能回收终态收尾任务。
@@ -403,6 +545,8 @@ async def run_prompt_streaming(
 
     try:
         while True:
+            if stop_forwarding.is_set():
+                break
             # 在 executor 中调用 next(event_iter)，不阻塞事件循环
             # 这样 WS 主循环可以处理 abort 消息
             try:
@@ -411,6 +555,11 @@ async def run_prompt_streaming(
                 break
             except Exception as exc:
                 print(f"Event iter error: {exc}", file=sys.stderr)
+                break
+
+            # next() 可能在 finalizer 结束 drain 之后才返回；此时不能再
+            # 转发尾随事件，否则会和已写的 no-terminal 终态矛盾。
+            if stop_forwarding.is_set():
                 break
 
             if event is None:
@@ -426,14 +575,23 @@ async def run_prompt_streaming(
                 except Exception:
                     event = {"type": "raw", "data": str(event)}
 
-            # 过滤 SDK 内部事件（timeout 等）
-            if event.get("type") in _SKIP_TYPES:
+            event_type = event.get("type")
+            # SDK 的 timeout 哨兵不是“事件流结束”本身。线程还活着时继续
+            # 等下一批；线程已经退出但没 terminal，则停止转发，让 finalizer
+            # 按“ended without a terminal event”收尾，而不是傻等 5s 一次。
+            if event_type == "timeout":
+                if not prompt_thread.is_alive():
+                    break
+                continue
+            if event_type in _SKIP_TYPES:
                 continue
 
-            await _send_live(state, event)
-
-            if event.get("type") in _TERMINAL_TYPES:
+            # 先记终态再发送：慢 socket 不能把“已完成的 run”拖成
+            # no-terminal；发送本身仍有 10s 上限且不影响 finalizer。
+            if event_type in _TERMINAL_TYPES:
                 terminal_seen["seen"] = True
+            await _send_live(state, event)
+            if event_type in _TERMINAL_TYPES:
                 break
     except asyncio.CancelledError:
         # 调用方取消只取消事件转发；finalizer 已在独立任务中继续。
@@ -453,7 +611,11 @@ async def run_prompt_streaming(
             raise
 
 
-async def finalize_play(websocket: WebSocket, project: Project) -> None:
+async def finalize_play(
+    websocket: WebSocket,
+    project: Project,
+    state: dict | None = None,
+) -> None:
     """把 project 状态从 playing 收尾回 editing，并通知前端。
 
     幂等（只在真的还处于 playing 时才做）——同一次 Play 可能从两个地方
@@ -463,8 +625,28 @@ async def finalize_play(websocket: WebSocket, project: Project) -> None:
     """
     if project.meta.get("status") != "playing":
         return
-    project.meta["status"] = "editing"
-    project._save_meta()
+    lock = project_lock(state) if state is not None else asyncio.Lock()
+    async with lock:
+        if project.meta.get("status") != "playing":
+            return
+        old_status = project.meta.get("status")
+        project.meta["status"] = "editing"
+        try:
+            # meta 写入含 fsync；绝不能留在事件循环线程上。
+            await asyncio.to_thread(project._save_meta)
+        except Exception as exc:  # noqa: BLE001
+            project.meta["status"] = old_status
+            try:
+                await websocket.send_json(
+                    {
+                        "type": "error",
+                        "message": f"保存 Play 结束状态失败：{exc}",
+                        "source": "play",
+                    }
+                )
+            except Exception:
+                pass
+            return
     try:
         await websocket.send_json({"type": "play_stopped"})
     except Exception:
@@ -475,6 +657,7 @@ async def run_play_streaming(
     websocket: WebSocket,
     play_session: PlaySession,
     project: Project,
+    state: dict | None = None,
 ) -> None:
     """转发 Play 事件到 WebSocket。实现在 senza_studio_runtime.stream——
     Studio 和导出项目共用同一份协议，不留第二份拷贝（Phase 7）。
@@ -482,6 +665,6 @@ async def run_play_streaming(
     这里只补上 Studio 专有的收尾：把项目状态从 playing 改回 editing。
     """
     async def _finish() -> None:
-        await finalize_play(websocket, project)
+        await finalize_play(websocket, project, state)
 
     await _runtime_stream.run_play_streaming(websocket, play_session, _finish)
