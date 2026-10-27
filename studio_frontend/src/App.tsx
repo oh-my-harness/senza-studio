@@ -24,6 +24,7 @@ export default function App() {
   const [projects, setProjects] = useState<ProjectMeta[]>([]);
   const [newName, setNewName] = useState("");
   const [showSettings, setShowSettings] = useState(false);
+  const [projectError, setProjectError] = useState<string | null>(null);
   // 连接由 App 统一持有，不挂在 ChatPanel 上——连接是整个项目视图的东西，
   // 不属于某一个面板。
   useProjectSocket(projectId);
@@ -35,15 +36,21 @@ export default function App() {
 
   // 打开项目
   const openProject = async (id: string) => {
-    const meta = await api.getProject(id);
-    const spec = await api.getSpec(id);
-    const messages = await api.getMessages(id);
-    const { chat, tools } = splitToolCalls(messages);
-    setProject(meta);
-    setSpec(spec);
-    setMessages(chat);
-    setToolCalls(tools);
-    setProjectId(id);
+    setProjectError(null);
+    try {
+      const meta = await api.getProject(id);
+      const spec = await api.getSpec(id);
+      const messages = await api.getMessages(id);
+      const { chat, tools } = splitToolCalls(messages);
+      setProject(meta);
+      setSpec(spec);
+      setMessages(chat);
+      setToolCalls(tools);
+      setProjectId(id);
+    } catch (e) {
+      // 损坏项目现在是 422 + 明确 detail；不能只在 devtools console 里出现。
+      setProjectError(`打开项目失败：${String(e)}`);
+    }
   };
 
   // 创建项目
@@ -181,6 +188,11 @@ export default function App() {
             创建项目
           </button>
         </div>
+        {projectError && (
+          <p role="alert" className="max-w-xl text-sm text-red-600 break-words">
+            {projectError}
+          </p>
+        )}
         {projects.length > 0 && (
           <div className="w-96">
             <h2 className="text-sm text-gray-500 mb-2">已有项目</h2>

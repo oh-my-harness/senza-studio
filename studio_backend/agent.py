@@ -14,7 +14,7 @@ from typing import Any
 
 from .config import StudioConfig
 from .project import Project
-from .session import ensure_session
+from .session import ensure_session, session_dir_path
 from .spec import Spec
 from .system_prompt import build_system_prompt
 from .tools.spec_tools import make_spec_tools
@@ -60,6 +60,9 @@ class StudioAgent:
         if session_id is None:
             session_id = self._project.create_session()
         elif session_id not in self._project.meta.get("sessions", []):
+            # 先把非法/越界的 sid 挡在 meta 之外；ensure_session 在 build 时
+            # 还会再校验一次。
+            session_dir_path(self._project.sessions_dir, session_id)
             self._project.meta.setdefault("sessions", []).append(session_id)
             self._project._save_meta()
 
@@ -109,6 +112,9 @@ class StudioAgent:
         )
 
         # ── Session persistence ─────────────────────────────
+        # 持久化失败不能静默降级成内存会话：那会让 UI 显示 sid 已创建、
+        # /messages 却永远为空，重启后历史全丢。让异常带上上下文冒到调用方，
+        # 由 WS/REST 层给用户明确错误。
         if self._session_id:
             try:
                 ensure_session(self._project.sessions_dir, self._session_id)
@@ -116,8 +122,10 @@ class StudioAgent:
                     str(self._project.sessions_dir)
                 )
                 builder = builder.session_repo(repo, self._session_id)
-            except Exception as e:
-                print(f"Warning: session_repo setup failed: {e}", file=sys.stderr)
+            except Exception as exc:
+                raise RuntimeError(
+                    f"session persistence unavailable for {self._session_id}: {exc}"
+                ) from exc
 
         # ── Build ───────────────────────────────────────────
         self._harness = builder.build()

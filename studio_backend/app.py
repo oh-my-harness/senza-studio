@@ -27,7 +27,7 @@ from .docs import (
 )
 from .play import PlaySession, get_entry_inputs
 from .preprocess import PreprocessError, preprocess_spec
-from .project import Project
+from .project import Project, ProjectDataError
 from .sdk_pin import check_sdk_pin
 from .session import read_session_history
 from .settings import (
@@ -191,6 +191,11 @@ def create_app(config: StudioConfig | None = None) -> FastAPI:
         redoc_url=None,
         openapi_url=None,
     )
+
+    @app.exception_handler(ProjectDataError)
+    async def project_data_error_handler(request: Request, exc: ProjectDataError):
+        # 损坏数据必须显式报错；不要把 500 或空白项目伪装成正常状态。
+        return JSONResponse(status_code=422, content={"detail": str(exc)})
 
     @app.middleware("http")
     async def enforce_local_api_security(request, call_next):
@@ -530,19 +535,64 @@ def create_app(config: StudioConfig | None = None) -> FastAPI:
     @app.put("/api/projects/{project_id}/spec")
     async def update_spec(project_id: str, req: UpdateSpecReq):
         state = _get_or_load_project(cfg, project_id)
-        # 替换 spec 内容
         new_spec = Spec(req.spec)
         try:
             new_spec.validate()
         except SpecError as e:
             return JSONResponse(status_code=400, content={"detail": str(e)})
+
+        run = state.get("prompt_run")
+        thread = state.get("prompt_thread")
+        prompt_task = state.get("prompt_task")
+        finalizer = state.get("prompt_finalizer")
+        if (
+            (isinstance(run, dict) and run.get("status") == "running")
+            or (thread is not None and thread.is_alive())
+            or (prompt_task is not None and not prompt_task.done())
+            or (finalizer is not None and not finalizer.done())
+        ):
+            return JSONResponse(
+                status_code=409,
+                content={
+                    "detail": "prompt 运行期间不能替换 spec；请等待结束后再保存。",
+                    "saved": False,
+                    "applied": False,
+                },
+            )
+
+        # 先落盘，成功后才换内存/重建。否则保存失败时 GET /spec 会返回
+        # 一个“看起来已保存”的新 spec，用户重试还会覆盖旧内容。
+        try:
+            state["project"].save_spec(new_spec)
+        except Exception as exc:  # noqa: BLE001
+            return JSONResponse(
+                status_code=500,
+                content={
+                    "detail": f"spec 保存失败：{exc}",
+                    "saved": False,
+                    "applied": False,
+                },
+            )
+
         state["spec"] = new_spec
         state["agent"]._spec = new_spec
-        state["project"].save_spec(new_spec)
-        # 重建 agent（system prompt 需更新）
+        applied = True
+        warning: str | None = None
         if state["agent"]._session_id is not None:
-            state["agent"].rebuild()
-        return {"status": "ok"}
+            try:
+                state["agent"].rebuild()
+            except Exception as exc:  # noqa: BLE001
+                # 磁盘已提交，但当前 harness 还是旧的。必须区分“已保存”
+                # 和“运行时未成功应用”，不能整体报成保存失败。
+                applied = False
+                warning = f"spec 已保存，但运行时重建失败：{exc}"
+                print(f"agent rebuild after spec save failed: {exc}", file=sys.stderr)
+        return {
+            "status": "ok",
+            "saved": True,
+            "applied": applied,
+            "warning": warning,
+        }
 
     # ── Sessions ─────────────────────────────────────────
     @app.get("/api/projects/{project_id}/sessions")
@@ -566,7 +616,13 @@ def create_app(config: StudioConfig | None = None) -> FastAPI:
         active = project.meta.get("active_session")
         if not active:
             return []
-        return read_session_history(project.sessions_dir, active)
+        try:
+            return read_session_history(project.sessions_dir, active)
+        except ValueError as exc:
+            return JSONResponse(
+                status_code=422,
+                content={"detail": f"active session 无效：{exc}"},
+            )
 
     # ── Play ───────────────────────────────────────────────
     @app.get("/api/projects/{project_id}/entry_inputs")
@@ -585,14 +641,39 @@ def create_app(config: StudioConfig | None = None) -> FastAPI:
             await websocket.close(code=1008)
             return
         await websocket.accept()
-        state = _get_or_load_project(cfg, project_id)
+        try:
+            state = _get_or_load_project(cfg, project_id)
+        except ProjectDataError as exc:
+            await websocket.send_json(
+                {
+                    "type": "error",
+                    "message": f"项目数据损坏，无法加载：{exc}",
+                    "source": "project",
+                    "terminal": True,
+                }
+            )
+            await websocket.close(code=1011)
+            return
         agent = state["agent"]
         project = state["project"]
 
-        # 如果 agent 还没启动 session，启动一个
+        # 如果 agent 还没启动 session，启动一个。session 持久化不可用时
+        # 必须让用户看到原因，不能带着内存会话继续跑。
         if agent._harness is None:
             active = project.meta.get("active_session")
-            agent.start_session(active)
+            try:
+                agent.start_session(active)
+            except Exception as exc:  # noqa: BLE001
+                await websocket.send_json(
+                    {
+                        "type": "error",
+                        "message": f"无法启动会话：{exc}",
+                        "source": "session",
+                        "terminal": True,
+                    }
+                )
+                await websocket.close(code=1011)
+                return
 
         streaming_task: asyncio.Task | None = None
         play_task: asyncio.Task | None = None
@@ -704,7 +785,17 @@ def create_app(config: StudioConfig | None = None) -> FastAPI:
                 elif msg_type == "switch_session":
                     sid = msg.get("session_id")
                     if sid:
-                        agent.start_session(sid)
+                        try:
+                            agent.start_session(sid)
+                        except Exception as exc:  # noqa: BLE001
+                            await websocket.send_json(
+                                {
+                                    "type": "error",
+                                    "message": f"切换会话失败：{exc}",
+                                    "source": "session",
+                                }
+                            )
+                            continue
                         await websocket.send_json(
                             {
                                 "type": "session_switched",

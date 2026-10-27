@@ -4,11 +4,19 @@ from __future__ import annotations
 import json
 import secrets
 import shutil
+import sys
 import time
 from pathlib import Path
 
+import yaml
+
 from .config import StudioConfig
-from .spec import Spec
+from .spec import Spec, SpecError
+from .storage import atomic_write_text
+
+
+class ProjectDataError(Exception):
+    """项目文件存在但内容损坏/不可解析；绝不自动重建用户数据。"""
 
 
 def _utc_now() -> str:
@@ -184,7 +192,7 @@ class Project:
 
         # 初始空 spec
         spec = Spec()
-        (path / "pipeline.yaml").write_text(spec.to_yaml(), encoding="utf-8")
+        atomic_write_text(path / "pipeline.yaml", spec.to_yaml())
 
         proj = cls(config, meta, path)
         proj._save_meta()
@@ -198,7 +206,16 @@ class Project:
         meta_path = path / ".studio" / "meta.json"
         if not meta_path.exists():
             raise FileNotFoundError(f"project {project_id} not found")
-        meta = json.loads(meta_path.read_text(encoding="utf-8"))
+        try:
+            meta = json.loads(meta_path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise ProjectDataError(
+                f"项目元数据损坏，未自动重建：{meta_path} ({exc})"
+            ) from exc
+        if not isinstance(meta, dict):
+            raise ProjectDataError(f"项目元数据格式无效：{meta_path}")
+        if meta.get("id") not in (None, project_id):
+            raise ProjectDataError(f"项目元数据 id 不匹配：{meta_path}")
         return cls(config, meta, path)
 
     @classmethod
@@ -219,24 +236,57 @@ class Project:
         result = []
         for p in sorted(projects_dir.iterdir()):
             meta_path = p / ".studio" / "meta.json"
-            if meta_path.exists():
+            if not meta_path.exists():
+                continue
+            try:
                 meta = json.loads(meta_path.read_text(encoding="utf-8"))
-                result.append(meta)
+                if not isinstance(meta, dict):
+                    raise ValueError("meta.json is not an object")
+                if meta.get("id") not in (None, p.name):
+                    raise ValueError("meta.json id does not match directory")
+            except (OSError, UnicodeDecodeError, json.JSONDecodeError, ValueError) as exc:
+                # 一个损坏项目不能拖垮整个项目列表；原始文件保持原样，
+                # 记录路径供用户手工修复。
+                print(
+                    f"skipping corrupt project meta {meta_path}: {exc}",
+                    file=sys.stderr,
+                )
+                continue
+            result.append(meta)
         return result
 
     # ── Spec 持久化 ───────────────────────────────────────
 
     def save_spec(self, spec: Spec) -> None:
         yaml_path = self.path / "pipeline.yaml"
-        yaml_path.write_text(spec.to_yaml(), encoding="utf-8")
+        # pipeline.yaml 的 replace 是提交点。meta.updated_at 没有业务消费者，
+        # 它失败不应把已经安全落盘的 spec 报成失败。
+        atomic_write_text(yaml_path, spec.to_yaml())
         self.meta["updated_at"] = _utc_now()
-        self._save_meta()
+        try:
+            self._save_meta()
+        except Exception as exc:  # noqa: BLE001
+            print(f"warning: spec saved but meta.json update failed: {exc}", file=sys.stderr)
 
     def load_spec(self) -> Spec:
         yaml_path = self.path / "pipeline.yaml"
         if not yaml_path.exists():
             return Spec()
-        return Spec.from_yaml(yaml_path.read_text(encoding="utf-8"))
+        try:
+            text = yaml_path.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError) as exc:
+            raise ProjectDataError(f"pipeline.yaml 不可读：{exc}") from exc
+        if not text.strip():
+            raise ProjectDataError("pipeline.yaml 为空；拒绝当作空 spec 打开")
+        try:
+            spec = Spec.from_yaml(text)
+        except (yaml.YAMLError, SpecError, TypeError) as exc:
+            raise ProjectDataError(f"pipeline.yaml 解析失败：{exc}") from exc
+        data = spec.get_current_spec()
+        stages = data.get("stages")
+        if not isinstance(stages, list) or any(not isinstance(s, dict) for s in stages):
+            raise ProjectDataError("pipeline.yaml 的 stages 结构无效")
+        return spec
 
     # ── Session 管理 ──────────────────────────────────────
 
@@ -261,7 +311,7 @@ class Project:
 
     def _save_meta(self) -> None:
         meta_path = self.path / ".studio" / "meta.json"
-        meta_path.write_text(
+        atomic_write_text(
+            meta_path,
             json.dumps(self.meta, ensure_ascii=False, indent=2),
-            encoding="utf-8",
         )
