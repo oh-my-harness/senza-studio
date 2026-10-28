@@ -4,7 +4,7 @@
 
 **COMPLETE（代码、自动化与独立浏览器验收）**。实现范围为通用 Conversation Player、浏览器持久化、显式历史输入映射与固定视口聊天布局。没有新增 Runtime Engine 或长期记忆系统，没有修改其他仓库，没有重启、停止用户服务。本功能独立于其他进行中的工作，可直接基于当前 main 合入。
 
-验证边界：已执行实际导出、进程内真实 WebSocket/WorkflowEngine 两轮工具调用、真实 React 生命周期测试，以及隔离数据副本上的无头 Chrome 布局/滚动/刷新验收。没有进行真实模型调用、跨设备同步或对当前用户运行实例的在线验收。
+验证边界：已执行实际导出、进程内真实 WebSocket/WorkflowEngine 两轮工具调用、真实 React 生命周期测试，以及隔离临时项目上的无头 Chrome 面板最大化/缩放/最小化/持久化与 Player 会话冒烟。长历史滚动、刷新恢复与失败重试由自动化测试覆盖。没有进行真实模型调用、跨设备同步或对当前用户运行实例的在线验收。
 
 ## 2. Implementation Summary
 
@@ -17,7 +17,7 @@
 
 ## 3. Files Changed
 
-以下相对路径均位于 `/home/liyufeng/Projects/senza-studio`。
+以下相对路径均位于本仓库根目录。
 
 | 文件 | 本次目的 |
 | --- | --- |
@@ -121,28 +121,29 @@ UI History 从完整持久化消息恢复，失败与中断状态也保留。Age
 
 | 命令 | 结果 |
 | --- | --- |
-| `.venv/bin/python -m pytest tests/test_conversation_contract.py tests/test_conversation_export.py tests/test_play.py tests/test_play_thinking_config.py -q` | 213 passed |
-| `.venv/bin/python -m pytest tests/test_dev_sh_launch.py tests/test_provider_network.py -q` | 28 passed，13 subtests（此前记录的 8 项 dev.sh 失败在当前 base 未复现；本 PR 未修改 dev.sh/provider-network） |
-| `.venv/bin/python -m pytest -q` | 666 passed，1 skipped，13 subtests，2 条第三方弃用警告 |
+| `PYTHONPATH=$PWD:$PWD/senza-studio-runtime .venv/bin/python -m pytest tests/test_conversation_contract.py tests/test_conversation_export.py -q` | 16 passed |
+| `PYTHONPATH=$PWD:$PWD/senza-studio-runtime .venv/bin/python -m pytest -q` | 603 passed，1 skipped，2 条第三方弃用警告 |
 | `cd studio_frontend && npx tsc --noEmit` | 通过 |
-| `cd studio_frontend && npx vitest run` | 20 文件，157 passed，1 skipped |
+| `cd studio_frontend && npx vitest run src/player src/panels` | 8 文件，63 passed |
+| `cd studio_frontend && npx vitest run` | 16 文件，102 passed，1 skipped |
 | `cd studio_frontend && npm run build` | TypeScript、Studio Vite、Export Vite 全部通过；Studio chunk 大小提示仍存在 |
 | `git diff --check` | 通过；FormLayout 无 diff |
 
-回归过程中原 Studio/Export JSON 契约相等断言曾因新增身份字段失败；已将身份改为响应头，原测试未经删除或弱化，后续全套通过。React 宿主测试发现空 step_finished 输出覆盖流式回答，已修复并由两宿主测试覆盖。当前无失败测试。
+`PYTHONPATH` 显式包含本仓库的 `senza-studio-runtime`，避免 editable 安装指向另一份 checkout。回归过程中原 Studio/Export JSON 契约相等断言曾因新增身份字段失败；已将身份改为响应头，原测试未经删除或弱化，后续全套通过。React 宿主测试发现空 step_finished 输出覆盖流式回答，已修复并由两宿主测试覆盖。当前无失败测试。
 
-无头 Chrome 布局验收（隔离项目副本 + 种子会话，未调用模型、未写真实存档）：
+本分支无头 Chromium 冒烟（隔离临时项目，未调用模型）：
 
-| 场景 | 视口 | 结果 |
-| --- | --- | --- |
-| 2 条消息 | 1280×800 | 页面高度 800；消息区 255/255；发送按钮底部 776 |
-| 100 条消息 | 1280×800 | 消息区 255/7984，自动贴底；页面不增长 |
-| 20 条，末条失败 | 1280×800 | 消息区 219/1816，失败文本与重试按钮可见，贴底 |
-| 100 条 | 1024×600 / 1440×900 | 消息区 119 / 323；发送按钮 576 / 876 |
-| 100 条 | 390×844 | Player 内无横向溢出（宽 390，消息区/表单 342） |
-| 2004 字符输入 | 1280×800 | 输入框高度 58 不变（内部滚动 316），发送按钮仍可见 |
-| 全屏 → 编辑器 → 全屏 | 1280×800 | 会话、Carry、未发送输入保留；上翻位置未被强制拉底 |
-| 刷新恢复 | 1280×800 | 重新进入 Play 后会话与消息从 localStorage 恢复 |
+| 场景 | 结果 |
+| --- | --- |
+| 初始三栏 1440×900 | Chat 349 / Canvas 730 / Inspector 349 |
+| 最大化 Canvas | 0 / 1440 / 0 |
+| 最大化后缩到 1100×700 | Canvas 1100；恢复后 349 / 730 / 349，drift 0 |
+| 最小化 Chat | 宽 0、`inert`，Dock 出现 “Agent Chat” |
+| 刷新后重进项目 | Chat 仍最小化，Dock 保留 |
+| 拖动 Chat 分隔线 +100px | 349 → 449；刷新后仍 449 |
+| Conversation Play | 自动全屏；`conversation-scroll` 存在；StartForm 默认值预填；刷新后同一会话 key 恢复 |
+
+长历史/贴底滚动、失败重试、全屏→编辑器→全屏由 `ConversationLayout.scroll.test.jsx`、`Conversation.integration.test.jsx`、`conversationStorage.test.ts` 覆盖；本分支未重复原始 PR 的人工视口矩阵。
 
 | 验收项 | 验证与结果 |
 | --- | --- |
