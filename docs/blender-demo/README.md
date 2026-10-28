@@ -1,9 +1,9 @@
-# Blender 动画 — V0 自主动画端到端测试
+# Blender 动画 — Agent Team 自主动画端到端测试
 
 > 本目录只收录演示说明。文中 `scripts/`、`prompts/`、素材及任务文件位于另行取得的 Blender 任务包，
 > 不随本次文档 PR 上传；下方命令须在该任务包的实际根目录执行。
 
-所述 Blender 任务包用于 V0 的**演示任务与证据**，不属于核心安装依赖。先完成
+所述 Blender 任务包用于 Agent Team 工作流的**演示任务与证据**，不属于核心安装依赖。先完成
 [核心快速开始](../v0-quickstart.md) 的 hello.txt 任务，再按本目录配置 Blender。
 
 历史执行路径是 `/home/liyufeng/Projects/blender_animation`，仅用于对应已有证据。
@@ -12,23 +12,23 @@
 
 专用依赖：Blender 可执行文件、Python 3、动画交付所需 ffmpeg/ffprobe；
 下载任务另需 curl/wget、可达素材源和许可证，视觉审查另需能读取图片的模型/工具。
-Windows Blender 跨 WSL 调用需要 wslpath 和文件访问权限。这些都不是 V0 hello.txt 的要求。
+Windows Blender 跨 WSL 调用需要 wslpath 和文件访问权限。这些都不是 Agent Team hello.txt 的要求。
 `preflight.sh` 只打印可执行文件检查，发现 BLOCKED 也可能返回 0，不能只凭退出码验收。
 
 ## 要验证什么
 
-让现有 V0（Orchestrator → Coder → Reviewer）从**自主发现并合法获取 3D 模型**开始，到制作**实际动起来**的高达风格机甲动画、渲染 MP4、独立审查、修订及交付，全程尽可能不需要人类中途协调。
+让现有 Agent Team 工作流（Orchestrator → Coder → Reviewer）从**自主发现并合法获取 3D 模型**开始，到制作**实际动起来**的高达风格机甲动画、渲染 MP4、独立审查、修订及交付，全程尽可能不需要人类中途协调。
 
 **不是**只验证 Python 脚本运行成功，也**不是**让 Reviewer 只看源码。Reviewer 必须独立检查实际 `.blend`、`mp4` 与抽帧证据。检测不到/看不到的质量维度必须标 `UNVERIFIED`，不得伪称 PASS。
 
-本项目是一个**任务与证据包**，不是新的 Agent 架构；沿用 V0 已有的角色、调度及超时规则。
+本项目是一个**任务与证据包**，不是新的 Agent 架构；沿用 Agent Team 已有的角色、调度及超时规则。
 
 ## 文件入口
 
-1. `prompts/01_V0_USER_PROMPT.md` — 复制到现有 V0 的用户对话框，作为任务指令。
+1. `prompts/01_V0_USER_PROMPT.md` — 复制到现有 Agent Team 工作区的用户对话框，作为任务指令。
 2. `prompts/02_REVIEWER_DISPATCH.md` — 如现有 Orchestrator 不会把审查要求完整传给 Reviewer，可并入 Reviewer 的任务描述（由 Orchestrator 派发，**不要**绕过调度）。
-3. `prompts/03_CODEX_READINESS_PROMPT.md` — 可选：任务开始前用 Codex 只读检查环境和 Reviewer 工具；**不代表**先让 Codex 替 V0 做实现。
-4. `prompts/04_RESUME_AFTER_TIMEOUT.md` — 仅在 V0 超时/中断后从已有文件和证据恢复任务。
+3. `prompts/03_CODEX_READINESS_PROMPT.md` — 可选：任务开始前用 Codex 只读检查环境和 Reviewer 工具；**不代表**先让 Codex 替 Agent Team 做实现。
+4. `prompts/04_RESUME_AFTER_TIMEOUT.md` — 仅在 Agent Team 工作流超时/中断后从已有文件和证据恢复任务。
 5. `TASK.md` — 目标、边界、成功定义。
 6. `REVIEW_CONTRACT.md` — 独立审查办法及签收/拒收标准。
 7. `ASSET_POLICY.md` — 素材来源、许可证与下载限制。
@@ -46,8 +46,8 @@ Windows Blender 跨 WSL 调用需要 wslpath 和文件访问权限。这些都�
 ```bash
 cd "$HOME/v0-work/blender_animation"  # 换成实际解压目录
 bash scripts/preflight.sh
-# 把 prompts/01_V0_USER_PROMPT.md 的全文提交给 V0 的 Orchestrator
-# V0 提交成果后，Reviewer 应运行（不得只采用 Coder 的自述）：
+# 把 prompts/01_V0_USER_PROMPT.md 的全文提交给 Agent Team 的 Orchestrator
+# Agent Team 工作流提交成果后，Reviewer 应运行（不得只采用 Coder 的自述）：
 bash scripts/run_scene_audit.sh deliverables/final.blend
 python3 scripts/delivery_check.py
 ```
@@ -74,4 +74,4 @@ Windows 原生 Blender 读取 `\\wsl.localhost\\Ubuntu\\...` 可能受 Windows/W
 
 ## 不会自动发生的事情
 
-这些文件不会自动为 V0 创建网页搜索、身份认证、GUI 视觉理解或 Blender 权限。若 Reviewer 没有看图能力，自动脚本只能验证结构和输出图片供人检查，不能替代视觉评审；应报告 `UNVERIFIED` 并上报阻塞，而不是捏造视觉 PASS。
+这些文件不会自动为 Agent Team 创建网页搜索、身份认证、GUI 视觉理解或 Blender 权限。若 Reviewer 没有看图能力，自动脚本只能验证结构和输出图片供人检查，不能替代视觉评审；应报告 `UNVERIFIED` 并上报阻塞，而不是捏造视觉 PASS。

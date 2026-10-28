@@ -1,11 +1,13 @@
-# Agent Team V0.1.1 内部交付说明
+# Agent Team integration handoff (historical)
 
-面向内部同事的 V0.1.1 交付记录。首次使用统一从 [快速开始](v0-quickstart.md) 进入；
-Runtime 的 `docs/agent-team-guide.md` 同时包含通用 P2P SDK 示例，不能直接当作受控 V0 操作步骤。
+> Terminology note: this is a historical handoff record. `V0`/`V0.1.1` below are internal labels for the Agent Team integration; real tags, commit SHAs, and dependency pins are preserved unchanged.
+
+面向内部同事的历史交付记录。首次使用统一从 [快速开始](v0-quickstart.md) 进入；
+Runtime 的 `docs/agent-team-guide.md` 同时包含通用 P2P SDK 示例，不能直接当作受控 Agent Team 工作流步骤。
 
 ## 历史集成版本链（当前已回退，候选仍待审查）
 
-下表描述此前集成时的身份，不代表当前 main 已包含 V0。现有审查候选为 Runtime #290
+下表描述此前集成时的身份，不代表当前 main 已包含 Agent Team integration。现有审查候选为 Runtime #290
 （依赖基础审查 #289）、Senza #44、Studio #24；固定版本保持原样，不在本次文档提交中调整。
 完整提交身份及历史实测基线见[审查记录](v0-doc-audit-20261019.md#当前远端审查候选)。
 
@@ -38,7 +40,7 @@ v0.1.0 tag（Runtime `cb287af`、Studio `a92d71a`）保持不动，不要 checko
 4. **Studio**：聊天面板新增"停止工作流"按钮（走上面的 stop 端点）；
    双 pin 文件更新；`dev.sh` 不再误杀无关进程名字含 "vite" 的进程。
 
-## 已知限制（V0.1.1 未解决，属预期）
+## 已知限制（Agent Team integration 未解决，属预期）
 
 - 受控工作流停止后，本次任务目标 不会自动续跑；需要重新发送目标。
 - `packaging/desktop-python.in` 的 PyPI `senza-sdk==1.3.0` 通道与
@@ -46,7 +48,7 @@ v0.1.0 tag（Runtime `cb287af`、Studio `a92d71a`）保持不动，不要 checko
   `./dev.sh` 的本地 wheel 路径，desktop-python 打包链未在本轮验证。
 - Runtime `agent-team-runtime-v0.1.0` tag 内含少量研究材料
   （`configs/research/*`、`tools/experiments/*`、`docs/e2e-evals/runs/*`
-  中的个人绝对路径），不影响使用，V0.1.x 再清理。
+  中的个人绝对路径），不影响使用，后续版本再清理。
 - 正式范围为 WSL/Linux Coding Team Runtime、本地 Senza wheel 和 Studio
   `dev.sh` 开发运行链；不承诺原生 Windows/macOS、Novel V1、公开安装包或生产部署。
 - `USER_MANUAL_SMOKE_PENDING`：真实模型三角色协作由用户稍后在 Web UI 验收；
@@ -55,7 +57,7 @@ v0.1.0 tag（Runtime `cb287af`、Studio `a92d71a`）保持不动，不要 checko
 
 ## 同事启动步骤（WSL/Linux）
 
-跟随 [V0 快速开始](v0-quickstart.md) 完成完整路径：
+跟随 [Agent Team integration 快速开始](v0-quickstart.md) 完成完整路径：
 
 1. 获取同级 Runtime、Senza、Studio，检出记录的完整提交；适配器由 Cargo 获取。
 2. 显式准备 Python 3.12 虚拟环境、maturin 和 SDK wheel 安装包、前端 npm 依赖。

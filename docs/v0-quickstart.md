@@ -1,4 +1,4 @@
-# V0.1.1 快速开始（WSL / Linux，2026-10-19 核对）
+# Agent Team integration 快速开始（WSL / Linux，2026-10-19 核对）
 
 目标：从空目录安装，在 Senza Studio 的 **Agent Teams** 中创建团队并完成一次小任务。
 入口为 Runtime 的 `agent-studio` 加 Studio 的 `dev.sh`，不是仅运行 `dev.sh`。
@@ -36,7 +36,7 @@ git -C senza-studio checkout 741a5a193d3b80b5fbb17bf287eb0f1b0dfdfcba
 `Senza/senza-pkg/runtime.lock` 指向同一 Runtime。Runtime `Cargo.toml` 和
 `Cargo.lock` 锁适配器。不要把四仓库各自的最新 main 混装，也不需要保留维护者的
 `*-v0-integration`、`studio-v011-clean-integration` 等临时工作树。
-上面是代码验证基线；本说明随当前 V0 审查 PR 提交，应连同说明使用，不能用各仓库当前默认分支替代这些固定提交。
+上面是代码验证基线；本说明随当前 Agent Team integration 审查 PR 提交，应连同说明使用，不能用各仓库当前默认分支替代这些固定提交。
 
 ## 2. 一次性准备
 
@@ -210,7 +210,7 @@ API 为 `POST /api/team/workflow/stop?project=v0-smoke`（通过已认证的运�
 | 404 模型请求 | 基础地址（Base URL） 是否误加 `/v1`，组织网关是否支持当前固定聊天路径 |
 | 502 / 空 `server error` / TLS | 见网络说明，区分代理/直连与 CA；保存时间、HTTP 状态、运行／工作流 ID，不能从空正文断言模型或工具不兼容 |
 | 一直运行 / 409 | 先看现有工作流，不要重复提交；停止并等终态，再处理密钥、权限、模型或网络 |
-| .pipeline / 存储租约错误 | 检查工作区写权限、磁盘和并发使用；v0.1.1 会报告 Escalated 终态，修复后显式发送新目标 |
+| .pipeline / 存储租约错误 | 检查工作区写权限、磁盘和并发使用；Agent Team integration 会报告 Escalated 终态（离线回归验证；真实任务未复验），修复后显式发送新目标 |
 
 诊断文件在 Runtime 数据根：`logs/runtime.jsonl`（生命周期）、`logs/crash.jsonl`（panic）、
 `teams/<id>/chat.sqlite3`、成员会话／快照。不是所有上游 HTTP 细节都会保留；共享日志前去除令牌、密钥和任务内容。

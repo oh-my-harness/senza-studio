@@ -1,6 +1,6 @@
 # Senza Studio
 
-V0.1.1 首次使用请从 [快速开始](docs/v0-quickstart.md) 进入，包含四仓库版本、首次依赖准备、
+首次使用 Agent Team integration 请从 [快速开始](docs/v0-quickstart.md) 进入，包含四仓库版本、首次依赖准备、
 Runtime 与 Studio 双终端启动、模型配置、最小任务和排错。[文档审查记录](docs/v0-doc-audit-20261019.md)
 区分已经验证、历史证据和仍待干净环境验收的步骤。
 
@@ -9,7 +9,7 @@ Senza Studio 是构建和运行 AI 智能体的本地工作台。Senza 工作区
 **Agent Teams** 是同一应用中的独立工作区，提供团队、成员、聊天与 Runtime 设置界面。
 团队运行于同级 `llm-harness-runtime` 仓库，Studio 后端通过本地代理连接。
 
-Agentic Coding Team V0 使用受控工作流：Orchestrator 决定下一步，Runtime 负责派发、关联、
+Agent Team 使用受控工作流：Orchestrator 决定下一步，Runtime 负责派发、关联、
 边界和工作流状态，执行成员在该边界内工作。更广泛的规划文档不等于 Studio 已实现全部目标。
 
 ## 本地网页启动

@@ -3,8 +3,8 @@
 > 本目录只收录演示说明。文中 `scripts/`、`prompts/`、素材及任务文件位于另行取得的 Blender 任务包，
 > 不随本次文档 PR 上传；下方命令须在该任务包的实际根目录执行。
 
-这是 Blender 动画演示的任务包配置，不是 V0 核心安装步骤。
-先跟随 [V0 快速开始](../v0-quickstart.md) 跑通 hello.txt。
+这是 Blender 动画演示的任务包配置，不是 Agent Team 核心安装步骤。
+先跟随 [Agent Team integration 快速开始](../v0-quickstart.md) 跑通 hello.txt。
 ZIP 文件需要另行取得；本仓库文档不提供下载凭据，也不保证该 ZIP 已在 Downloads。
 
 在 PowerShell 中将发行版名、Linux 用户名和 ZIP 文件名换成自己的值：
@@ -33,7 +33,7 @@ cat prompts/01_V0_USER_PROMPT.md
 
 任务文本和历史证据中的 `/home/liyufeng/...` 是旧机路径。提交前将任务中输入与输出路径改为
 当前工作区实际路径，在 Agent Teams 创建团队时授权该目录。WSL Runtime 使用 `/home/<user>/...`，
-不要给它 Windows 的 `C:\...` 路径。检查无误后才把任务文本提交到 V0 Orchestrator；
+不要给它 Windows 的 `C:\...` 路径。检查无误后才把任务文本提交到 Agent Team Orchestrator；
 不要把它作为安装测试重复提交到已有运行中的 Blender 团队。
 
 首次新 Windows/WSL 解压、Blender 跨系统文件访问和最终动画未在本次文档审查中重验。
