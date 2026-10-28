@@ -75,7 +75,7 @@ function RuntimeInspector({ card, stepType }: { card: GameCard | undefined; step
         </div>
       )}
 
-      {card.validation && (
+      {card.validation && card.validation.status === "failed" && (
         <div className="pt-2 border-t border-gray-100">
           <label className="block text-xs text-gray-500 mb-1">验证失败</label>
           <div className="rounded border border-red-200 bg-red-50 px-2 py-1 text-xs space-y-1">
