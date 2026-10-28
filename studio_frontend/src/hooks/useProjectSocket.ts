@@ -70,6 +70,7 @@ export function useProjectSocket(projectId: string | null) {
               route_key?: string;
               _debug?: Record<string, unknown> | null;
               fields?: Record<string, unknown> | null;
+              _validation?: Record<string, unknown> | null;
             }
           | null
           | undefined;
@@ -81,6 +82,7 @@ export function useProjectSocket(projectId: string | null) {
             route: structured?.route_key,
             debug: structured?._debug,
             fields: structured?.fields,
+            validation: structured?._validation,
           });
           setPausedStep(null);
         }

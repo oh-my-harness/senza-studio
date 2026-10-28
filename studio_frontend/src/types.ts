@@ -64,6 +64,9 @@ export interface GameCard {
   // GameView 的 table/chart 卡片用——structured.fields，ui.fields 点名的
   // 字段值从这里取。
   fields?: Record<string, unknown> | null;
+  // 结构化输出验证失败时 play.py 塞进 structured._validation 的诊断：
+  // {status, code, detail, attempt, raw_head, raw_output}。验证成功时没有。
+  validation?: Record<string, unknown> | null;
 }
 
 // 必须和 studio_backend/play.py 里的 PENDING_APPROVAL 保持一致——checker
