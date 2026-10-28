@@ -395,6 +395,9 @@ class StructuredValidation:
     detail: str = ""
     attempt: int = 1
     raw_head: str = ""
+    # 失败时保留完整可见输出（有上限），否则下一次只剩 200 字符的头，
+    # 无法判断是截断、选错 JSON 对象还是模型压根没写 route。
+    raw_output: str = ""
 
     @property
     def ok(self) -> bool:
@@ -410,6 +413,7 @@ class StructuredValidation:
             "detail": self.detail,
             "attempt": self.attempt,
             "raw_head": self.raw_head,
+            "raw_output": self.raw_output,
         }
 
 
@@ -435,7 +439,7 @@ def _validate_structured(
         return StructuredValidation(
             StructuredValidationCode.INVALID_JSON,
             "response does not contain a parseable top-level JSON object",
-            attempt, raw_head,
+            attempt, raw_head, raw_output=output[:20000],
         )
     if not fields:
         # 扫描器定位到了对象 span，但 json.loads 失败（提取返回空 dict）——
@@ -446,26 +450,26 @@ def _validate_structured(
             return StructuredValidation(
                 StructuredValidationCode.INVALID_JSON,
                 "top-level JSON object found but not valid JSON",
-                attempt, raw_head,
+                attempt, raw_head, raw_output=output[:20000],
             )
     if "route" not in fields:
         return StructuredValidation(
             StructuredValidationCode.MISSING_ROUTE,
             f"no top-level \"route\" field (expected one of: {', '.join(routes)})",
-            attempt, raw_head,
+            attempt, raw_head, raw_output=output[:20000],
         )
     route = fields["route"]
     if not isinstance(route, str):
         return StructuredValidation(
             StructuredValidationCode.ROUTE_NOT_STRING,
             f"\"route\" must be a string, got {type(route).__name__}",
-            attempt, raw_head,
+            attempt, raw_head, raw_output=output[:20000],
         )
     if route not in routes:
         return StructuredValidation(
             StructuredValidationCode.UNKNOWN_ROUTE,
             f"route '{route}' not in [{', '.join(routes)}]",
-            attempt, raw_head,
+            attempt, raw_head, raw_output=output[:20000],
         )
     return StructuredValidation(None, attempt=attempt)
 
@@ -485,14 +489,14 @@ def _append_routing_instruction(prompt: str, routes: list[str]) -> str:
     options = ", ".join(f'"{r}"' for r in routes)
     return (
         f"{prompt}\n\n---\n"
-        f"After your response, end with exactly one line containing a single JSON "
-        f"object with a \"route\" field, choosing whichever option best applies: "
-        f'{{"route": "<one of: {options}>"}}. '
-        f"The \"route\" value MUST be exactly one of: {options} — no other value "
-        f"will be accepted. "
+        f"Your final answer must end with exactly one JSON object that contains a "
+        f"\"route\" field. The \"route\" value MUST be exactly one of: {options} "
+        f"— no other value will be accepted. "
         f"If your instructions above already asked for other JSON fields (e.g. a "
-        f"summary), keep them in this same JSON object alongside \"route\" — "
-        f"do not drop them."
+        f"narrative, status, or summary), keep them in this same JSON object "
+        f"alongside \"route\" — do not emit a second, separate JSON object and do "
+        f"not drop those fields. "
+        f'Shape: {{"route": "<one of the values above>", ...other required fields}}.'
     )
 
 
@@ -890,9 +894,16 @@ def make_executor(
         # "invalid request" 且提到 "response_format" 才触发。命中则重建不带
         # response_format 的 harness 重跑一次。任何其它异常原样上抛——绝不
         # 吞掉无关的 provider/model 错误。这与"模型输出验证失败"的一次修正
-        # 重试是两个独立机制，互不消耗。单路由 step 不设 response_format，
-        # 单次运行，行为与从前一致。
-        attempts = (True, False) if is_structured else (False,)
+        # 重试是两个独立机制，互不消耗。
+        #
+        # json_mode 必须显式开启（stage.json_mode: true）。它和通用路由契约
+        # 是对立的：路由指令要求模型在回答末尾追加一个 JSON 对象，也就是允许
+        # 前面有叙事；json_object 却强制整条回复只能是 JSON。DeepSeek 在这种
+        # 冲突下会退化成占位对象、甚至漏掉 route（真实 Story GM 的
+        # missing_route 就是这样产生的）。默认不设置 response_format，让模型
+        # 按提示词输出"叙事 + 最后一个 JSON"，再由确定性验证兜底。
+        json_mode = bool(stage.get("json_mode", False))
+        attempts = (True, False) if is_structured and json_mode else (False,)
         for use_response_format in attempts:
             builder = senza.HarnessBuilder(model).provider("*", provider).env(env)
             for plugin in plugins or []:
