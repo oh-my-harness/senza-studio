@@ -62,7 +62,9 @@ if [ -n "$STUDIO_PIDS" ]; then
 fi
 
 # 杀残留的 vite dev server
-VITE_PIDS=$(pgrep -f "vite" 2>/dev/null || true)
+# 只匹配本仓库 studio_frontend 的 vite 入口，别用裸 "vite"：那会命中任何
+# 命令行里带 vite 的进程（编辑器、其他仓库、甚至 "invite" 这类路径）。
+VITE_PIDS=$(pgrep -f "studio_frontend/node_modules/(\.bin/)?vite" 2>/dev/null || true)
 if [ -n "$VITE_PIDS" ]; then
   echo "  杀死残留 vite: $VITE_PIDS"
   kill $VITE_PIDS 2>/dev/null || true
@@ -136,23 +138,36 @@ if [ ! -d "studio_frontend/node_modules" ]; then
 fi
 
 # ── 启动后端 ────────────────────────────────────────────
+# Provider 网络策略:与 Agent Team Runtime 的 scripts/studio.sh 同一机制——
+# 读取 $SENZA_STUDIO_HOME/provider-network.json(默认 ~/.senza-studio;
+# 仅本仓库包装器使用;Runtime 侧用的是 ~/.harness/agent-team-studio/ 下的
+# 另一份文件,两者不自动同步),
+# 把其中的直连域名追加进子进程的大小写 NO_PROXY(去重、保留原有条目)。
+# 没有该文件时完整继承当前代理环境,行为与从前一致。后端进程里的 reqwest
+# (经 Senza SDK)在构造时快照代理环境,必须在启动前应用,不能运行中改。
+# 注意:provider-network.py 会把 `--` 之后的第一个参数当作可执行程序,
+# 所以环境变量赋值必须全部排在 env 之后——env 的参数位置赋值要求"赋值串
+# 在程序名之前。构造顺序:env → 赋值(MODEL 优先级与从前一致)→ 程序。
+BACKEND_ARGS=(env PYTHONPATH=studio_backend "SENZA_STUDIO_API_TOKEN=$API_TOKEN")
 if [ -n "$MODEL" ]; then
+  BACKEND_ARGS+=("SENZA_STUDIO_MODEL=$MODEL")
   echo "🚀 启动后端 (model=$MODEL 来自环境变量, port=$BACKEND_PORT)..."
-  SENZA_STUDIO_MODEL="$MODEL" PYTHONPATH=studio_backend \
-    SENZA_STUDIO_API_TOKEN="$API_TOKEN" \
-    python -m studio_backend.server &
 else
   echo "🚀 启动后端 (model 由设置面板决定, port=$BACKEND_PORT)..."
-  PYTHONPATH=studio_backend \
-    SENZA_STUDIO_API_TOKEN="$API_TOKEN" \
-    python -m studio_backend.server &
 fi
+BACKEND_ARGS+=(python -m studio_backend.server)
+python3 scripts/provider-network.py -- "${BACKEND_ARGS[@]}" &
 BACKEND_PID=$!
 
 # ── 等待后端就绪 ────────────────────────────────────────
+# 本机就绪探测必须显式绕过代理:curl 的 NO_PROXY 不支持 "127.*" 这种通配
+# 写法(只认精确 IP/主机名或单独的 "*"),所以用户设了 http_proxy 且
+# NO_PROXY 里只有 127.* 时,发往 127.0.0.1:7878 的请求仍会走代理。代理
+# 又回不到本机服务,脚本就会在后端已经监听的情况下误报启动超时。
+# --noproxy '*' 只影响这两次探测,不改 provider-network 的模型网络配置。
 echo "⏳ 等待后端就绪..."
 for i in $(seq 1 15); do
-  if curl -sf "http://127.0.0.1:$BACKEND_PORT/api/health" >/dev/null 2>&1; then
+  if curl --noproxy '*' -sf "http://127.0.0.1:$BACKEND_PORT/api/health" >/dev/null 2>&1; then
     echo "✅ 后端就绪"
     break
   fi
@@ -170,7 +185,7 @@ cd ..
 # ── 等待前端就绪 ────────────────────────────────────────
 echo "⏳ 等待前端就绪..."
 for i in $(seq 1 15); do
-  if curl -sf "http://localhost:$FRONTEND_PORT/" >/dev/null 2>&1; then
+  if curl --noproxy '*' -sf "http://localhost:$FRONTEND_PORT/" >/dev/null 2>&1; then
     echo "✅ 前端就绪"
     break
   fi
