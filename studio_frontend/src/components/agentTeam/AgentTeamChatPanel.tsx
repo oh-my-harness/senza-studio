@@ -44,6 +44,8 @@ export default function AgentTeamChatPanel({
   onRestartTeam,
   onDeleteTeam,
   onAbort,
+  onStopWorkflow,
+  stopSupported,
   onSendMessage,
 }: {
   selectedTeam: { id: string };
@@ -69,6 +71,8 @@ export default function AgentTeamChatPanel({
   onRestartTeam: (teamId: string) => void;
   onDeleteTeam: (teamId: string) => void;
   onAbort: () => void;
+  onStopWorkflow: () => void;
+  stopSupported: boolean | null;
   onSendMessage: () => void;
 }) {
   return (
@@ -184,8 +188,30 @@ export default function AgentTeamChatPanel({
         </button>
         <button
           type="button"
+          data-testid="agent-team-stop-workflow"
+          onClick={onStopWorkflow}
+          disabled={
+            stopSupported === false ||
+            busyAction === "abort" ||
+            busyAction === `stop:${selectedTeam.id}`
+          }
+          aria-label="停止工作流"
+          title={
+            stopSupported === false
+              ? "当前 Agent Team Runtime 不支持停止工作流，请升级 Runtime"
+              : "终止受控工作流。团队、会话与已有证据保留；不能从原执行点恢复。"
+          }
+          className="flex h-8 items-center rounded-lg border border-amber-200 px-2 text-xs text-amber-700 hover:bg-amber-50 disabled:opacity-40"
+        >
+          {busyAction === `stop:${selectedTeam.id}` ? "停止中…" : "停止工作流"}
+        </button>
+        <button
+          type="button"
           onClick={onAbort}
-          disabled={busyAction === "abort"}
+          disabled={
+            busyAction === "abort" ||
+            busyAction === `stop:${selectedTeam.id}`
+          }
           aria-label="打断 Agent"
           title={activeConversation === "team" ? "打断所有成员" : "打断当前 Agent"}
           className="flex h-8 w-8 items-center justify-center rounded-lg border border-red-200 text-sm text-red-600 hover:bg-red-50 disabled:opacity-40"

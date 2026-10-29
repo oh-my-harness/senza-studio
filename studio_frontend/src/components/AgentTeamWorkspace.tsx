@@ -78,6 +78,8 @@ export default function AgentTeamWorkspace() {
     selectTeam,
     selectConversation,
     abortActive,
+    stopWorkflow,
+    stopSupported,
     createTeam,
     saveSettings,
     restartTeam,
@@ -237,6 +239,8 @@ export default function AgentTeamWorkspace() {
                   onRestartTeam={restartTeam}
                   onDeleteTeam={deleteTeam}
                   onAbort={abortActive}
+                  onStopWorkflow={stopWorkflow}
+                  stopSupported={stopSupported}
                   onSendMessage={() => void sendMessage()}
                 />
               ) : (
@@ -266,6 +270,7 @@ export default function AgentTeamWorkspace() {
       <AgentTeamNewTeamModal
         open={showNewTeamModal}
         error={actionError ?? loadError}
+        notice={actionError || loadError ? null : actionNotice}
         newTeamId={newTeamId}
         setNewTeamId={setNewTeamId}
         newTeamName={newTeamName}

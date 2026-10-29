@@ -248,3 +248,96 @@ def test_real_runtime_http_and_event_contract(tmp_path):
         assert token not in projects.text
     assert token not in templates.text
     _reset_state()
+
+
+def test_real_runtime_workspace_grant_and_stop_capability(tmp_path):
+    """Grant lifecycle plus stop-route capability against the real binary."""
+    _reset_state()
+    with real_runtime(tmp_path) as descriptor_path:
+        config = StudioConfig(
+            home_dir=str(tmp_path / "studio-home"),
+            model="test-model",
+            api_key="test-key",
+            api_base="",
+            agent_team_descriptor=str(descriptor_path),
+            api_token=STUDIO_TOKEN,
+        )
+        app = create_app(config)
+        workspace = tmp_path / "workspace"
+        workspace.mkdir()
+        subprocess.run(
+            ["git", "init", "-q", str(workspace)],
+            check=True,
+            capture_output=True,
+        )
+        with TestClient(
+            app,
+            headers={"Authorization": f"Bearer {STUDIO_TOKEN}"},
+        ) as client:
+            grants = client.get("/api/team/fs/grants")
+            assert grants.status_code == 200
+            assert grants.json() == {"grants": []}
+
+            denied = client.post(
+                "/api/team/projects",
+                json={"id": "granted-team", "repo_path": str(workspace)},
+            )
+            assert denied.status_code == 403, denied.text
+            assert "workspace is not authorized" in denied.json()["error"]
+
+            granted = client.post(
+                "/api/team/fs/grants",
+                json={"path": str(workspace)},
+            )
+            assert granted.status_code == 201, granted.text
+            assert granted.json()["path"]
+
+            duplicate = client.post(
+                "/api/team/fs/grants",
+                json={"path": str(workspace)},
+            )
+            assert duplicate.status_code == 400, duplicate.text
+
+            # GET on the stop route is 405 when the runtime implements it and
+            # 404 on the older pin.
+            capability = client.get("/api/team/workflow/stop")
+            assert capability.status_code in (200, 404, 405), capability.text
+            route_present = capability.status_code != 404
+            if route_present:
+                missing = client.post(
+                    "/api/team/workflow/stop?project=missing"
+                )
+                assert missing.status_code == 404
+                assert "unknown project" in missing.text
+
+            configured = client.post(
+                "/api/team/settings",
+                json={
+                    "strong": "contract-model",
+                    "main": "contract-model",
+                    "cheap": "contract-model",
+                    "scout_interval_secs": 0,
+                    "base_url": "http://127.0.0.1:9",
+                    "api_key": "runtime-contract-key",
+                },
+            )
+            assert configured.status_code == 200, configured.text
+
+            created = client.post(
+                "/api/team/projects",
+                json={"id": "granted-team", "repo_path": str(workspace)},
+            )
+            assert created.status_code == 201, created.text
+
+            stopped = client.post(
+                "/api/team/workflow/stop?project=granted-team"
+            )
+            if route_present:
+                assert stopped.status_code == 409, stopped.text
+                assert "not a controlled workflow" in stopped.json()["error"]
+            else:
+                assert stopped.status_code == 404, stopped.text
+
+            deleted = client.delete("/api/team/projects?id=granted-team")
+            assert deleted.status_code == 200, deleted.text
+    _reset_state()

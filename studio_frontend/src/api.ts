@@ -40,20 +40,86 @@ async function fetchJson<T>(url: string, init?: RequestInit): Promise<T> {
   return r.json();
 }
 
+export interface ApiErrorInfo {
+  status: number | null;
+  message: string;
+}
+
+/** Split fetchJson's `${status}: ${body}` error into status + human message. */
+export function apiErrorInfo(error: unknown): ApiErrorInfo {
+  const message = error instanceof Error ? error.message : String(error);
+  const match = /^(\d{3}):\s*([\s\S]*)$/.exec(message);
+  if (!match) return { status: null, message };
+  const body = match[2].trim();
+  if (body) {
+    try {
+      const parsed: unknown = JSON.parse(body);
+      if (
+        parsed &&
+        typeof parsed === "object" &&
+        "error" in parsed &&
+        typeof parsed.error === "string" &&
+        parsed.error.trim()
+      ) {
+        return { status: Number(match[1]), message: parsed.error };
+      }
+    } catch {
+      // Non-JSON upstream body (for example an axum 404 page): use it as-is.
+    }
+    return { status: Number(match[1]), message: body };
+  }
+  return { status: Number(match[1]), message: `HTTP ${match[1]}` };
+}
+
+export function apiErrorMessage(error: unknown): string {
+  return apiErrorInfo(error).message;
+}
+
+export interface CreateAgentTeamInput {
+  id: string;
+  name?: string;
+  template_id?: string;
+  repo_path?: string;
+}
+
+export interface WorkflowStopResult {
+  ok: boolean;
+  workflow_id: string;
+  phase: string;
+  terminal_reason: string | null;
+}
+
 export const api = {
   listAgentTeams: () =>
     fetchJson<{ projects: AgentTeamProject[] }>(`${BASE}/team/projects`),
-  createAgentTeam: (input: {
-    id: string;
-    name?: string;
-    template_id?: string;
-    repo_path?: string;
-  }) =>
+  createAgentTeam: (input: CreateAgentTeamInput) =>
     fetchJson<{ ok: boolean }>(`${BASE}/team/projects`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(input),
     }),
+  addAgentTeamWorkspaceGrant: (path: string) =>
+    fetchJson<{ id: string; path: string; label: string | null; created_at: string }>(
+      `${BASE}/team/fs/grants`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ path }),
+      }
+    ),
+  stopAgentTeamWorkflow: (project: string) =>
+    fetchJson<WorkflowStopResult>(
+      `${BASE}/team/workflow/stop?project=${encodeURIComponent(project)}`,
+      { method: "POST" }
+    ),
+  /** A GET on the stop route is 405 when it exists and 404 on older runtimes. */
+  probeAgentTeamWorkflowStop: async () => {
+    await initializeAuthentication();
+    const response = await fetch(`${BASE}/team/workflow/stop`, {
+      credentials: "same-origin",
+    });
+    return response.status === 405 || response.status === 200;
+  },
   restartAgentTeam: (id: string) =>
     fetchJson<{ ok: boolean }>(
       `${BASE}/team/projects/restart?id=${encodeURIComponent(id)}`,

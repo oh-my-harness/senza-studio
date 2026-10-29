@@ -1,5 +1,12 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { api } from "../api";
+import { api, apiErrorMessage } from "../api";
+import { createTeamWithWorkspaceConsent } from "../agentTeamWorkspaceGrant";
+import {
+  classifyWorkflowStopError,
+  isNeutralStopOutcome,
+  workflowStopNotice,
+  type WorkflowStopOutcome,
+} from "../agentTeamWorkflowStop";
 import {
   chatMessagesForConversation,
   isAgentTeamChatMessage,
@@ -64,6 +71,7 @@ export function useAgentTeamWorkspace() {
   const [actionError, setActionError] = useState<string | null>(null);
   const [actionNotice, setActionNotice] = useState<string | null>(null);
   const [busyAction, setBusyAction] = useState<string | null>(null);
+  const [stopSupported, setStopSupported] = useState<boolean | null>(null);
   const [newTeamId, setNewTeamId] = useState("");
   const [newTeamName, setNewTeamName] = useState("");
   const [newTeamTemplate, setNewTeamTemplate] = useState("");
@@ -141,6 +149,21 @@ export function useAgentTeamWorkspace() {
     void loadTeams();
     void loadSettings();
   }, [loadTeams, loadSettings]);
+
+  useEffect(() => {
+    let cancelled = false;
+    void api
+      .probeAgentTeamWorkflowStop()
+      .then((supported) => {
+        if (!cancelled) setStopSupported(supported);
+      })
+      .catch(() => {
+        if (!cancelled) setStopSupported(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   useEffect(() => {
     const interval = window.setInterval(() => {
@@ -326,6 +349,55 @@ export function useAgentTeamWorkspace() {
     }
   }, [selectedTeam, activeConversation, loadPulse]);
 
+  const stopWorkflow = useCallback(async () => {
+    if (!selectedTeam) return;
+    const confirmed = window.confirm(
+      `停止 ${selectedTeam.id} 的受控工作流？团队、会话和已有证据会保留；` +
+        "停止后不能从原执行点继续，需要开始新的工作流。"
+    );
+    if (!confirmed) return;
+    const teamId = selectedTeam.id;
+    setBusyAction(`stop:${teamId}`);
+    let outcome: WorkflowStopOutcome = {
+      kind: "failed",
+      message: "停止工作流失败",
+    };
+    try {
+      const result = await api.stopAgentTeamWorkflow(teamId);
+      outcome = { kind: "stopped", result };
+    } catch (error) {
+      outcome = classifyWorkflowStopError(error);
+    }
+    try {
+      if (isNeutralStopOutcome(outcome)) {
+        setActionError(null);
+        setActionNotice(workflowStopNotice(outcome));
+        if (outcome.kind === "missing") {
+          await loadTeams();
+        } else {
+          await loadPulse(teamId);
+        }
+      } else if (outcome.kind === "failed" || outcome.kind === "unsupported") {
+        setActionError(workflowStopNotice(outcome));
+      } else {
+        setActionError(null);
+        setActionNotice(workflowStopNotice(outcome));
+        await loadPulse(teamId);
+        if (activeConversation === TEAM_CONVERSATION_ID) {
+          await loadChatHistory(teamId, TEAM_CONVERSATION_ID);
+        }
+      }
+    } finally {
+      setBusyAction(null);
+    }
+  }, [
+    activeConversation,
+    loadChatHistory,
+    loadPulse,
+    loadTeams,
+    selectedTeam,
+  ]);
+
   const createTeam = useCallback(async () => {
     const id = newTeamId.trim();
     if (!TEAM_ID_PATTERN.test(id)) {
@@ -334,12 +406,24 @@ export function useAgentTeamWorkspace() {
     }
     setBusyAction("create");
     try {
-      await api.createAgentTeam({
-        id,
-        name: newTeamName.trim() || undefined,
-        template_id: newTeamTemplate || undefined,
-        repo_path: newTeamRepo.trim() || undefined,
-      });
+      const outcome = await createTeamWithWorkspaceConsent(
+        {
+          id,
+          name: newTeamName.trim() || undefined,
+          template_id: newTeamTemplate || undefined,
+          repo_path: newTeamRepo.trim() || undefined,
+        },
+        {
+          createTeam: (input) => api.createAgentTeam(input),
+          addGrant: (path) => api.addAgentTeamWorkspaceGrant(path),
+          confirm: (message) => window.confirm(message),
+        }
+      );
+      if (outcome === "cancelled") {
+        setActionError(null);
+        setActionNotice("已取消：工作区未授权，团队未创建。表单内容已保留。");
+        return;
+      }
       setNewTeamId("");
       setNewTeamName("");
       setNewTeamRepo("");
@@ -348,8 +432,9 @@ export function useAgentTeamWorkspace() {
       setSelectedTeamId(id);
       setActiveConversation(TEAM_CONVERSATION_ID);
       setActionError(null);
+      setActionNotice(null);
     } catch (error) {
-      setActionError(error instanceof Error ? error.message : String(error));
+      setActionError(apiErrorMessage(error));
     } finally {
       setBusyAction(null);
     }
@@ -602,6 +687,8 @@ export function useAgentTeamWorkspace() {
     selectTeam,
     selectConversation,
     abortActive,
+    stopWorkflow,
+    stopSupported,
     createTeam,
     saveSettings,
     restartTeam,
