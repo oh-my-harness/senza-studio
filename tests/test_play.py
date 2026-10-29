@@ -2710,7 +2710,8 @@ def _setup_executor(monkeypatch, fake_run, routes, outputs=None, seen_formats=No
     monkeypatch.setattr(play, "_run_agent_step", fake_run)
     engine = FakeEngine()
     executor = make_executor(
-        {"evaluate": {"name": "evaluate", "type": "agent", "prompt_template": "e"}},
+        {"evaluate": {"name": "evaluate", "type": "agent", "prompt_template": "e",
+                      "json_mode": True}},
         routes, "m", provider=None, env=None, engine_ref={"engine": engine},
     )
     return executor, engine
@@ -2738,6 +2739,64 @@ def test_append_validation_feedback_wraps_detail():
     out = _append_validation_feedback("base prompt", "route 'x' not in [a, b]")
     assert out.startswith("base prompt")
     assert "route 'x' not in [a, b]" in out
+
+
+def test_validation_failure_retains_full_raw_output():
+    """失败诊断不能只有前 200 字符：真实 Story GM 的 missing_route 需要看到
+    模型到底写了哪个 JSON 对象、route 是不是被截断在后面。"""
+    raw = '{"status": "FINISH", "narrative": "' + ("x" * 300) + '"}'
+    fields, _ = _extract_json_fields(raw)
+    v = _validate_structured(fields, raw, ["OUTCOME_PROPOSAL", "ERROR"], 1)
+    assert v.code is StructuredValidationCode.MISSING_ROUTE
+    payload = v.to_dict()
+    assert payload["raw_output"] == raw
+    assert payload["raw_head"] == raw[:200]
+    assert len(payload["raw_output"]) > len(payload["raw_head"])
+
+
+def test_validation_raw_output_is_bounded():
+    """诊断只保留前 20000 字符：足够定位问题，又不会把整段模型输出送进
+    WebSocket/Inspector（也不落盘）。"""
+    raw = '{"narrative": "' + ("x" * 25000) + '"}'
+    fields, _ = _extract_json_fields(raw)
+    v = _validate_structured(fields, raw, ["OUTCOME_PROPOSAL"], 1)
+    assert v.code is StructuredValidationCode.MISSING_ROUTE
+    assert len(v.to_dict()["raw_output"]) == 20000
+
+
+def test_structured_step_defaults_to_no_response_format(monkeypatch):
+    """默认不强制 json_object：通用路由指令允许"叙事 + 末尾 JSON"，而
+    json_object 要求整条回复只能是 JSON。DeepSeek 在两者冲突时会漏 route。"""
+    seen = []
+
+    class FakeBuilder:
+        def provider(self, *a, **k):
+            return self
+
+        def env(self, *a, **k):
+            return self
+
+        def response_format(self, fmt):
+            seen.append(True)
+            return self
+
+        def build(self):
+            return _FakeHarness(("evaluate", False))
+
+    monkeypatch.setattr(play.senza, "HarnessBuilder", lambda model: FakeBuilder())
+    monkeypatch.setattr(
+        play, "_run_agent_step",
+        lambda harness, prompt, emit: ('{"route": "sufficient"}', 0),
+    )
+    engine = FakeEngine()
+    executor = make_executor(
+        {"evaluate": {"name": "evaluate", "type": "agent", "prompt_template": "e"}},
+        _ROUTES, "m", provider=None, env=None, engine_ref={"engine": engine},
+    )
+    result = executor({"step_id": "evaluate", "context": {}, "emit": None})
+    assert seen == []  # 未声明 json_mode → 不设 response_format
+    assert result["structured"]["route_key"] == "sufficient"
+    assert "_validation" not in result["structured"]
 
 
 def test_executor_validation_ok_writes_fields_and_route(monkeypatch):
@@ -2866,6 +2925,7 @@ def test_validation_failure_writes_nothing_to_shared_context(monkeypatch):
     assert result["structured"]["fields"] == {}
     assert result["structured"]["route_key"] == "error"
     assert result["structured"]["_validation"]["raw_head"] == raw[:200]
+    assert result["structured"]["_validation"]["raw_output"] == raw
 
 
 def _make_shared_context_engine():

@@ -62,7 +62,7 @@ export default function AgentTeamSidebar({
   onOpenMembers: () => void;
 }) {
   return (
-    <aside className="flex w-72 min-w-0 flex-col border-r border-gray-200 bg-[#F7F7F7]">
+    <aside className="flex h-full min-h-0 w-full min-w-0 flex-col bg-[#F7F7F7]">
       <div className="flex items-center gap-2 border-b border-gray-200 px-3 py-2">
         <select
           value={selectedTeamId ?? ""}

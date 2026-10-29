@@ -80,6 +80,7 @@ interface StudioStore {
       route?: string;
       debug?: Record<string, unknown> | null;
       fields?: Record<string, unknown> | null;
+      validation?: Record<string, unknown> | null;
     }
   ) => void;
   failRunningSteps: () => void;
@@ -233,10 +234,11 @@ export const useStudioStore = create<StudioStore>((set) => ({
           ? {
               ...c,
               status: "done",
-              text: output ?? c.text,
+              text: output?.trim() ? output : c.text,
               route: extra?.route,
               debug: extra?.debug,
               fields: extra?.fields,
+              validation: extra?.validation,
             }
           : c
       ),
@@ -255,4 +257,5 @@ export const useStudioStore = create<StudioStore>((set) => ({
         ),
       };
     }),
+
 }));

@@ -13,6 +13,8 @@ export interface AgentInput {
   label: string;
   placeholder: string;
   multiline: boolean;
+  /** 作者在 ui.inputs 里写的字符串默认值；只是预填，首轮仍然必填。 */
+  default?: string;
 }
 
 /** 停下来问人时的一个选项。value 是 next_on_<value> 的路由名，label 是给
@@ -39,6 +41,7 @@ export interface AgentInfo {
   /** 整体形态。后端回的永远是**最终生效的那个**（作者写的，或按流程形态
    *  猜的）——前端不该也去猜一遍，那就又是两份实现了。 */
   layout: string;
+  conversation?: import("./conversation").ConversationConfig;
   theme: AgentTheme;
   inputs: AgentInput[];
   steps: Record<string, AgentStep>;

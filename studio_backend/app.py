@@ -623,9 +623,13 @@ def create_app(config: StudioConfig | None = None) -> FastAPI:
                         # 前端就该退回 spec_ready 去改 spec，而不是留在 Play
                         # 视图里等一个永远不会来的结果。
                         state["play_session"] = None
-                        await websocket.send_json(
-                            {"type": "error", "message": f"无法启动 Play: {exc}"}
-                        )
+                        failure = {"type": "error", "message": f"无法启动 Play: {exc}"}
+                        # Conversation sessions retain history and allow retry even
+                        # when construction fails before the first step event.
+                        if state["spec"].get_current_spec().get("ui", {}).get("layout") == "conversation":
+                            failure["source"] = "play"
+                            failure["terminal"] = True
+                        await websocket.send_json(failure)
                         continue
                     play_task = asyncio.create_task(
                         run_play_streaming(websocket, play_session, project)
