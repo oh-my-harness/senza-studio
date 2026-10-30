@@ -59,6 +59,10 @@
       {
         "from": "../build/desktop-resources",
         "to": "."
+      },
+      {
+        "from": "build/icon.png",
+        "to": "icon.png"
       }
     ],
     "linux": {
