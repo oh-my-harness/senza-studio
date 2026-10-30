@@ -165,6 +165,14 @@ export function useProjectSocket(projectId: string | null) {
         if (event.spec) setRuntimeSpec(event.spec);
       } else if (event.type === "spec_updated") {
         if (event.spec) setSpec(event.spec);
+        if (event.saved === false) {
+          addLog("error", "spec 只更新到内存，保存失败；刷新会丢失本次修改");
+        }
+      } else if (event.type === "spec_save_failed") {
+        addLog(
+          "error",
+          String(event.message ?? "spec 保存失败；刷新会丢失本次修改")
+        );
       } else if (event.type === "session_switched") {
         const sid = event.session_id as string;
         setActiveSession(sid);

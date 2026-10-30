@@ -22,6 +22,7 @@ import os
 from pathlib import Path
 
 from .config import StudioConfig
+from .storage import atomic_write_text, quarantine_file
 
 # 设置面板左侧导航的分区说明（key 对应字段的 group）。加新分区时在这里
 # 加一条说明、在 SETTINGS_SCHEMA 里加对应 group 的字段即可，前端不用改。
@@ -140,12 +141,36 @@ def save_settings(config: StudioConfig, values: dict[str, str]) -> dict[str, str
 
     path = settings_path(config)
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(current, indent=2, ensure_ascii=False), encoding="utf-8")
-    # 含密钥，只给当前用户读写
-    try:
-        path.chmod(0o600)
-    except OSError:
-        pass
+
+    # load_settings 对损坏文件返回 {}。如果直接写回，旧的密钥/配置会被本次
+    # 提交的字段静默覆盖。先把原始字节隔离，再在空基础上合并。
+    if path.exists():
+        try:
+            raw = json.loads(path.read_text(encoding="utf-8"))
+            if not isinstance(raw, dict):
+                raise ValueError("settings.json is not an object")
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError, ValueError) as exc:
+            quarantined = quarantine_file(
+                path, reason=f"invalid settings: {exc}"
+            )
+            if quarantined is None:
+                if path.exists():
+                    raise OSError(
+                        f"settings.json is invalid and could not be quarantined: {path}"
+                    ) from exc
+            else:
+                # 不要让“保存一两个字段”顺手把原有密钥变成静默丢失。
+                # 原始字节已隔离；让调用方看到失败，用户确认后重试即可。
+                raise OSError(
+                    "settings.json 已损坏，原始文件已隔离到 "
+                    f"{quarantined}；请重新确认并保存设置"
+                ) from exc
+
+    atomic_write_text(
+        path,
+        json.dumps(current, indent=2, ensure_ascii=False),
+        mode=0o600,
+    )
     return current
 
 

@@ -65,6 +65,8 @@ export default function AgentUiPanel({ projectId }: { projectId: string }) {
   const [draft, setDraft] = useState<Draft | null>(null);
   const [saved, setSaved] = useState<Draft | null>(null);
   const [effectiveLayout, setEffectiveLayout] = useState("form");
+  const [saving, setSaving] = useState(false);
+  const [saveError, setSaveError] = useState<string | null>(null);
 
   useEffect(() => {
     let alive = true;
@@ -102,7 +104,7 @@ export default function AgentUiPanel({ projectId }: { projectId: string }) {
       inputs: { ...draft.inputs, [name]: { ...draft.inputs[name], ...fields } },
     });
 
-  const save = () => {
+  const save = async () => {
     const ui: Record<string, unknown> = {};
     // 和项目名相同就不写进 spec——那本来就是兜底值，写进去只会在改项目名时
     // 留下一个对不上的旧标题。
@@ -136,9 +138,22 @@ export default function AgentUiPanel({ projectId }: { projectId: string }) {
     const next = { ...spec };
     if (Object.keys(ui).length > 0) next.ui = ui;
     else delete next.ui;
-    setSpec(next);
-    api.updateSpec(projectId, next).catch(console.error);
-    setSaved(draft);
+    setSaving(true);
+    setSaveError(null);
+    try {
+      const result = await api.updateSpec(projectId, next);
+      // 只有磁盘确认成功后才替换内存 spec / 标记已保存。失败时保留 dirty，
+      // 用户能看到未保存状态并重试。
+      setSpec(next);
+      setSaved(draft);
+      if (result.applied === false) {
+        setSaveError(result.warning ?? "spec 已保存，但运行时未成功应用");
+      }
+    } catch (e) {
+      setSaveError(`保存失败：${String(e)}`);
+    } finally {
+      setSaving(false);
+    }
   };
 
   const inputClass =
@@ -307,12 +322,17 @@ export default function AgentUiPanel({ projectId }: { projectId: string }) {
       </div>
 
       <div className="shrink-0 border-t border-gray-200 p-4">
+        {saveError && (
+          <p role="alert" className="mb-2 text-xs text-red-600 break-words">
+            {saveError}
+          </p>
+        )}
         <button
           onClick={save}
-          disabled={!dirty}
+          disabled={!dirty || saving}
           className="w-full rounded-lg bg-blue-500 px-3 py-1.5 text-sm text-white hover:bg-blue-600 disabled:cursor-not-allowed disabled:opacity-50"
         >
-          保存
+          {saving ? "保存中…" : "保存"}
         </button>
       </div>
     </div>

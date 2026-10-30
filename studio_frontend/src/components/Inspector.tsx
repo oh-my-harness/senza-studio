@@ -128,6 +128,8 @@ export default function Inspector({ projectId }: { projectId: string }) {
   // 编辑先落在本地草稿里，不直接改 spec——只有点了 Save 才提交。切换选中
   // 节点时用该节点当前已保存的值重置草稿（未保存的编辑不跨节点带过去）。
   const [draft, setDraft] = useState<Step | null>(selectedStep);
+  const [saving, setSaving] = useState(false);
+  const [saveError, setSaveError] = useState<string | null>(null);
   useEffect(() => {
     setDraft(selectedStep);
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -180,11 +182,23 @@ export default function Inspector({ projectId }: { projectId: string }) {
     );
   };
 
-  const save = () => {
+  const save = async () => {
     const newStages = spec.stages.map((s) => (s.name === draft.name ? draft : s));
     const newSpec = { ...spec, stages: newStages };
-    setSpec(newSpec);
-    api.updateSpec(projectId, newSpec).catch(console.error);
+    setSaving(true);
+    setSaveError(null);
+    try {
+      const result = await api.updateSpec(projectId, newSpec);
+      // 磁盘成功后才更新 store；失败时 draft 保持 dirty，用户可重试。
+      setSpec(newSpec);
+      if (result.applied === false) {
+        setSaveError(result.warning ?? "spec 已保存，但运行时未成功应用");
+      }
+    } catch (e) {
+      setSaveError(`保存失败：${String(e)}`);
+    } finally {
+      setSaving(false);
+    }
   };
 
   const reset = () => setDraft(selectedStep);
@@ -322,21 +336,28 @@ export default function Inspector({ projectId }: { projectId: string }) {
         )}
         </div>
       </div>
-      <div className="flex gap-2 p-4 border-t border-gray-200 shrink-0">
-        <button
-          onClick={save}
-          disabled={!isDirty}
-          className="flex-1 rounded-lg bg-blue-500 px-3 py-1.5 text-sm text-white hover:bg-blue-600 disabled:opacity-50 disabled:cursor-not-allowed"
-        >
-          保存
-        </button>
-        <button
-          onClick={reset}
-          disabled={!isDirty}
-          className="flex-1 rounded-lg border border-gray-300 px-3 py-1.5 text-sm text-gray-600 hover:bg-gray-100 disabled:opacity-50 disabled:cursor-not-allowed"
-        >
-          重置
-        </button>
+      <div className="shrink-0 border-t border-gray-200 p-4">
+        {saveError && (
+          <p role="alert" className="mb-2 text-xs text-red-600 break-words">
+            {saveError}
+          </p>
+        )}
+        <div className="flex gap-2">
+          <button
+            onClick={save}
+            disabled={!isDirty || saving}
+            className="flex-1 rounded-lg bg-blue-500 px-3 py-1.5 text-sm text-white hover:bg-blue-600 disabled:opacity-50 disabled:cursor-not-allowed"
+          >
+            {saving ? "保存中…" : "保存"}
+          </button>
+          <button
+            onClick={reset}
+            disabled={!isDirty}
+            className="flex-1 rounded-lg border border-gray-300 px-3 py-1.5 text-sm text-gray-600 hover:bg-gray-100 disabled:opacity-50 disabled:cursor-not-allowed"
+          >
+            重置
+          </button>
+        </div>
       </div>
     </div>
   );

@@ -1,14 +1,23 @@
 """项目管理：创建/打开/列出项目，meta.json 维护。"""
 from __future__ import annotations
 
+import copy
 import json
 import secrets
 import shutil
+import sys
 import time
 from pathlib import Path
 
+import yaml
+
 from .config import StudioConfig
-from .spec import Spec
+from .spec import Spec, SpecError
+from .storage import atomic_write_text
+
+
+class ProjectDataError(Exception):
+    """项目文件存在但内容损坏/不可解析；绝不自动重建用户数据。"""
 
 
 def _utc_now() -> str:
@@ -184,7 +193,7 @@ class Project:
 
         # 初始空 spec
         spec = Spec()
-        (path / "pipeline.yaml").write_text(spec.to_yaml(), encoding="utf-8")
+        atomic_write_text(path / "pipeline.yaml", spec.to_yaml())
 
         proj = cls(config, meta, path)
         proj._save_meta()
@@ -198,7 +207,16 @@ class Project:
         meta_path = path / ".studio" / "meta.json"
         if not meta_path.exists():
             raise FileNotFoundError(f"project {project_id} not found")
-        meta = json.loads(meta_path.read_text(encoding="utf-8"))
+        try:
+            meta = json.loads(meta_path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise ProjectDataError(
+                f"项目元数据损坏，未自动重建：{meta_path} ({exc})"
+            ) from exc
+        if not isinstance(meta, dict):
+            raise ProjectDataError(f"项目元数据格式无效：{meta_path}")
+        if meta.get("id") not in (None, project_id):
+            raise ProjectDataError(f"项目元数据 id 不匹配：{meta_path}")
         return cls(config, meta, path)
 
     @classmethod
@@ -219,39 +237,108 @@ class Project:
         result = []
         for p in sorted(projects_dir.iterdir()):
             meta_path = p / ".studio" / "meta.json"
-            if meta_path.exists():
+            if not meta_path.exists():
+                continue
+            try:
                 meta = json.loads(meta_path.read_text(encoding="utf-8"))
-                result.append(meta)
+                if not isinstance(meta, dict):
+                    raise ValueError("meta.json is not an object")
+                if meta.get("id") not in (None, p.name):
+                    raise ValueError("meta.json id does not match directory")
+            except (OSError, UnicodeDecodeError, json.JSONDecodeError, ValueError) as exc:
+                # 一个损坏项目不能拖垮整个项目列表；原始文件保持原样，
+                # 记录路径供用户手工修复。
+                print(
+                    f"skipping corrupt project meta {meta_path}: {exc}",
+                    file=sys.stderr,
+                )
+                continue
+            result.append(meta)
         return result
 
     # ── Spec 持久化 ───────────────────────────────────────
 
     def save_spec(self, spec: Spec) -> None:
         yaml_path = self.path / "pipeline.yaml"
-        yaml_path.write_text(spec.to_yaml(), encoding="utf-8")
+        # pipeline.yaml 的 replace 是提交点。meta.updated_at 没有业务消费者，
+        # 它失败不应把已经安全落盘的 spec 报成失败。
+        atomic_write_text(yaml_path, spec.to_yaml())
         self.meta["updated_at"] = _utc_now()
-        self._save_meta()
+        try:
+            self._save_meta()
+        except Exception as exc:  # noqa: BLE001
+            print(f"warning: spec saved but meta.json update failed: {exc}", file=sys.stderr)
 
     def load_spec(self) -> Spec:
         yaml_path = self.path / "pipeline.yaml"
         if not yaml_path.exists():
             return Spec()
-        return Spec.from_yaml(yaml_path.read_text(encoding="utf-8"))
+        try:
+            text = yaml_path.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError) as exc:
+            raise ProjectDataError(f"pipeline.yaml 不可读：{exc}") from exc
+        if not text.strip():
+            raise ProjectDataError("pipeline.yaml 为空；拒绝当作空 spec 打开")
+        try:
+            raw = yaml.safe_load(text)
+        except yaml.YAMLError as exc:
+            raise ProjectDataError(f"pipeline.yaml 解析失败：{exc}") from exc
+        # 必须在 Spec.from_yaml()/Spec() 默认化之前看原始结构。Spec 会把
+        # 缺失的 stages 补成 []，那份宽容只适合作者显式写出 `stages: []`
+        # 的项目；`null`、只有注释、顶层不是 mapping、缺字段或 stages 畸形
+        # 都意味着文件损坏，不能静默当成空项目再被下一次保存覆盖。
+        if raw is None:
+            raise ProjectDataError("pipeline.yaml 是 null/只有注释；拒绝当作空 spec 打开")
+        if not isinstance(raw, dict):
+            raise ProjectDataError("pipeline.yaml 顶层必须是 mapping")
+        if "stages" not in raw:
+            raise ProjectDataError("pipeline.yaml 缺少 stages 字段")
+        stages = raw.get("stages")
+        if not isinstance(stages, list):
+            raise ProjectDataError("pipeline.yaml 的 stages 必须是 list")
+        if any(not isinstance(stage, dict) for stage in stages):
+            raise ProjectDataError("pipeline.yaml 的每个 stage 必须是 mapping")
+        try:
+            return Spec(raw)
+        except (SpecError, TypeError, ValueError) as exc:
+            raise ProjectDataError(f"pipeline.yaml 解析失败：{exc}") from exc
 
     # ── Session 管理 ──────────────────────────────────────
 
+    def new_session_id(self) -> str:
+        """只生成 id，不写 meta/目录。调用方准备成功后再 commit_session()。"""
+        return _gen_id("sess")
+
+    def commit_session(self, session_id: str, *, add: bool) -> None:
+        """原子提交 sessions/active_session，并把 meta 写盘。
+
+        先在内存副本上改，写盘成功后才替换 self.meta；写失败则恢复旧
+        meta。这样调用方可以在“目录/harness 已准备好”之后才调用它，
+        失败时旧 session 和旧 meta 仍然一致。
+        """
+        old_meta = copy.deepcopy(self.meta)
+        try:
+            sessions = self.meta.setdefault("sessions", [])
+            if add and session_id not in sessions:
+                sessions.append(session_id)
+            if session_id not in sessions:
+                raise ValueError(f"session {session_id} not found")
+            self.meta["active_session"] = session_id
+            self._save_meta()
+        except BaseException:
+            # 保留 meta 对象身份：调用方/测试可能持有 project.meta 引用，
+            # 回滚时不能只替换属性。
+            self.meta.clear()
+            self.meta.update(old_meta)
+            raise
+
     def create_session(self) -> str:
-        sid = _gen_id("sess")
-        self.meta.setdefault("sessions", []).append(sid)
-        self.meta["active_session"] = sid
-        self._save_meta()
+        sid = self.new_session_id()
+        self.commit_session(sid, add=True)
         return sid
 
     def set_active_session(self, session_id: str) -> None:
-        if session_id not in self.meta.get("sessions", []):
-            raise ValueError(f"session {session_id} not found")
-        self.meta["active_session"] = session_id
-        self._save_meta()
+        self.commit_session(session_id, add=False)
 
     @property
     def sessions_dir(self) -> Path:
@@ -261,7 +348,7 @@ class Project:
 
     def _save_meta(self) -> None:
         meta_path = self.path / ".studio" / "meta.json"
-        meta_path.write_text(
+        atomic_write_text(
+            meta_path,
             json.dumps(self.meta, ensure_ascii=False, indent=2),
-            encoding="utf-8",
         )

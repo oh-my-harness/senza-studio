@@ -156,7 +156,12 @@ export const api = {
   getMessages: (id: string) =>
     fetchJson<ChatMessage[]>(`${BASE}/projects/${id}/messages`),
   updateSpec: (id: string, spec: Spec) =>
-    fetchJson<{ status: string }>(`${BASE}/projects/${id}/spec`, {
+    fetchJson<{
+      status: string;
+      saved?: boolean;
+      applied?: boolean;
+      warning?: string | null;
+    }>(`${BASE}/projects/${id}/spec`, {
       method: "PUT",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ spec }),
