@@ -7,7 +7,12 @@ import pytest
 from fastapi.testclient import TestClient
 
 from studio_backend import storage
-from studio_backend.app import _get_or_load_project, _reset_state, create_app
+from studio_backend.app import (
+    _get_or_load_project,
+    _reset_state,
+    _studio_state,
+    create_app,
+)
 from studio_backend.config import StudioConfig
 from studio_backend.project import Project, ProjectDataError
 from studio_backend.session import ensure_session, read_session_history
@@ -45,6 +50,31 @@ def _valid_spec():
             ]
         }
     )
+
+
+ENTRY_1 = "0192f0aa-0000-7000-8000-000000000001"
+ENTRY_2 = "0192f0aa-0000-7000-8000-000000000002"
+
+
+def _runtime_entry(
+    entry_id: str = ENTRY_1,
+    parent_id: str | None = None,
+    *,
+    text: str = "hello",
+    role: str = "user",
+) -> dict:
+    return {
+        "id": entry_id,
+        "parent_id": parent_id,
+        "timestamp": "2026-10-27T00:00:00Z",
+        "payload": {
+            "entry_type": "message",
+            "role": role,
+            "timestamp": "2026-10-27T00:00:00Z",
+            "content": [{"type": "text", "text": text}],
+        },
+        "compaction_policy": None,
+    }
 
 
 def test_atomic_write_preserves_old_file_on_replace_failure(tmp_path, monkeypatch):
@@ -101,19 +131,35 @@ def test_empty_or_malformed_pipeline_is_not_silently_accepted(cfg):
     yaml_path.write_text("stages: []\n", encoding="utf-8")
     assert project.load_spec().get_current_spec() == {"stages": []}
 
+    for raw in (
+        "null\n",
+        "# only a comment\n",
+        "name: no-stages\n",
+        "stages: {}\n",
+        "stages:\n  - null\n",
+        "- just\n- a\n- list\n",
+    ):
+        yaml_path.write_text(raw, encoding="utf-8")
+        with pytest.raises(ProjectDataError):
+            project.load_spec()
+        # 读取失败不能改写损坏文件；下一次保存也不应把损坏内容当成空 spec。
+        assert yaml_path.read_text(encoding="utf-8") == raw
+
 
 def test_ensure_session_repairs_missing_meta_and_preserves_entries(tmp_path):
     sessions = tmp_path / "sessions"
     sid = "sess-x"
     sdir = sessions / sid
     sdir.mkdir(parents=True)
-    (sdir / "entries.jsonl").write_text("keep-me", encoding="utf-8")
+    raw = json.dumps(_runtime_entry()) + "\n"
+    (sdir / "entries.jsonl").write_text(raw, encoding="utf-8")
 
     ensure_session(sessions, sid)
 
     meta = json.loads((sdir / "meta.json").read_text(encoding="utf-8"))
     assert meta["id"] == sid
-    assert (sdir / "entries.jsonl").read_text(encoding="utf-8") == "keep-me"
+    assert meta["active_cursor"] == ENTRY_1
+    assert (sdir / "entries.jsonl").read_text(encoding="utf-8") == raw
 
 
 def test_ensure_session_quarantines_corrupt_meta_without_touching_entries(tmp_path):
@@ -122,8 +168,9 @@ def test_ensure_session_quarantines_corrupt_meta_without_touching_entries(tmp_pa
     sdir = sessions / sid
     sdir.mkdir(parents=True)
     original = b'{"id": "sess-corrupt", "created_at": '
+    raw = json.dumps(_runtime_entry()) + "\n"
     (sdir / "meta.json").write_bytes(original)
-    (sdir / "entries.jsonl").write_text("history", encoding="utf-8")
+    (sdir / "entries.jsonl").write_text(raw, encoding="utf-8")
 
     ensure_session(sessions, sid)
 
@@ -132,7 +179,8 @@ def test_ensure_session_quarantines_corrupt_meta_without_touching_entries(tmp_pa
     assert quarantined[0].read_bytes() == original
     meta = json.loads((sdir / "meta.json").read_text(encoding="utf-8"))
     assert meta["id"] == sid
-    assert (sdir / "entries.jsonl").read_text(encoding="utf-8") == "history"
+    assert meta["active_cursor"] == ENTRY_1
+    assert (sdir / "entries.jsonl").read_text(encoding="utf-8") == raw
 
 
 def test_ensure_session_preserves_valid_runtime_meta(tmp_path):
@@ -147,7 +195,7 @@ def test_ensure_session_preserves_valid_runtime_meta(tmp_path):
         "created_at": "2026-10-27T00:00:00.123456Z",
         "updated_at": "2026-10-27T00:00:01.987654Z",
         "model": "deepseek-chat",
-        "active_cursor": "0192f0aa-0000-7000-8000-000000000001",
+        "active_cursor": ENTRY_1,
         "parent_session_path": None,
         "durability": "durable",
         "lifecycle": "active",
@@ -155,6 +203,9 @@ def test_ensure_session_preserves_valid_runtime_meta(tmp_path):
         "recall_revision": 7,
     }
     (sdir / "meta.json").write_text(json.dumps(runtime_meta), encoding="utf-8")
+    (sdir / "entries.jsonl").write_text(
+        json.dumps(_runtime_entry()) + "\n", encoding="utf-8"
+    )
 
     ensure_session(sessions, sid)
 
@@ -169,8 +220,9 @@ def test_repaired_session_meta_reconnects_last_entry_cursor(tmp_path):
     sdir.mkdir(parents=True)
     (sdir / "meta.json").write_text("", encoding="utf-8")
     (sdir / "entries.jsonl").write_text(
-        json.dumps({"id": "entry-1", "parent_id": None}) + "\n"
-        + json.dumps({"id": "entry-2", "parent_id": "entry-1"}) + "\n"
+        json.dumps(_runtime_entry()) + "\n"
+        + json.dumps(_runtime_entry(ENTRY_2, ENTRY_1, text="second", role="assistant"))
+        + "\n"
         + '{"id": "truncated"',
         encoding="utf-8",
     )
@@ -178,8 +230,34 @@ def test_repaired_session_meta_reconnects_last_entry_cursor(tmp_path):
     ensure_session(sessions, sid)
 
     meta = json.loads((sdir / "meta.json").read_text(encoding="utf-8"))
-    assert meta["active_cursor"] == "entry-2"
+    assert meta["active_cursor"] == ENTRY_2
     assert (sdir / "entries.jsonl").read_text(encoding="utf-8").endswith('{"id": "truncated"')
+
+
+def test_unreachable_cursor_is_rejected_without_rewriting_meta(tmp_path):
+    sessions = tmp_path / "sessions"
+    sid = "sess-broken-cursor"
+    sdir = sessions / sid
+    sdir.mkdir(parents=True)
+    meta = {
+        "id": sid,
+        "created_at": "2026-10-27T00:00:00Z",
+        "updated_at": "2026-10-27T00:00:00Z",
+        "model": None,
+        "name": None,
+        "active_cursor": ENTRY_2,
+        "parent_session_path": None,
+    }
+    raw_meta = json.dumps(meta).encode("utf-8")
+    raw_entries = (json.dumps(_runtime_entry()) + "\n").encode("utf-8")
+    (sdir / "meta.json").write_bytes(raw_meta)
+    (sdir / "entries.jsonl").write_bytes(raw_entries)
+
+    with pytest.raises(RuntimeError, match="not reachable"):
+        ensure_session(sessions, sid)
+
+    assert (sdir / "meta.json").read_bytes() == raw_meta
+    assert (sdir / "entries.jsonl").read_bytes() == raw_entries
 
 
 def test_session_id_cannot_escape_sessions_dir(tmp_path):
@@ -189,32 +267,65 @@ def test_session_id_cannot_escape_sessions_dir(tmp_path):
     assert not (tmp_path / "escape").exists()
 
 
-def test_history_read_skips_truncated_and_invalid_lines(tmp_path):
+def test_history_read_ignores_only_unterminated_tail_and_rejects_interior_corruption(tmp_path):
     sessions = tmp_path / "sessions"
     sid = "sess-history"
     sdir = sessions / sid
     sdir.mkdir(parents=True)
-    valid = json.dumps(
-        {
-            "payload": {
-                "role": "user",
-                "timestamp": "2026-10-27T00:00:00Z",
-                "content": [{"type": "text", "text": "hello"}],
-            }
-        }
-    )
+    valid = json.dumps(_runtime_entry(text="hello")) + "\n"
+    tail = '{"id": "half-written"'
     (sdir / "entries.jsonl").write_bytes(
-        valid.encode("utf-8")
-        + b"\n"
-        + b'{"payload":\n'
-        + b"\xff\xfe\n"
-        + b'{"payload": {"role": "assistant"}}\n'
+        valid.encode("utf-8") + tail.encode("utf-8")
     )
 
     messages = read_session_history(sessions, sid)
     assert messages == [
         {"role": "user", "content": "hello", "timestamp": 1793059200000}
     ]
+
+    (sdir / "entries.jsonl").write_bytes(
+        valid.encode("utf-8")
+        + b'{"id": "bad", "payload":\n'
+        + b"\xff\xfe\n"
+        + (json.dumps(_runtime_entry(ENTRY_2, ENTRY_1)) + "\n").encode("utf-8")
+    )
+    with pytest.raises(RuntimeError):
+        read_session_history(sessions, sid)
+
+
+def test_session_reader_does_not_split_unicode_line_separators(tmp_path):
+    sessions = tmp_path / "sessions"
+    sid = "sess-unicode"
+    sdir = sessions / sid
+    sdir.mkdir(parents=True)
+    text = "第一行\u2028第二行\u2029第三行"
+    raw = json.dumps(_runtime_entry(text=text), ensure_ascii=False) + "\n"
+    (sdir / "entries.jsonl").write_text(raw, encoding="utf-8")
+
+    ensure_session(sessions, sid)
+    assert read_session_history(sessions, sid) == [
+        {"role": "user", "content": text, "timestamp": 1793059200000}
+    ]
+
+
+def test_session_reader_tolerates_torn_multibyte_tail(tmp_path):
+    sessions = tmp_path / "sessions"
+    sid = "sess-torn-utf8"
+    sdir = sessions / sid
+    sdir.mkdir(parents=True)
+    complete = json.dumps(_runtime_entry(text="完整"), ensure_ascii=False) + "\n"
+    # 模拟进程在写 JSON 字符串时崩掉，截断在“你”的 UTF-8 字节中间。
+    torn = '{"id":"0192f0aa-0000-7000-8000-000000000099","payload":{"text":"'.encode()
+    torn += "你".encode()[:2]
+    (sdir / "entries.jsonl").write_bytes(complete.encode("utf-8") + torn)
+
+    ensure_session(sessions, sid)
+    meta = json.loads((sdir / "meta.json").read_text(encoding="utf-8"))
+    assert meta["active_cursor"] == ENTRY_1
+    assert read_session_history(sessions, sid) == [
+        {"role": "user", "content": "完整", "timestamp": 1793059200000}
+    ]
+    assert (sdir / "entries.jsonl").read_bytes().endswith(torn)
 
 
 def test_corrupt_settings_are_quarantined_before_next_save(cfg):
@@ -294,3 +405,4 @@ def test_update_spec_rejected_while_prompt_running(api_client, cfg):
     )
     assert r.status_code == 409
     assert api_client.get(f"/api/projects/{pid}/spec").json() == {"stages": []}
+

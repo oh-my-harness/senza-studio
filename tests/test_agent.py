@@ -62,3 +62,55 @@ def test_rebuild_preserves_session(tmp_project):
     sid = agent.start_session()
     agent.rebuild()
     assert agent._session_id == sid
+
+def test_start_session_build_failure_keeps_previous_binding(tmp_project, monkeypatch):
+    old_sid = "sess-old"
+    tmp_project.meta["sessions"] = [old_sid]
+    tmp_project.meta["active_session"] = old_sid
+    tmp_project._save_meta()
+    agent = StudioAgent(tmp_project.config, tmp_project, Spec())
+    old_harness = object()
+    agent._harness = old_harness
+    agent._session_id = old_sid
+
+    def fail_build(session_id):
+        raise RuntimeError("repo unavailable")
+
+    monkeypatch.setattr(agent, "_build_harness_for", fail_build)
+    with pytest.raises(RuntimeError, match="repo unavailable"):
+        agent.start_session("sess-new")
+
+    assert agent._harness is old_harness
+    assert agent._session_id == old_sid
+    assert tmp_project.meta["active_session"] == old_sid
+    assert tmp_project.meta["sessions"] == [old_sid]
+
+
+def test_start_session_meta_commit_failure_rolls_back_memory(tmp_project, monkeypatch):
+    old_sid = "sess-old"
+    tmp_project.meta["sessions"] = [old_sid]
+    tmp_project.meta["active_session"] = old_sid
+    tmp_project._save_meta()
+    agent = StudioAgent(tmp_project.config, tmp_project, Spec())
+    old_harness = object()
+    agent._harness = old_harness
+    agent._session_id = old_sid
+    new_harness = object()
+
+    monkeypatch.setattr(
+        agent,
+        "_build_harness_for",
+        lambda session_id: (new_harness, "new prompt"),
+    )
+
+    def fail_save():
+        raise OSError("disk full")
+
+    monkeypatch.setattr(tmp_project, "_save_meta", fail_save)
+    with pytest.raises(OSError, match="disk full"):
+        agent.start_session("sess-new")
+
+    assert agent._harness is old_harness
+    assert agent._session_id == old_sid
+    assert tmp_project.meta["active_session"] == old_sid
+    assert tmp_project.meta["sessions"] == [old_sid]
