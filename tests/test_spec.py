@@ -218,12 +218,17 @@ def test_set_agent_ui_is_incremental():
     spec.set_agent_ui(title="客服工单处理")
     spec.set_agent_ui(inputs={"customer_email": {"label": "客户邮件"}})
     spec.set_agent_ui(inputs={"customer_email": {"multiline": False}})
+    spec.set_agent_ui(inputs={"customer_email": {"optional": True}})
     spec.set_agent_ui(description="粘贴客户邮件")
 
     ui = spec.get_current_spec()["ui"]
     assert ui["title"] == "客服工单处理"
     assert ui["description"] == "粘贴客户邮件"
-    assert ui["inputs"]["customer_email"] == {"label": "客户邮件", "multiline": False}
+    assert ui["inputs"]["customer_email"] == {
+        "label": "客户邮件",
+        "multiline": False,
+        "optional": True,
+    }
 
 
 def test_set_agent_ui_rejects_unknown_input_keys():

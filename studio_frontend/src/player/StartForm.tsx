@@ -5,13 +5,15 @@
 import { useState } from "react";
 import type { AgentInfo } from "./types";
 
-/** 入口是否可以提交：首轮输入没有可选项，所有字段都必须有非空值。
- *  默认值只是预填，用户可以清空，所以仍然按"非空"判断。 */
+/** 开始按钮的就绪判定：字段默认必填；契约里声明了 optional 的字段允许留空。
+ *  留空的语义由后端 loader 决定（默认档/自动推断），前端不编造值。 */
 export function isStartReady(
-  inputs: AgentInfo["inputs"],
+  inputs: { name: string; optional?: boolean }[],
   values: Record<string, string>,
 ): boolean {
-  return inputs.every((field) => (values[field.name] ?? "").trim() !== "");
+  return inputs.every(
+    (field) => field.optional || (values[field.name] ?? "").trim() !== "",
+  );
 }
 
 export default function StartForm({
@@ -57,6 +59,11 @@ export default function StartForm({
         htmlFor={`input-${field.name}`}
       >
         {field.label}
+        {field.optional && (
+          <span className="ml-1 text-xs font-normal text-[var(--text-faint)]">
+            （可选）
+          </span>
+        )}
       </label>
       {field.multiline && !inline ? (
         <textarea
