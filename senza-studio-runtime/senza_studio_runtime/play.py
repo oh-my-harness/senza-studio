@@ -48,7 +48,12 @@ _TIMEOUT_REASON = "play execution time limit exceeded (15 active minutes)"
 def create_provider(api_key: str, api_base: str | None = None) -> Any:
     """OpenAI 兼容 provider。收凭据而不是 StudioConfig——运行时不认识
     Studio 的配置对象，导出的项目也没有 Studio 配置可给。"""
-    return senza.providers.openai(api_key=api_key, base_url=api_base or None)
+    # thinking_scheme 只是注册"翻译模式"：把 builder.thinking_level(...) 声明的
+    # 档位翻译成请求里的 reasoning_effort 字段（GLM 等推理模型）。没有任何
+    # harness 声明 thinking_level 时，请求体与从前逐字节一致（本地抓包矩阵
+    # 验证：B vs A）——对未配置的项目/模型完全向后兼容。
+    return senza.providers.openai(api_key=api_key, base_url=api_base or None,
+                                  thinking_scheme="reasoning_effort")
 
 
 def build_route_maps(
@@ -273,8 +278,28 @@ def _run_agent_step(harness: Any, prompt: str, emit: Any) -> tuple[str, int]:
             text = event.get("text", "")
             text_parts.append(text)
             emit.text_delta(text)
+        elif etype == "turn_start":
+            # turn 开始 = 请求即将发往 LLM。首 token（第一个 text_delta /
+            # tool_call_start）之前是"等待模型"窗口，前端拿它驱动执行视图
+            # 的 waiting_model 状态。
+            emit.turn_start(event["index"])
+        elif etype == "compaction_start":
+            emit.compaction_start()
+        elif etype == "compaction_end":
+            emit.compaction_end()
         elif etype == "tool_call_start":
             tool_calls_count += 1
+            emit.tool_call_start(event["tool_use_id"], event["tool_name"])
+        elif etype == "tool_call_end":
+            emit.tool_call_end(event["tool_use_id"], json.dumps(event["args"]))
+        elif etype == "tool_execution_start":
+            emit.tool_execution_start(event["tool_use_id"], event["tool_name"])
+        elif etype == "tool_execution_end":
+            emit.tool_execution_end(
+                event["tool_use_id"], event["ok"], event.get("error")
+            )
+        elif etype == "turn_end":
+            emit.turn_end(event["index"])
         elif etype in _TERMINAL_TYPES:
             break
 
@@ -908,6 +933,22 @@ def make_executor(
             builder = senza.HarnessBuilder(model).provider("*", provider).env(env)
             for plugin in plugins or []:
                 builder = builder.plugin(plugin)
+            # 可选 stage 级生成参数：stage 显式声明才生效，无全局默认——未配置
+            # 的 stage 请求与从前逐字节一致。放在 attempts 循环内：response_format
+            # 400 兜底重建 harness 时同样保留这两项设置。取值合法性最终由 SDK
+            # 校验（thinking_level 枚举 / max_tokens 正整数），不合法直接报错，
+            # 绝不静默丢弃——那会重新制造"配置了却不生效"的暗坑。
+            stage_thinking_level = stage.get("thinking_level")
+            if stage_thinking_level:
+                builder = builder.thinking_level(str(stage_thinking_level))
+            stage_max_tokens = stage.get("max_tokens")
+            if stage_max_tokens is not None:
+                stage_max_tokens_value = int(stage_max_tokens)
+                if stage_max_tokens_value <= 0:
+                    raise ValueError(
+                        f"stage '{step_id}': max_tokens 必须是正整数，"
+                        f"实际是 {stage_max_tokens!r}")
+                builder = builder.max_tokens(stage_max_tokens_value)
             if use_response_format:
                 # 强化，不是正确性来源：response_format 只影响请求约束，
                 # 正确性由提示词 + 解析 + 验证保证。
