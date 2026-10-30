@@ -22,7 +22,7 @@ RUNTIME_BIN = Path(
     os.environ.get(
         "SENZA_STUDIO_AGENT_TEAM_BIN",
         Path(__file__).parents[2]
-        / "llm-harness-runtime"
+        / "agent-team"
         / "target"
         / "debug"
         / "agent-studio",

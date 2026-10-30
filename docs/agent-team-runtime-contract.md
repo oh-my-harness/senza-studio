@@ -1,7 +1,7 @@
 # Agent Team runtime contract for Senza Studio
 
 > Status: draft for issue #1
-> Runtime source: `llm-harness-runtime` `agent-team-studio`
+> Runtime source: `oh-my-harness/agent-team` (`llm-harness-agent-team-studio`)
 > Consumers: Senza Studio desktop/web frontend
 
 ## 1. Boundary
