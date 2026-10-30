@@ -63,6 +63,7 @@ def test_rebuild_preserves_session(tmp_project):
     agent.rebuild()
     assert agent._session_id == sid
 
+
 def test_start_session_build_failure_keeps_previous_binding(tmp_project, monkeypatch):
     old_sid = "sess-old"
     tmp_project.meta["sessions"] = [old_sid]

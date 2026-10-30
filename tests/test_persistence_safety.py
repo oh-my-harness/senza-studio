@@ -6,6 +6,7 @@ import json
 import pytest
 from fastapi.testclient import TestClient
 
+from studio_backend import settings as settings_mod
 from studio_backend import storage
 from studio_backend.app import (
     _get_or_load_project,
@@ -406,3 +407,47 @@ def test_update_spec_rejected_while_prompt_running(api_client, cfg):
     assert r.status_code == 409
     assert api_client.get(f"/api/projects/{pid}/spec").json() == {"stages": []}
 
+
+def test_settings_do_not_replace_harness_while_prompt_running(
+    api_client, cfg, monkeypatch
+):
+    pid = api_client.post("/api/projects", json={"name": "p"}).json()["id"]
+    state = _get_or_load_project(cfg, pid)
+    state["agent"]._session_id = "sess-x"
+    state["prompt_run"] = {"run_id": "r", "status": "running"}
+    calls: list[int] = []
+    monkeypatch.delenv("SENZA_STUDIO_MODEL", raising=False)
+    # 全量测试里前一个 create_app 可能快照过某个测试临时 export 的模型
+    # 环境变量；本测试需要确定性的“模型确实变了”。
+    monkeypatch.setattr(settings_mod, "_env_overrides", frozenset())
+    cfg.model = "test-model"
+    monkeypatch.setattr(state["agent"], "rebuild", lambda: calls.append(1))
+
+    r = api_client.put(
+        "/api/settings",
+        json={"values": {"SENZA_STUDIO_MODEL": "next-model"}},
+    )
+    assert r.status_code == 200
+    assert calls == []
+    assert state["harness_rebuild_pending"] is True
+    assert any("结束后应用" in warning for warning in r.json()["warnings"])
+
+
+def test_upload_does_not_replace_harness_while_prompt_running(
+    api_client, cfg, monkeypatch
+):
+    pid = api_client.post("/api/projects", json={"name": "p"}).json()["id"]
+    state = _get_or_load_project(cfg, pid)
+    state["agent"]._session_id = "sess-x"
+    state["prompt_run"] = {"run_id": "r", "status": "running"}
+    calls: list[int] = []
+    monkeypatch.setattr(state["agent"], "rebuild", lambda: calls.append(1))
+
+    r = api_client.post(
+        f"/api/projects/{pid}/documents",
+        files={"file": ("note.txt", b"hello", "text/plain")},
+    )
+    assert r.status_code == 200
+    assert calls == []
+    assert r.json()["applied"] is False
+    assert state["harness_rebuild_pending"] is True

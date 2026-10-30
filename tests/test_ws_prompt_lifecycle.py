@@ -16,8 +16,11 @@ import time
 
 import pytest
 
+from studio_backend import app as app_module
 from studio_backend import ws as ws_mod
 from studio_backend.ws import (
+    finalize_play,
+    harness_is_busy,
     run_prompt_streaming,
     stop_active_prompt,
 )
@@ -51,6 +54,7 @@ class FakeAgent:
         self.prompt_gate = prompt_gate
         self.abort_calls = 0
         self.prompt_calls = 0
+        self.rebuild_calls = 0
 
     def prompt(self, text, timeout_ms=30000):
         self.prompt_calls += 1
@@ -60,6 +64,9 @@ class FakeAgent:
 
     def abort(self):
         self.abort_calls += 1
+
+    def rebuild(self):
+        self.rebuild_calls += 1
 
 
 class FakeSpec:
@@ -144,7 +151,7 @@ async def test_cancel_forwarder_does_not_lose_finalizer():
 
     assert max(gaps) < 0.25, f"event loop stalled: {max(gaps):.3f}s"
     assert state["prompt_run"]["status"] == "completed"
-    assert project.saved == 1
+    assert await wait_for(lambda: project.saved == 1)
     assert [m["type"] for m in ws.sent].count("prompt_terminal") == 1
 
 
@@ -172,8 +179,26 @@ async def test_cancel_while_terminal_send_is_blocked_still_saves():
 
     send_gate.set()
     assert await wait_for(lambda: ws.terminal_sent.is_set())
-    assert project.saved == 1
+    assert await wait_for(lambda: project.saved == 1)
     assert state["prompt_run"]["status"] == "completed"
+
+
+@pytest.mark.asyncio
+async def test_save_failure_is_reported_but_execution_terminal_stays_completed():
+    class FailingProject(FakeProject):
+        def save_spec(self, spec):
+            raise OSError("disk full")
+
+    agent = FakeAgent([{"type": "settled"}])
+    ws = FakeWebSocket()
+    state = make_state(ws)
+    await run_prompt_streaming(ws, agent, FailingProject(), "hi", state, "r1")
+
+    types = [m.get("type") for m in ws.sent]
+    assert state["prompt_run"]["status"] == "completed"
+    assert "spec_save_failed" in types
+    spec_event = next(m for m in ws.sent if m.get("type") == "spec_updated")
+    assert spec_event["saved"] is False
 
 
 @pytest.mark.asyncio
@@ -207,6 +232,166 @@ async def test_stuck_thread_is_not_reported_completed_and_blocks_next_run():
 
     prompt_gate.set()
     assert await wait_for(lambda: not state["prompt_thread"].is_alive(), timeout=2)
+
+
+@pytest.mark.asyncio
+async def test_timeout_budget_is_not_postponed_by_endless_nonterminal_events():
+    """事件一直吐非终态时，预算仍从启动计时，终态必须有界出现。"""
+    prompt_gate = threading.Event()
+    events_gate = threading.Event()
+
+    class EndlessNonTerminal:
+        def __iter__(self):
+            return self
+
+        def __next__(self):
+            if events_gate.is_set():
+                raise StopIteration
+            return {"type": "text_delta", "text": "tick"}
+
+    agent = FakeAgent([], prompt_gate=prompt_gate)
+    agent._harness = FakeHarness(EndlessNonTerminal())
+    ws = FakeWebSocket()
+    state = make_state(ws)
+    started = time.monotonic()
+
+    task = asyncio.create_task(
+        run_prompt_streaming(
+            ws,
+            agent,
+            FakeProject(),
+            "hi",
+            state,
+            "r1",
+            thread_timeout_s=0.12,
+            stop_grace_s=0.05,
+        )
+    )
+    state["prompt_task"] = task
+    assert await wait_for(lambda: ws.terminal_sent.is_set(), timeout=2.0)
+    elapsed = time.monotonic() - started
+    assert elapsed < 1.0
+    assert state["prompt_run"]["status"] == "failed"
+    assert "timed out" in (state["prompt_run"]["error"] or "")
+    assert agent.abort_calls == 1
+
+    events_gate.set()
+    prompt_gate.set()
+    await asyncio.wait_for(task, timeout=2.0)
+
+
+@pytest.mark.asyncio
+async def test_thread_exit_without_terminal_is_bounded_by_drain_not_full_budget():
+    events_gate = threading.Event()
+
+    class BlockedEvents:
+        def __iter__(self):
+            return self
+
+        def __next__(self):
+            assert events_gate.wait(5)
+            raise StopIteration
+
+    agent = FakeAgent([])
+    agent._harness = FakeHarness(BlockedEvents())
+    ws = FakeWebSocket()
+    state = make_state(ws)
+    started = time.monotonic()
+
+    task = asyncio.create_task(
+        run_prompt_streaming(
+            ws,
+            agent,
+            FakeProject(),
+            "hi",
+            state,
+            "r1",
+            thread_timeout_s=5.0,
+            stop_grace_s=0.05,
+        )
+    )
+    state["prompt_task"] = task
+    assert await wait_for(lambda: ws.terminal_sent.is_set(), timeout=2.0)
+    assert time.monotonic() - started < 1.0
+    assert state["prompt_run"]["status"] == "failed"
+    assert "without a terminal" in (state["prompt_run"]["error"] or "")
+
+    events_gate.set()
+    await asyncio.wait_for(task, timeout=2.0)
+
+
+@pytest.mark.asyncio
+async def test_completed_run_not_misclassified_while_nonterminal_send_is_slow():
+    """线程已退出，但终态还排在慢发送后面：deadline 必须等完整 grace。"""
+    agent = FakeAgent([{"type": "text_delta"}, {"type": "settled"}])
+    send_gate = asyncio.Event()
+
+    class BlockingDeltaSocket(FakeWebSocket):
+        async def send_json(self, obj):
+            if obj.get("type") == "text_delta":
+                await send_gate.wait()
+            self.sent.append(obj)
+            if obj.get("type") == "prompt_terminal":
+                self.terminal_sent.set()
+
+    ws = BlockingDeltaSocket()
+    state = make_state(ws)
+
+    task = asyncio.create_task(
+        run_prompt_streaming(
+            ws,
+            agent,
+            FakeProject(),
+            "hi",
+            state,
+            "r1",
+            thread_timeout_s=0.1,
+            stop_grace_s=0.5,
+        )
+    )
+    state["prompt_task"] = task
+
+    # deadline 已过，线程早退，但转发仍卡在非终态发送；旧实现会在
+    # 200ms 后把本轮判成 no-terminal。现在必须保持 running，等 grace。
+    await asyncio.sleep(0.3)
+    assert state["prompt_run"]["status"] == "running"
+    send_gate.set()
+    await asyncio.wait_for(task, timeout=2.0)
+
+    assert state["prompt_run"]["status"] == "completed"
+    assert [m["type"] for m in ws.sent].count("prompt_terminal") == 1
+    assert not ws.sent[-1].get("outcome") == "failed"
+
+
+@pytest.mark.asyncio
+async def test_sdk_timeout_sentinel_after_thread_exit_is_not_waited_forever():
+    agent = FakeAgent([{"type": "timeout"}])
+    ws = FakeWebSocket()
+    state = make_state(ws)
+
+    await asyncio.wait_for(
+        run_prompt_streaming(ws, agent, FakeProject(), "hi", state, "r1"),
+        timeout=2.0,
+    )
+    assert state["prompt_run"]["status"] == "failed"
+    assert "without a terminal" in (state["prompt_run"]["error"] or "")
+    assert "timeout" not in [
+        m.get("type") for m in ws.sent if m.get("type") != "prompt_terminal"
+    ]
+
+
+@pytest.mark.asyncio
+async def test_pending_harness_rebuild_waits_until_run_finishes():
+    agent = FakeAgent([{"type": "settled"}])
+    ws = FakeWebSocket()
+    state = make_state(ws)
+    state["harness_rebuild_pending"] = True
+
+    await run_prompt_streaming(ws, agent, FakeProject(), "hi", state, "r1")
+
+    assert agent.rebuild_calls == 1
+    assert not state.get("harness_rebuild_pending")
+    assert harness_is_busy(state) is False
 
 
 @pytest.mark.asyncio
@@ -383,11 +568,166 @@ async def test_second_connection_prompt_is_rejected_without_aborting_owner(
     assert await wait_for(
         lambda: state["prompt_run"]["status"] in ("completed", "failed", "cancelled")
     )
-    assert project.saved == 1
+    assert await wait_for(lambda: project.saved == 1)
 
     ws_a.messages.put_nowait(None)
     ws_b.messages.put_nowait(None)
     await asyncio.gather(task_a, task_b)
+
+
+@pytest.mark.asyncio
+async def test_play_task_and_owner_are_project_state_not_handler_local(
+    monkeypatch, tmp_path
+):
+    endpoint, state, token, _agent, _project = _app_ws_endpoint(monkeypatch, tmp_path)
+    finish = asyncio.Event()
+
+    class FakePlaySession:
+        def __init__(self):
+            self.stopped = False
+
+        def play(self, inputs=None, start_paused=False):
+            pass
+
+        def state(self):
+            return "cancelled" if self.stopped else "running"
+
+        def stop(self, reason):
+            self.stopped = True
+            finish.set()
+
+    async def fake_stream(ws, play_session, project, state):
+        try:
+            await finish.wait()
+        finally:
+            finish.set()
+
+    monkeypatch.setattr(
+        app_module, "PlaySession", lambda cfg, project, spec: FakePlaySession()
+    )
+    monkeypatch.setattr(app_module, "run_play_streaming", fake_stream)
+
+    ws_a = QueuedWebSocket(token)
+    task_a = asyncio.create_task(endpoint(ws_a, "project"))
+    await ws_a.receiving.wait()
+    ws_a.messages.put_nowait({"type": "play"})
+    assert await wait_for(lambda: state.get("play_task") is not None)
+
+    ws_b = QueuedWebSocket(token)
+    task_b = asyncio.create_task(endpoint(ws_b, "project"))
+    await ws_b.receiving.wait()
+    ws_b.messages.put_nowait({"type": "play"})
+    ws_b.messages.put_nowait({"type": "stop"})
+    assert await wait_for(
+        lambda: len(
+            [
+                m
+                for m in ws_b.sent
+                if m.get("type") == "error" and "另一个连接" in m.get("message", "")
+            ]
+        )
+        >= 2
+    )
+    assert state["play_owner"] and state["play_task"] is not None
+
+    # A 断开只收掉 A 自己的 Play；B 之后可以重新开始。
+    ws_a.messages.put_nowait(None)
+    await task_a
+    assert await wait_for(lambda: state.get("play_task") is None)
+
+    finish.clear()
+    ws_b.messages.put_nowait({"type": "play"})
+    assert await wait_for(lambda: state.get("play_task") is not None)
+    finish.set()
+    assert await wait_for(lambda: state.get("play_task") is None)
+    ws_b.messages.put_nowait(None)
+    await task_b
+
+
+@pytest.mark.asyncio
+async def test_websocket_entrypoint_enforces_prompt_budget(monkeypatch, tmp_path):
+    endpoint, state, token, agent, project = _app_ws_endpoint(monkeypatch, tmp_path)
+    prompt_gate = threading.Event()
+    agent.prompt_gate = prompt_gate
+    monkeypatch.setattr(ws_mod, "PROMPT_THREAD_TIMEOUT_S", 0.12)
+    monkeypatch.setattr(ws_mod, "PROMPT_STOP_GRACE_S", 0.05)
+
+    ws = QueuedWebSocket(token)
+    task = asyncio.create_task(endpoint(ws, "project"))
+    await ws.receiving.wait()
+    ws.messages.put_nowait({"type": "prompt", "text": "slow", "run_id": "rSlow"})
+    assert await wait_for(
+        lambda: (
+            isinstance(state.get("prompt_run"), dict)
+            and state["prompt_run"].get("status") == "failed"
+            and "timed out" in (state["prompt_run"].get("error") or "")
+        ),
+        timeout=2.0,
+    )
+    assert any(
+        m.get("type") == "prompt_terminal" and m.get("outcome") == "failed"
+        for m in ws.sent
+    )
+
+    prompt_gate.set()
+    ws.messages.put_nowait(None)
+    await task
+    assert await wait_for(lambda: project.saved == 1)
+
+
+@pytest.mark.asyncio
+async def test_reconnected_connection_can_abort_orphan_run(monkeypatch, tmp_path):
+    endpoint, state, token, agent, project = _app_ws_endpoint(monkeypatch, tmp_path)
+    prompt_gate = threading.Event()
+    agent.prompt_gate = prompt_gate
+
+    ws_a = QueuedWebSocket(token)
+    task_a = asyncio.create_task(endpoint(ws_a, "project"))
+    await ws_a.receiving.wait()
+    ws_a.messages.put_nowait({"type": "prompt", "text": "A", "run_id": "rA"})
+    assert await wait_for(lambda: state.get("prompt_task") is not None)
+    owner = state["prompt_run"]["owner"]
+
+    # A 断开：owner 不再在线，但 run 仍在跑。
+    ws_a.messages.put_nowait(None)
+    await task_a
+    assert owner not in state["ws_connections"]
+
+    ws_b = QueuedWebSocket(token)
+    task_b = asyncio.create_task(endpoint(ws_b, "project"))
+    await ws_b.receiving.wait()
+    ws_b.messages.put_nowait({"type": "abort"})
+    assert await wait_for(lambda: agent.abort_calls == 1)
+
+    prompt_gate.set()
+    assert await wait_for(
+        lambda: state["prompt_run"]["status"] in ("completed", "failed", "cancelled")
+    )
+    ws_b.messages.put_nowait(None)
+    await task_b
+    assert await wait_for(lambda: project.saved == 1)
+
+
+@pytest.mark.asyncio
+async def test_switch_session_rejected_while_finalizer_pending(monkeypatch, tmp_path):
+    endpoint, state, token, agent, _project = _app_ws_endpoint(monkeypatch, tmp_path)
+    finalizer = asyncio.create_task(asyncio.sleep(10))
+    state["prompt_finalizer"] = finalizer
+    ws = QueuedWebSocket(token)
+    task = asyncio.create_task(endpoint(ws, "project"))
+    await ws.receiving.wait()
+    ws.messages.put_nowait({"type": "switch_session", "session_id": "sess-2"})
+    assert await wait_for(
+        lambda: any(
+            m.get("type") == "error" and "不能切换 session" in m.get("message", "")
+            for m in ws.sent
+        )
+    )
+    ws.messages.put_nowait(None)
+    await task
+    finalizer.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await finalizer
 
 
 @pytest.mark.asyncio
@@ -414,7 +754,42 @@ async def test_disconnect_does_not_cancel_running_prompt(monkeypatch, tmp_path):
         lambda: state["prompt_run"]["status"] in ("completed", "failed", "cancelled")
     )
     assert not run_task.cancelled()
-    assert project.saved == 1
+    assert await wait_for(lambda: project.saved == 1)
+
+
+@pytest.mark.asyncio
+async def test_play_meta_save_is_off_loop_and_failure_is_visible():
+    class SlowMetaProject(FakeProject):
+        def __init__(self):
+            super().__init__()
+            self.meta = {"status": "playing"}
+
+        def _save_meta(self):
+            time.sleep(0.2)
+
+    ws = FakeWebSocket()
+    project = SlowMetaProject()
+    stop_probe = asyncio.Event()
+    probe = asyncio.create_task(measure_loop_gap(stop_probe))
+    await finalize_play(ws, project)
+    stop_probe.set()
+    gaps = await probe
+
+    assert max(gaps) < 0.1, f"play meta save stalled loop: {max(gaps):.3f}s"
+    assert project.meta["status"] == "editing"
+
+    class FailingMetaProject(SlowMetaProject):
+        def _save_meta(self):
+            raise OSError("disk full")
+
+    failing = FailingMetaProject()
+    failing_ws = FakeWebSocket()
+    await finalize_play(failing_ws, failing)
+    assert failing.meta["status"] == "playing"
+    assert any(
+        m.get("type") == "error" and "保存 Play" in m.get("message", "")
+        for m in failing_ws.sent
+    )
 
 
 @pytest.mark.asyncio
