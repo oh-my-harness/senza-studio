@@ -15,10 +15,11 @@ Studio 的开发启动脚本 `dev.sh` 在启动 Python 后端前，会先经
 | 使用方 | 配置文件 | 包装脚本 |
 |---|---|---|
 | Studio（本仓库） | `$SENZA_STUDIO_HOME/provider-network.json`（默认 `~/.senza-studio/`） | `senza-studio/scripts/provider-network.py` |
-| Agent Team Runtime | `~/.harness/agent-team-studio/provider-network.json` | `llm-harness-runtime/scripts/provider-network.py` |
+| Agent Team Runtime | 无（继承启动 shell 的代理环境） | 无（由 `oh-my-harness/agent-team` 独立启动） |
 
-两份脚本语义一致，但**各自读取各自的文件**：改一边不会影响另一边，两个组件要分别配置。
-Runtime 侧入口见 llm-harness-runtime 仓库 `docs/provider-network.md`。
+两边的配置互不读取：改 Studio 的文件不会影响 Runtime。拆分后的 Agent Team
+仓库不再自带 `provider-network.py` 包装器；Runtime 直接继承启动它的终端或
+服务环境里的 `NO_PROXY` / 代理变量，需要在启动 Runtime 前自行导出。
 
 ### 文件格式
 

@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """Apply explicit, persistent startup exclusions without probing or changing proxies.
 
-与 llm-harness-runtime/scripts/provider-network.py 的配置语义保持一致,
-但两份脚本各自独立、配置互不同步:
+语义沿用旧 Runtime 仓库的启动包装器;拆分后的 agent-team 仓库不再自带
+该包装器,因此本脚本只服务 Studio,与 Runtime 的配置互不同步:
 - Studio(本脚本)读取 $SENZA_STUDIO_HOME/provider-network.json(默认 ~/.senza-studio);
-- Runtime 侧读取 ~/.harness/agent-team-studio/provider-network.json。
-两边都要用各自的文件分别配置。只在子进程环境追加大小写 NO_PROXY 条目。
+- Runtime 由独立仓库启动,直接继承启动 shell 的代理环境,不读取此文件。
+两边如需不同策略,分别在各自的启动环境里配置。只在子进程环境追加大小写 NO_PROXY 条目。
 """
 import argparse
 import json

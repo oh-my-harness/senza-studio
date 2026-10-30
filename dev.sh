@@ -138,11 +138,10 @@ if [ ! -d "studio_frontend/node_modules" ]; then
 fi
 
 # ── 启动后端 ────────────────────────────────────────────
-# Provider 网络策略:与 Agent Team Runtime 的 scripts/studio.sh 同一机制——
-# 读取 $SENZA_STUDIO_HOME/provider-network.json(默认 ~/.senza-studio;
-# 仅本仓库包装器使用;Runtime 侧用的是 ~/.harness/agent-team-studio/ 下的
-# 另一份文件,两者不自动同步),
+# Provider 网络策略:由本仓库包装器在启动后端前应用——
+# 读取 $SENZA_STUDIO_HOME/provider-network.json(默认 ~/.senza-studio),
 # 把其中的直连域名追加进子进程的大小写 NO_PROXY(去重、保留原有条目)。
+# Agent Team Runtime 由独立仓库启动,不读取本文件;两边各自配置,不自动同步。
 # 没有该文件时完整继承当前代理环境,行为与从前一致。后端进程里的 reqwest
 # (经 Senza SDK)在构造时快照代理环境,必须在启动前应用,不能运行中改。
 # 注意:provider-network.py 会把 `--` 之后的第一个参数当作可执行程序,

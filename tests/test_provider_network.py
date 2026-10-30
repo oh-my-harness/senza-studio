@@ -1,7 +1,7 @@
 """provider-network.py(Senza Studio 侧)离线启动策略测试。
 
-语义与 llm-harness-runtime/scripts/tests/test_provider_network.py 的
-StartupPolicy 部分对齐;全部离线,无真实网络请求。
+语义沿用旧 Runtime 仓库的 StartupPolicy 测试;拆分后的 agent-team 不再
+自带该包装器。全部离线,无真实网络请求。
 
 运行: python3 -m unittest tests.test_provider_network -v
 """
