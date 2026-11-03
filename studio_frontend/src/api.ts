@@ -89,6 +89,16 @@ export interface WorkflowStopResult {
   terminal_reason: string | null;
 }
 
+/**
+ * Three-state answer for "does this runtime have the stop route?".
+ *
+ * Only a 405 (route exists, POST-only) or a 200 prove support and only a 404
+ * proves absence. A 5xx, a proxy error, a dropped connection or an auth
+ * failure says nothing about the route, so it must stay `unknown` instead of
+ * latching the Stop button off as if the runtime were old.
+ */
+export type WorkflowStopSupport = "supported" | "unsupported" | "unknown";
+
 export const api = {
   listAgentTeams: () =>
     fetchJson<{ projects: AgentTeamProject[] }>(`${BASE}/team/projects`),
@@ -112,13 +122,24 @@ export const api = {
       `${BASE}/team/workflow/stop?project=${encodeURIComponent(project)}`,
       { method: "POST" }
     ),
-  /** A GET on the stop route is 405 when it exists and 404 on older runtimes. */
-  probeAgentTeamWorkflowStop: async () => {
-    await initializeAuthentication();
-    const response = await fetch(`${BASE}/team/workflow/stop`, {
-      credentials: "same-origin",
-    });
-    return response.status === 405 || response.status === 200;
+  /**
+   * A GET on the stop route is 405 when it exists (POST-only) and 404 on
+   * runtimes that predate it. Every other answer — 5xx, 401/403 from an
+   * expired session, a refused connection — is `unknown`, never `unsupported`.
+   */
+  probeAgentTeamWorkflowStop: async (): Promise<WorkflowStopSupport> => {
+    let response: Response;
+    try {
+      await initializeAuthentication();
+      response = await fetch(`${BASE}/team/workflow/stop`, {
+        credentials: "same-origin",
+      });
+    } catch {
+      return "unknown";
+    }
+    if (response.status === 405 || response.status === 200) return "supported";
+    if (response.status === 404) return "unsupported";
+    return "unknown";
   },
   restartAgentTeam: (id: string) =>
     fetchJson<{ ok: boolean }>(

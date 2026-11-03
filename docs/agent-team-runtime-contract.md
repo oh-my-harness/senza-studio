@@ -277,9 +277,10 @@ agent turn and returns `409` for controlled teams.
 | --- | --- |
 | `200` | `{ok: true, workflow_id, phase: "escalated", terminal_reason}`. Terminal state and the chat terminal message are recorded before in-flight tasks are aborted. |
 | `404` | `unknown project: <id>`; the project no longer exists. |
-| `409` | `team is not a controlled workflow team`, or `no running controlled workflow to stop` (already completed or raced by natural completion). |
-| `405` on `GET` | The runtime implements the route (capability probe). |
-| `404` on `GET` | The runtime predates this route; Studio must disable the stop control and say the runtime needs an upgrade. |
+| `409` | Exactly two reasons are normal states: `team is not a controlled workflow team`, and `no running controlled workflow to stop` (already completed or raced by natural completion). Any other `409` body, and an empty `409` (shown as `HTTP 409`), is a failure and keeps the runtime's own text. |
+| `405` on `GET` | The runtime implements the route (capability probe): `supported`. |
+| `404` on `GET` | The runtime predates this route: `unsupported`. Only this answer disables the stop control, and the UI says the runtime needs an upgrade. |
+| `5xx`, `401`/`403`, network failure on `GET` | `unknown`. The probe says nothing about the route, so the stop control stays enabled and the operator gets a manual "re-detect" action. Never latch the control off on a proxy or auth hiccup. |
 
 Stop keeps the team, issues, snapshots, chat, and sessions; it aborts in-flight
 member turns and never resumes the stopped workflow. Starting a new workflow is
@@ -288,9 +289,10 @@ returns `409` and must be rendered as "already finished", not as an error and
 not as a second success.
 
 The current packaging pin (`agent-team-runtime.json`) predates this route. The
-capability probe is therefore mandatory: builds using that pin show the stop
-control disabled. Enabling it in packaged builds requires a runtime pin or
-source change, which is a separate packaging decision.
+capability probe runs once at mount and never polls. Builds using that pin get a
+`404` and therefore show the stop control disabled; an inconclusive probe leaves
+it enabled. Enabling it in packaged builds requires a runtime pin or source
+change, which is a separate packaging decision.
 
 ### 4.8 Pulse and sessions
 
@@ -492,5 +494,7 @@ tests for:
 10. settings redaction and member API-key redaction;
 11. `team_message` and `agent_thought` event replay/live forwarding;
 12. desktop launch, backend exit, and clean shutdown;
-13. controlled workflow stop: capability probe, `200` terminal result, `409`
-    already-finished/uncontrolled, and `404` on a runtime without the route.
+13. controlled workflow stop: capability probe (`200`/`405` supported, `404`
+    unsupported, `5xx`/network unknown), `200` terminal result, the two known
+    `409` states as neutral, unknown/empty `409` as failure, and `404` on a
+    runtime without the route.

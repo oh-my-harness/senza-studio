@@ -80,6 +80,7 @@ export default function AgentTeamWorkspace() {
     abortActive,
     stopWorkflow,
     stopSupported,
+    retryStopProbe,
     createTeam,
     saveSettings,
     restartTeam,
@@ -241,6 +242,7 @@ export default function AgentTeamWorkspace() {
                   onAbort={abortActive}
                   onStopWorkflow={stopWorkflow}
                   stopSupported={stopSupported}
+                  onRetryStopProbe={() => void retryStopProbe()}
                   onSendMessage={() => void sendMessage()}
                 />
               ) : (

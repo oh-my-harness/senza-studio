@@ -4,6 +4,7 @@ import { api, apiErrorMessage, apiErrorInfo } from "./api";
 import {
   classifyWorkflowStopError,
   isNeutralStopOutcome,
+  workflowStopControl,
   workflowStopNotice,
 } from "./agentTeamWorkflowStop";
 
@@ -40,6 +41,26 @@ describe("workflow stop outcomes", () => {
     );
     expect(outcome).toEqual({ kind: "uncontrolled" });
     expect(workflowStopNotice(outcome)).toContain("不是受控工作流团队");
+  });
+
+  it("keeps an unrecognized 409 a failure and preserves the runtime reason", () => {
+    const outcome = classifyWorkflowStopError(
+      new Error('409: {"ok":false,"error":"workflow is only partially escalated"}')
+    );
+    expect(outcome).toEqual({
+      kind: "failed",
+      message: "workflow is only partially escalated",
+    });
+    expect(isNeutralStopOutcome(outcome)).toBe(false);
+    expect(workflowStopNotice(outcome)).toBe(
+      "workflow is only partially escalated"
+    );
+  });
+
+  it("treats an empty 409 as a failure", () => {
+    const outcome = classifyWorkflowStopError(new Error("409: "));
+    expect(outcome).toEqual({ kind: "failed", message: "HTTP 409" });
+    expect(isNeutralStopOutcome(outcome)).toBe(false);
   });
 
   it("treats an empty 404 as an older runtime without the stop route", () => {
@@ -91,17 +112,88 @@ describe("apiErrorInfo", () => {
 });
 
 describe("stop capability probe", () => {
-  it("treats 405 (route exists) as supported", async () => {
-    const fetchMock = vi.fn().mockResolvedValue({ status: 405 });
+  it("treats 405 (route exists, POST-only) as supported", async () => {
+    const fetchMock = vi
+      .fn<(url: string, init?: RequestInit) => Promise<{ status: number }>>()
+      .mockResolvedValue({ status: 405 });
     vi.stubGlobal("fetch", fetchMock);
-    await expect(api.probeAgentTeamWorkflowStop()).resolves.toBe(true);
+    await expect(api.probeAgentTeamWorkflowStop()).resolves.toBe("supported");
+    // The probe must stay a GET on the stop route: a POST would stop a
+    // workflow instead of asking whether the route exists.
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const [url, init] = fetchMock.mock.calls[0];
+    expect(url).toBe("/api/team/workflow/stop");
+    expect(init?.method).toBeUndefined();
+    vi.unstubAllGlobals();
+  });
+
+  it("treats 200 as supported", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue({ status: 200 }));
+    await expect(api.probeAgentTeamWorkflowStop()).resolves.toBe("supported");
     vi.unstubAllGlobals();
   });
 
   it("treats 404 (older runtime) as unsupported", async () => {
-    const fetchMock = vi.fn().mockResolvedValue({ status: 404 });
-    vi.stubGlobal("fetch", fetchMock);
-    await expect(api.probeAgentTeamWorkflowStop()).resolves.toBe(false);
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue({ status: 404 }));
+    await expect(api.probeAgentTeamWorkflowStop()).resolves.toBe("unsupported");
     vi.unstubAllGlobals();
+  });
+
+  it.each([502, 503, 500, 401, 403])(
+    "leaves %i unknown instead of claiming an old runtime",
+    async (status) => {
+      vi.stubGlobal("fetch", vi.fn().mockResolvedValue({ status }));
+      await expect(api.probeAgentTeamWorkflowStop()).resolves.toBe("unknown");
+      vi.unstubAllGlobals();
+    }
+  );
+
+  it("leaves a network failure unknown", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockRejectedValue(new TypeError("Failed to fetch"))
+    );
+    await expect(api.probeAgentTeamWorkflowStop()).resolves.toBe("unknown");
+    vi.unstubAllGlobals();
+  });
+
+  it("recovers on a manual re-probe after a transient failure", async () => {
+    const fetchMock = vi
+      .fn()
+      .mockRejectedValueOnce(new TypeError("Failed to fetch"))
+      .mockResolvedValueOnce({ status: 405 });
+    vi.stubGlobal("fetch", fetchMock);
+    await expect(api.probeAgentTeamWorkflowStop()).resolves.toBe("unknown");
+    await expect(api.probeAgentTeamWorkflowStop()).resolves.toBe("supported");
+    vi.unstubAllGlobals();
+  });
+});
+
+describe("stop control rendering", () => {
+  it("still offers Stop and a re-probe when the probe is unknown", () => {
+    const control = workflowStopControl("unknown");
+    expect(control.canStop).toBe(true);
+    expect(control.canRetryProbe).toBe(true);
+    expect(control.hint).toContain("重新检测");
+  });
+
+  it("keeps Stop enabled when supported, without a retry", () => {
+    const control = workflowStopControl("supported");
+    expect(control.canStop).toBe(true);
+    expect(control.canRetryProbe).toBe(false);
+    expect(control.hint).toContain("终止受控工作流");
+  });
+
+  it("disables Stop only for a proven older runtime", () => {
+    const control = workflowStopControl("unsupported");
+    expect(control.canStop).toBe(false);
+    expect(control.canRetryProbe).toBe(false);
+    expect(control.hint).toContain("不支持停止工作流");
+  });
+
+  it("stays usable before the first probe answers", () => {
+    const control = workflowStopControl(null);
+    expect(control.canStop).toBe(true);
+    expect(control.canRetryProbe).toBe(false);
   });
 });

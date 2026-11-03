@@ -1,6 +1,8 @@
 import type { AgentTeamPulse, AgentTeamProject, AgentTeamMember } from "../../types";
 import type { AgentTeamChatItem } from "../../agentTeamChatItems";
 import type { AgentTeamEventConnectionState } from "../../agentTeamEvents";
+import type { WorkflowStopSupport } from "../../api";
+import { workflowStopControl } from "../../agentTeamWorkflowStop";
 import Markdown from "../Markdown";
 
 function avatarColor(seed: string) {
@@ -46,6 +48,7 @@ export default function AgentTeamChatPanel({
   onAbort,
   onStopWorkflow,
   stopSupported,
+  onRetryStopProbe,
   onSendMessage,
 }: {
   selectedTeam: { id: string };
@@ -72,9 +75,12 @@ export default function AgentTeamChatPanel({
   onDeleteTeam: (teamId: string) => void;
   onAbort: () => void;
   onStopWorkflow: () => void;
-  stopSupported: boolean | null;
+  stopSupported: WorkflowStopSupport | null;
+  onRetryStopProbe: () => void;
   onSendMessage: () => void;
 }) {
+  // `unknown` keeps the button usable: the runtime, not the probe, decides.
+  const stopControl = workflowStopControl(stopSupported);
   return (
     <main className="flex min-w-0 flex-1 flex-col bg-[#EDEDED]">
       <header className="flex items-center gap-2 border-b border-gray-200 bg-white px-3 py-2">
@@ -191,20 +197,28 @@ export default function AgentTeamChatPanel({
           data-testid="agent-team-stop-workflow"
           onClick={onStopWorkflow}
           disabled={
-            stopSupported === false ||
+            !stopControl.canStop ||
             busyAction === "abort" ||
             busyAction === `stop:${selectedTeam.id}`
           }
           aria-label="停止工作流"
-          title={
-            stopSupported === false
-              ? "当前 Agent Team Runtime 不支持停止工作流，请升级 Runtime"
-              : "终止受控工作流。团队、会话与已有证据保留；不能从原执行点恢复。"
-          }
+          title={stopControl.hint}
           className="flex h-8 items-center rounded-lg border border-amber-200 px-2 text-xs text-amber-700 hover:bg-amber-50 disabled:opacity-40"
         >
           {busyAction === `stop:${selectedTeam.id}` ? "停止中…" : "停止工作流"}
         </button>
+        {stopControl.canRetryProbe && (
+          <button
+            type="button"
+            data-testid="agent-team-stop-probe-retry"
+            onClick={onRetryStopProbe}
+            aria-label="重新检测停止能力"
+            title="重新检测 Runtime 是否支持停止工作流"
+            className="flex h-8 items-center rounded-lg border border-gray-300 px-2 text-xs text-gray-600 hover:bg-gray-50"
+          >
+            重新检测
+          </button>
+        )}
         <button
           type="button"
           onClick={onAbort}

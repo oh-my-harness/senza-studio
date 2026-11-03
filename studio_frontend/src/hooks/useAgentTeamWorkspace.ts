@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { api, apiErrorMessage } from "../api";
+import { api, apiErrorMessage, type WorkflowStopSupport } from "../api";
 import { createTeamWithWorkspaceConsent } from "../agentTeamWorkspaceGrant";
 import {
   classifyWorkflowStopError,
@@ -71,7 +71,8 @@ export function useAgentTeamWorkspace() {
   const [actionError, setActionError] = useState<string | null>(null);
   const [actionNotice, setActionNotice] = useState<string | null>(null);
   const [busyAction, setBusyAction] = useState<string | null>(null);
-  const [stopSupported, setStopSupported] = useState<boolean | null>(null);
+  const [stopSupported, setStopSupported] =
+    useState<WorkflowStopSupport | null>(null);
   const [newTeamId, setNewTeamId] = useState("");
   const [newTeamName, setNewTeamName] = useState("");
   const [newTeamTemplate, setNewTeamTemplate] = useState("");
@@ -150,15 +151,21 @@ export function useAgentTeamWorkspace() {
     void loadSettings();
   }, [loadTeams, loadSettings]);
 
+  // One probe at mount; nothing polls. A failed probe stays `unknown` so the
+  // operator can re-detect without reloading the page.
+  const retryStopProbe = useCallback(async () => {
+    setStopSupported(await api.probeAgentTeamWorkflowStop());
+  }, []);
+
   useEffect(() => {
     let cancelled = false;
     void api
       .probeAgentTeamWorkflowStop()
-      .then((supported) => {
-        if (!cancelled) setStopSupported(supported);
+      .then((support) => {
+        if (!cancelled) setStopSupported(support);
       })
       .catch(() => {
-        if (!cancelled) setStopSupported(false);
+        if (!cancelled) setStopSupported("unknown");
       });
     return () => {
       cancelled = true;
@@ -365,6 +372,8 @@ export function useAgentTeamWorkspace() {
     try {
       const result = await api.stopAgentTeamWorkflow(teamId);
       outcome = { kind: "stopped", result };
+      // A 200 proves the route exists: drop a stale "probe failed" hint.
+      setStopSupported("supported");
     } catch (error) {
       outcome = classifyWorkflowStopError(error);
     }
@@ -689,6 +698,7 @@ export function useAgentTeamWorkspace() {
     abortActive,
     stopWorkflow,
     stopSupported,
+    retryStopProbe,
     createTeam,
     saveSettings,
     restartTeam,

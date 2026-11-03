@@ -1,7 +1,7 @@
 // Controlled workflow stop: classify runtime responses into operator-facing
 // outcomes. The HTTP response is authoritative; 409/404 are normal states,
 // not transport failures.
-import { apiErrorInfo, type WorkflowStopResult } from "./api";
+import { apiErrorInfo, type WorkflowStopResult, type WorkflowStopSupport } from "./api";
 
 export type WorkflowStopOutcome =
   | { kind: "stopped"; result: WorkflowStopResult }
@@ -11,12 +11,19 @@ export type WorkflowStopOutcome =
   | { kind: "missing" }
   | { kind: "failed"; message: string };
 
+// The runtime's exact conflict reasons. Matching a known reason keeps a
+// genuinely unknown conflict (or an empty body) an error instead of silently
+// reporting "nothing to stop".
+const NO_RUNNING_REASON = "no running controlled workflow to stop";
+const UNCONTROLLED_REASON = "team is not a controlled workflow team";
+
 export function classifyWorkflowStopError(error: unknown): WorkflowStopOutcome {
   const { status, message } = apiErrorInfo(error);
   if (status === 409) {
-    return message.includes("not a controlled workflow")
-      ? { kind: "uncontrolled" }
-      : { kind: "no-running" };
+    const reason = message.toLowerCase();
+    if (reason.includes(NO_RUNNING_REASON)) return { kind: "no-running" };
+    if (reason.includes(UNCONTROLLED_REASON)) return { kind: "uncontrolled" };
+    return { kind: "failed", message: message || "停止工作流失败：HTTP 409" };
   }
   if (status === 404) {
     // An older runtime without the route answers 404 with no runtime error
@@ -26,6 +33,36 @@ export function classifyWorkflowStopError(error: unknown): WorkflowStopOutcome {
       : { kind: "unsupported" };
   }
   return { kind: "failed", message: message || "停止工作流失败" };
+}
+
+/** How the Stop control renders for a probe result; `null` means not probed yet. */
+export interface WorkflowStopControl {
+  canStop: boolean;
+  canRetryProbe: boolean;
+  hint: string;
+}
+
+const STOP_HINT =
+  "终止受控工作流。团队、会话与已有证据保留；不能从原执行点恢复。";
+
+export function workflowStopControl(
+  support: WorkflowStopSupport | null
+): WorkflowStopControl {
+  if (support === "unsupported") {
+    return {
+      canStop: false,
+      canRetryProbe: false,
+      hint: "当前 Agent Team Runtime 不支持停止工作流，请升级 Runtime",
+    };
+  }
+  if (support === "unknown") {
+    return {
+      canStop: true,
+      canRetryProbe: true,
+      hint: "无法确认 Runtime 是否支持停止工作流（探测失败），可重新检测",
+    };
+  }
+  return { canStop: true, canRetryProbe: false, hint: STOP_HINT };
 }
 
 export function workflowStopNotice(outcome: WorkflowStopOutcome): string {
