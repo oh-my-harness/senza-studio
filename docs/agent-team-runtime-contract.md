@@ -1,7 +1,7 @@
 # Agent Team runtime contract for Senza Studio
 
 > Status: draft for issue #1
-> Runtime source: `llm-harness-runtime` `agent-team-studio`
+> Runtime source: `oh-my-harness/agent-team` (`llm-harness-agent-team-studio`)
 > Consumers: Senza Studio desktop/web frontend
 
 ## 1. Boundary
@@ -254,7 +254,47 @@ rejects paths outside granted roots or symlink escapes. Senza Studio must not
 bypass this endpoint with native file APIs when the selected path is intended
 for runtime execution.
 
-### 4.7 Pulse and sessions
+#### Grant status codes and Studio flow
+
+An unauthorized `repo_path` makes `POST /api/team/projects` fail with `403` and
+the exact error `workspace is not authorized; grant it before registering`.
+Only that response triggers a confirmation dialog naming the exact path from
+the form. Studio must not pre-grant, must not grant a parent directory, and
+must grant only after explicit user consent. A successful grant answers `201`
+with `{id, path, label, created_at}`; `path` is the canonical path, so UI text
+may differ from the typed path. A missing directory or an already-granted path
+answers `400 invalid workspace grant: <path>`. After a grant, Studio retries
+create exactly once; if the user cancels, the form and modal stay untouched and
+no selection change or success notice is shown.
+
+### 4.7 Controlled workflow stop
+
+`POST /api/team/workflow/stop?project={id}` asks the workflow owner to stop the
+running controlled workflow. It is not member abort: abort interrupts one
+agent turn and returns `409` for controlled teams.
+
+| Status | Meaning |
+| --- | --- |
+| `200` | `{ok: true, workflow_id, phase: "escalated", terminal_reason}`. Terminal state and the chat terminal message are recorded before in-flight tasks are aborted. |
+| `404` | `unknown project: <id>`; the project no longer exists. |
+| `409` | Exactly two reasons are normal states: `team is not a controlled workflow team`, and `no running controlled workflow to stop` (already completed or raced by natural completion). Any other `409` body, and an empty `409` (shown as `HTTP 409`), is a failure and keeps the runtime's own text. |
+| `405` on `GET` | The runtime implements the route (capability probe): `supported`. |
+| `404` on `GET` | The runtime predates this route: `unsupported`. Only this answer disables the stop control, and the UI says the runtime needs an upgrade. |
+| `5xx`, `401`/`403`, network failure on `GET` | `unknown`. The probe says nothing about the route, so the stop control stays enabled and the operator gets a manual "re-detect" action. Never latch the control off on a proxy or auth hiccup. |
+
+Stop keeps the team, issues, snapshots, chat, and sessions; it aborts in-flight
+member turns and never resumes the stopped workflow. Starting a new workflow is
+the only continuation. A second stop, or a stop racing natural completion,
+returns `409` and must be rendered as "already finished", not as an error and
+not as a second success.
+
+The current packaging pin (`agent-team-runtime.json`) predates this route. The
+capability probe runs once at mount and never polls. Builds using that pin get a
+`404` and therefore show the stop control disabled; an inconclusive probe leaves
+it enabled. Enabling it in packaged builds requires a runtime pin or source
+change, which is a separate packaging decision.
+
+### 4.8 Pulse and sessions
 
 | Method | Path | Purpose |
 | --- | --- | --- |
@@ -343,7 +383,7 @@ and persists `team.json`. Deleting a member stops its runner, unregisters its
 observability state, and removes its spec. The Studio UI treats member specs as
 editable configuration and sends every mutation through these endpoints.
 
-### 4.8 Templates and upgrades
+### 4.9 Templates and upgrades
 
 | Method | Path | Purpose |
 | --- | --- | --- |
@@ -445,11 +485,16 @@ tests for:
 2. unauthenticated upstream requests being rejected;
 3. startup healthy and degraded recovery responses;
 4. team list, create, restart, and delete;
-5. workspace grant add/list/remove and unauthorized path denial;
+5. workspace grant add/list/remove, unauthorized path denial, consent cancel,
+   and the single create retry;
 6. directory browsing and symlink escape denial;
 7. chat enqueue, team broadcast, and member not-found errors;
 8. member list, add, update, and delete;
 9. pulse and session projections;
 10. settings redaction and member API-key redaction;
 11. `team_message` and `agent_thought` event replay/live forwarding;
-12. desktop launch, backend exit, and clean shutdown.
+12. desktop launch, backend exit, and clean shutdown;
+13. controlled workflow stop: capability probe (`200`/`405` supported, `404`
+    unsupported, `5xx`/network unknown), `200` terminal result, the two known
+    `409` states as neutral, unknown/empty `409` as failure, and `404` on a
+    runtime without the route.

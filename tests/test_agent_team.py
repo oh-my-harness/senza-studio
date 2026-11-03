@@ -63,6 +63,37 @@ class RecordingHandler(BaseHTTPRequestHandler):
         if parsed.path == "/api/team/conflict":
             self._send(409, {"ok": False, "error": "team already exists"})
             return
+        if parsed.path == "/api/team/fs/grants":
+            self._send(
+                201,
+                {
+                    "id": "grant-1",
+                    "path": "/tmp/workspace",
+                    "label": None,
+                    "created_at": "2026-10-29T00:00:00Z",
+                },
+            )
+            return
+        if parsed.path == "/api/team/workflow/stop":
+            if parsed.query == "project=finished":
+                self._send(
+                    409,
+                    {
+                        "ok": False,
+                        "error": "no running controlled workflow to stop",
+                    },
+                )
+                return
+            self._send(
+                200,
+                {
+                    "ok": True,
+                    "workflow_id": "issue-1",
+                    "phase": "escalated",
+                    "terminal_reason": "operator requested workflow stop",
+                },
+            )
+            return
 
         self._send(
             200,
@@ -263,6 +294,46 @@ def test_proxy_rejects_runtime_redirect(tmp_path):
             "ok": False,
             "error": "Agent Team runtime redirect rejected",
         }
+    _reset_state()
+
+
+def test_proxy_forwards_workspace_grant(tmp_path):
+    _reset_state()
+    with runtime_server() as server:
+        descriptor = tmp_path / "panel.json"
+        write_descriptor(descriptor, server.server_address[1])
+        with make_client(str(descriptor), tmp_path) as client:
+            response = client.post(
+                "/api/team/fs/grants",
+                json={"path": "/tmp/workspace"},
+            )
+
+        assert response.status_code == 201
+        assert response.json()["id"] == "grant-1"
+        request = server.requests[0]
+        assert request["method"] == "POST"
+        assert request["path"] == "/api/team/fs/grants"
+        assert json.loads(request["body"]) == {"path": "/tmp/workspace"}
+    _reset_state()
+
+
+def test_proxy_forwards_workflow_stop_and_preserves_conflict(tmp_path):
+    _reset_state()
+    with runtime_server() as server:
+        descriptor = tmp_path / "panel.json"
+        write_descriptor(descriptor, server.server_address[1])
+        with make_client(str(descriptor), tmp_path) as client:
+            stopped = client.post("/api/team/workflow/stop?project=active")
+            finished = client.post("/api/team/workflow/stop?project=finished")
+
+        assert stopped.status_code == 200
+        assert stopped.json()["workflow_id"] == "issue-1"
+        assert stopped.json()["phase"] == "escalated"
+        assert server.requests[0]["query"] == "project=active"
+        assert finished.status_code == 409
+        assert finished.json()["error"] == (
+            "no running controlled workflow to stop"
+        )
     _reset_state()
 
 

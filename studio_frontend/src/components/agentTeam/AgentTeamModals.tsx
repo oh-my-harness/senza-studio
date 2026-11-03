@@ -16,6 +16,7 @@ function Modal({
   children,
   wide,
   error,
+  notice,
 }: {
   open: boolean;
   title: string;
@@ -23,6 +24,7 @@ function Modal({
   children: React.ReactNode;
   wide?: boolean;
   error?: string | null;
+  notice?: string | null;
 }) {
   return (
     <div
@@ -50,6 +52,14 @@ function Modal({
               role="alert"
             >
               {error}
+            </div>
+          )}
+          {!error && notice && (
+            <div
+              className="mb-3 rounded-lg border border-emerald-200 bg-emerald-50 px-3 py-2 text-sm text-emerald-700"
+              role="status"
+            >
+              {notice}
             </div>
           )}
           {children}
@@ -86,6 +96,7 @@ function avatarColor(seed: string) {
 export function AgentTeamNewTeamModal({
   open,
   error,
+  notice,
   newTeamId,
   setNewTeamId,
   newTeamName,
@@ -101,6 +112,7 @@ export function AgentTeamNewTeamModal({
 }: {
   open: boolean;
   error: string | null;
+  notice?: string | null;
   newTeamId: string;
   setNewTeamId: (value: string) => void;
   newTeamName: string;
@@ -115,7 +127,7 @@ export function AgentTeamNewTeamModal({
   onClose: () => void;
 }) {
   return (
-    <Modal open={open} error={error} title="新建团队" onClose={onClose}>
+    <Modal open={open} error={error} notice={notice} title="新建团队" onClose={onClose}>
       <div className="space-y-2">
         <input
           value={newTeamId}
@@ -147,7 +159,7 @@ export function AgentTeamNewTeamModal({
         <input
           value={newTeamRepo}
           onChange={(event) => setNewTeamRepo(event.target.value)}
-          placeholder="已授权工作区路径（可选）"
+          placeholder="工作区路径（未授权时创建会请求确认）"
           aria-label="团队工作区路径"
           className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm"
         />
